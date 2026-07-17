@@ -31,6 +31,23 @@ function attachHeartbeatSocket(bridge: CdpBridge, socket: EventEmitter & {
   internals.startHeartbeat()
 }
 
+function attachCommandSocket(bridge: CdpBridge, handler: (message: { id: number, method: string, params?: Record<string, unknown> }) => void) {
+  const socket = Object.assign(new EventEmitter(), {
+    readyState: WebSocket.OPEN,
+    send: vi.fn((raw: string) => handler(JSON.parse(raw))),
+    ping: vi.fn(),
+    terminate: vi.fn(),
+    close: vi.fn(),
+  })
+  const internals = bridge as unknown as {
+    socket: typeof socket
+    status: { connected: boolean, pageTitle?: string, pageUrl?: string }
+  }
+  internals.socket = socket
+  internals.status.connected = true
+  return socket
+}
+
 describe('cdpBridge', () => {
   it('creates with correct initial status', () => {
     const bridge = new CdpBridge({
@@ -134,6 +151,115 @@ describe('cdpBridge', () => {
     })
 
     await expect(bridge.send('Runtime.evaluate', {})).rejects.toThrow('CDP bridge is not connected')
+  })
+
+  it('waits for page load before resolving navigation', async () => {
+    const bridge = new CdpBridge({
+      cdpUrl: 'http://localhost:9222',
+      requestTimeoutMs: 10_000,
+    })
+    const internals = bridge as unknown as {
+      handleMessage: (raw: string) => void
+    }
+    const callOrder: string[] = []
+
+    attachCommandSocket(bridge, (message) => {
+      callOrder.push(message.method)
+      if (message.method === 'Page.navigate') {
+        queueMicrotask(() => {
+          internals.handleMessage(JSON.stringify({
+            id: message.id,
+            result: { frameId: 'frame-1', loaderId: 'loader-1' },
+          }))
+          setTimeout(() => {
+            callOrder.push('Page.loadEventFired')
+            internals.handleMessage(JSON.stringify({
+              method: 'Page.loadEventFired',
+              params: {},
+            }))
+          }, 10)
+        })
+        return
+      }
+
+      if (message.method === 'Runtime.evaluate') {
+        queueMicrotask(() => {
+          internals.handleMessage(JSON.stringify({
+            id: message.id,
+            result: {
+              result: {
+                value: {
+                  url: 'https://example.com/',
+                  title: 'Loaded Example',
+                },
+              },
+            },
+          }))
+        })
+      }
+    })
+
+    await bridge.navigate('https://example.com')
+
+    expect(callOrder).toEqual([
+      'Page.navigate',
+      'Page.loadEventFired',
+      'Runtime.evaluate',
+    ])
+    expect(bridge.getStatus().pageUrl).toBe('https://example.com/')
+    expect(bridge.getStatus().pageTitle).toBe('Loaded Example')
+  })
+
+  it('treats ERR_ABORTED navigation as recoverable when the page is readable', async () => {
+    vi.useFakeTimers()
+    const bridge = new CdpBridge({
+      cdpUrl: 'http://localhost:9222',
+      requestTimeoutMs: 10_000,
+    })
+    const internals = bridge as unknown as {
+      handleMessage: (raw: string) => void
+    }
+    const callOrder: string[] = []
+
+    attachCommandSocket(bridge, (message) => {
+      callOrder.push(message.method)
+      if (message.method === 'Page.navigate') {
+        queueMicrotask(() => {
+          internals.handleMessage(JSON.stringify({
+            id: message.id,
+            result: { frameId: 'frame-1', errorText: 'net::ERR_ABORTED' },
+          }))
+        })
+        return
+      }
+
+      if (message.method === 'Runtime.evaluate') {
+        queueMicrotask(() => {
+          internals.handleMessage(JSON.stringify({
+            id: message.id,
+            result: {
+              result: {
+                value: {
+                  url: 'https://example.com/recovered',
+                  title: 'Recovered Page',
+                },
+              },
+            },
+          }))
+        })
+      }
+    })
+
+    const navigatePromise = bridge.navigate('https://example.com')
+    await vi.advanceTimersByTimeAsync(500)
+    await navigatePromise
+
+    expect(callOrder).toEqual([
+      'Page.navigate',
+      'Runtime.evaluate',
+    ])
+    expect(bridge.getStatus().pageUrl).toBe('https://example.com/recovered')
+    expect(bridge.getStatus().pageTitle).toBe('Recovered Page')
   })
 
   it('close is safe to call when not connected', async () => {

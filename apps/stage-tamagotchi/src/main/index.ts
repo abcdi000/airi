@@ -45,6 +45,8 @@ import { setupChatWindowReusableFunc } from './windows/chat'
 import { isDesktopOverlayEnabled, setupDesktopOverlayWindow } from './windows/desktop-overlay'
 import { setupDevtoolsWindow } from './windows/devtools'
 import { setupMainWindow } from './windows/main'
+import { setupMinecraftMcpMonitorWindowReusableFunc } from './windows/minecraft-mcp-monitor'
+import { setupMiniChatWindowReusableFunc } from './windows/mini-chat'
 import { setupNoticeWindowManager } from './windows/notice'
 import { setupOnboardingWindowManager } from './windows/onboarding'
 import { setupSettingsWindowReusableFunc } from './windows/settings'
@@ -203,13 +205,23 @@ app.whenReady().then(async () => {
     build: ({ dependsOn }) => setupChatWindowReusableFunc(dependsOn),
   })
 
+  const miniChatWindow = injeca.provide('windows:mini-chat', {
+    dependsOn: { widgetsManager, serverChannel, mcpStdioManager, i18n },
+    build: ({ dependsOn }) => setupMiniChatWindowReusableFunc(dependsOn),
+  })
+
+  const minecraftMcpMonitorWindow = injeca.provide('windows:minecraft-mcp-monitor', {
+    dependsOn: { serverChannel, mcpStdioManager, i18n },
+    build: ({ dependsOn }) => setupMinecraftMcpMonitorWindowReusableFunc(dependsOn),
+  })
+
   const settingsWindow = injeca.provide('windows:settings', {
-    dependsOn: { widgetsManager, beatSync, autoUpdater, devtoolsWindow: devtoolsMarkdownStressWindow, serverChannel, godotStageManager, mcpStdioManager, i18n, windowAuthManager, globalShortcut },
+    dependsOn: { widgetsManager, miniChatWindow, beatSync, autoUpdater, devtoolsWindow: devtoolsMarkdownStressWindow, serverChannel, godotStageManager, mcpStdioManager, i18n, windowAuthManager, globalShortcut },
     build: async ({ dependsOn }) => setupSettingsWindowReusableFunc(dependsOn),
   })
 
   const mainWindow = injeca.provide('windows:main', {
-    dependsOn: { settingsWindow, chatWindow, widgetsManager, noticeWindow, beatSync, autoUpdater, serverChannel, godotStageManager, mcpStdioManager, i18n, onboardingWindowManager, windowAuthManager },
+    dependsOn: { settingsWindow, chatWindow, miniChatWindow, minecraftMcpMonitorWindow, widgetsManager, noticeWindow, beatSync, autoUpdater, serverChannel, godotStageManager, mcpStdioManager, i18n, onboardingWindowManager, windowAuthManager },
     build: async ({ dependsOn }) => setupMainWindow({
       ...dependsOn,
       onWindowCreated: (window) => {

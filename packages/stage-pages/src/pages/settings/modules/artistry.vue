@@ -70,7 +70,18 @@ const availableProviders = computed(() => [
             :title="provider.name"
             :description="provider.description"
             @click="router.push(provider.configRoute)"
-          />
+          >
+            <template v-if="provider.id !== 'none'" #topRight>
+              <button
+                type="button"
+                title="Edit configuration"
+                class="rounded bg-neutral-100 p-1 text-neutral-600 transition-colors dark:bg-neutral-800/60 hover:bg-neutral-200 dark:text-neutral-300 dark:hover:bg-neutral-700/60"
+                @click.stop.prevent="router.push(provider.configRoute)"
+              >
+                <div i-solar:settings-bold-duotone class="text-base" />
+              </button>
+            </template>
+          </RadioCardSimple>
         </fieldset>
       </div>
     </div>

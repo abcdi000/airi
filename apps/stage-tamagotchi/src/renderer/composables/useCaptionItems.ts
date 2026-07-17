@@ -1,8 +1,8 @@
 import { readonly, shallowRef } from 'vue'
 
 export type CaptionChannelEvent
-  = | { type: 'caption-speaker', text: string }
-    | { type: 'caption-assistant', text: string }
+  = | { type: 'caption-speaker', text: string, replace?: boolean }
+    | { type: 'caption-assistant', text: string, replace?: boolean }
 
 export interface CaptionItem {
   /** Stable render key and timer owner for one broadcast caption event. */
@@ -73,6 +73,9 @@ export function useCaptionItems(options: UseCaptionItemsOptions = {}) {
       clearType(event.type)
       return
     }
+
+    if (event.replace)
+      clearType(event.type)
 
     const item: CaptionItem = {
       id: nextId++,

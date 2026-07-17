@@ -9,7 +9,7 @@ import { captionGetIsFollowingWindow, captionIsFollowingWindowChanged } from '..
 import { useCaptionItems } from '../composables/useCaptionItems'
 
 /** Keep stale captions from lingering after the last broadcast update. */
-const CAPTION_TEXT_EXPIRY_MS = 10_000
+const CAPTION_TEXT_EXPIRY_MS = 30_000
 
 const attached = ref(true)
 
@@ -21,7 +21,7 @@ const { isNearAnyBorder: isAroundWindowBorder } = useElectronMouseAroundWindowBo
 const isAroundWindowBorderFor250Ms = refDebounced(isAroundWindowBorder, 250)
 
 // Broadcast channel for captions
-type CaptionChannelEvent = | { type: 'caption-speaker', text: string } | { type: 'caption-assistant', text: string }
+type CaptionChannelEvent = | { type: 'caption-speaker', text: string, replace?: boolean } | { type: 'caption-assistant', text: string, replace?: boolean }
 const { data } = useBroadcastChannel<CaptionChannelEvent, CaptionChannelEvent>({ name: 'airi-caption-overlay' })
 const { items: captionItems, add: addCaptionItem, dispose: disposeCaptionItems } = useCaptionItems({ ttlMs: CAPTION_TEXT_EXPIRY_MS })
 

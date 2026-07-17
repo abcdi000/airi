@@ -68,6 +68,19 @@ describe('resolveComputerUseConfig', () => {
     expect(config.binaries.pbpaste).toBe('pbpaste')
   })
 
+  it('parses the Windows local executor and keeps its actions locally auditable', () => {
+    process.env.COMPUTER_USE_EXECUTOR = 'windows-local'
+
+    const config = resolveComputerUseConfig()
+
+    expect(config.executor).toBe('windows-local')
+    expect(config.openableApps).toContain('Windows Terminal')
+    expect(config.openableApps).toContain('QQ')
+    expect(config.permissionChainHint).toContain('Windows UI Automation + SendInput')
+    expect(config.requireAllowedBoundsForMutatingActions).toBe(false)
+    expect(config.requireCoordinateAlignmentForMutatingActions).toBe(false)
+  })
+
   it('enables the browser dom bridge by default and respects overrides', () => {
     process.env.COMPUTER_USE_BROWSER_DOM_BRIDGE_PORT = '8876'
     process.env.COMPUTER_USE_BROWSER_DOM_BRIDGE_TIMEOUT_MS = '4500'

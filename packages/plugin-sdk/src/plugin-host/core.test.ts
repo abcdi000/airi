@@ -1,6 +1,7 @@
 import type { ModulePermissionDeclaration } from './shared/types'
 
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { createContext, defineEventa, defineInvoke, defineInvokeHandler } from '@moeru/eventa'
 import {
@@ -15,7 +16,7 @@ import {
 } from '@proj-airi/plugin-protocol/types'
 import { describe, expect, it, vi } from 'vitest'
 
-import { FileSystemLoader, PluginHost } from '.'
+import { FileSystemLoader, PluginHost, toFileSystemImportSpecifier } from '.'
 import { createApis } from '../plugin/apis/client'
 import { protocolCapabilityWait, protocolProviders } from '../plugin/apis/protocol'
 
@@ -108,6 +109,7 @@ describe('for FileSystemPluginHost', () => {
 
   it('should resolve entrypoint by runtime then default then electron', () => {
     const host = new FileSystemLoader()
+    const pluginRoot = join('/tmp', 'plugin')
     const baseManifest = {
       apiVersion: 'v1' as const,
       kind: 'manifest.plugin.airi.moeru.ai' as const,
@@ -138,19 +140,19 @@ describe('for FileSystemPluginHost', () => {
     }
 
     expect(host.resolveEntrypointFor(runtimeEntryManifest, {
-      cwd: '/tmp/plugin',
+      cwd: pluginRoot,
       runtime: 'node',
-    })).toBe('/tmp/plugin/node-entry.ts')
+    })).toBe(join(pluginRoot, 'node-entry.ts'))
 
     expect(host.resolveEntrypointFor(defaultFallbackManifest, {
-      cwd: '/tmp/plugin',
+      cwd: pluginRoot,
       runtime: 'node',
-    })).toBe('/tmp/plugin/default-entry.ts')
+    })).toBe(join(pluginRoot, 'default-entry.ts'))
 
     expect(host.resolveEntrypointFor(electronFallbackManifest, {
-      cwd: '/tmp/plugin',
+      cwd: pluginRoot,
       runtime: 'node',
-    })).toBe('/tmp/plugin/electron-entry.ts')
+    })).toBe(join(pluginRoot, 'electron-entry.ts'))
   })
 
   it('should preserve absolute runtime entrypoints', () => {
@@ -168,6 +170,13 @@ describe('for FileSystemPluginHost', () => {
       cwd: '/tmp/plugin',
       runtime: 'node',
     })).toBe('/opt/plugins/entry.ts')
+  })
+
+  it('should convert Windows absolute paths to file URLs for ESM import', () => {
+    const windowsEntrypoint = 'D:\\pyProject\\AIRI\\airi\\external-plugins\\lumi-diary\\index.mjs?cacheBust=2026-06-05'
+    const expected = `${pathToFileURL('D:\\pyProject\\AIRI\\airi\\external-plugins\\lumi-diary\\index.mjs').href}?cacheBust=2026-06-05`
+
+    expect(toFileSystemImportSpecifier(windowsEntrypoint)).toBe(expected)
   })
 
   it('should throw deterministic error when no runtime entrypoint exists', () => {

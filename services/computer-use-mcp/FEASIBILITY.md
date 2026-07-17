@@ -1,6 +1,6 @@
 # Feasibility Summary
 
-This document records the validated state of the AIRI-specific macOS desktop orchestration v1 in `services/computer-use-mcp`.
+This document records the validated state of the AIRI-specific desktop orchestration v1 in `services/computer-use-mcp`. The original macOS proof remains valid; Windows now adds a local UI Automation + SendInput executor through the same MCP, audit, and approval contract.
 
 ## Bottom Line
 
@@ -81,7 +81,7 @@ Main v1 story:
 Explicit non-goals of this pass:
 
 - PTY/TUI terminal automation
-- deep accessibility tree grounding
+- cross-platform accessibility parity for every native control type
 - strict app-level UI sandboxing
 - remote sandbox hosting for other users
 - Windows / Wayland / multi-monitor support
@@ -97,7 +97,7 @@ Explicit non-goals of this pass:
 
 The feature is now credible as:
 
-- a macOS desktop orchestration layer for AIRI
+- a desktop orchestration layer for AIRI
 - a way to connect chat, MCP, terminal execution, and UI observation into one task flow
 - a safer incremental path than trying to solve generic pure-vision computer use first
 

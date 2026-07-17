@@ -237,6 +237,22 @@ export function buildCoordinateSpaceInfo(params: {
   const { allowedBounds } = params.config
 
   if (!allowedBounds) {
+    const displayBounds = params.displayInfo?.combinedBounds
+    const screenshot = params.lastScreenshot
+    if (params.config.executor === 'windows-local'
+      && params.displayInfo?.available
+      && displayBounds
+      && screenshot?.width === displayBounds.width
+      && screenshot.height === displayBounds.height) {
+      return {
+        readyForMutations: true,
+        aligned: true,
+        reason: 'screenshot dimensions match the local Windows virtual display',
+        allowedBounds: displayBounds,
+        lastScreenshot: screenshot,
+      }
+    }
+
     return {
       readyForMutations: false,
       reason: 'allowed bounds are not configured',

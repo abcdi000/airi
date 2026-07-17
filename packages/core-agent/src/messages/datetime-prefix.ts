@@ -3,7 +3,7 @@ function padDatePart(value: number): string {
 }
 
 /**
- * Formats a timestamp as `[YYYY-MM-DD HH:MM] ` in the user's local timezone.
+ * Formats a timestamp as `[本地时间 YYYY-MM-DD HH:MM:SS]\n` in the user's local timezone.
  *
  * Use when:
  * - Annotating user messages so the model has a concrete time anchor on
@@ -14,13 +14,13 @@ function padDatePart(value: number): string {
  *   prefix into its own output.
  *
  * Returns:
- * - String including a trailing space, e.g. `"[2026-04-25 18:47] "`.
+ * - String including a trailing newline, e.g. `"[本地时间 2026-04-25 18:47:12]\n"`.
  *
  * Before:
  * - createdAt = 1745570820000  (a Unix ms in Asia/Shanghai)
  *
  * After:
- * - "[2026-04-25 18:47] "
+ * - "[本地时间 2026-04-25 18:47:00]\n"
  */
 export function formatTimePrefix(createdAt: number): string {
   const date = new Date(createdAt)
@@ -29,6 +29,7 @@ export function formatTimePrefix(createdAt: number): string {
   const day = padDatePart(date.getDate())
   const hour = padDatePart(date.getHours())
   const minute = padDatePart(date.getMinutes())
+  const second = padDatePart(date.getSeconds())
 
-  return `[${year}-${month}-${day} ${hour}:${minute}] `
+  return `[本地时间 ${year}-${month}-${day} ${hour}:${minute}:${second}]\n`
 }

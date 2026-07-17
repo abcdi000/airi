@@ -1,6 +1,7 @@
 export interface AudioManagerType {
   audioContext: AudioContext
   analyser: AnalyserNode
+  gainNode: GainNode
   dataBuffer: Float32Array<ArrayBuffer>
   frameId: number | null
   onVolumeChange?: (volume: number) => void
@@ -9,14 +10,17 @@ export interface AudioManagerType {
 export function createAudioManager(): AudioManagerType {
   const audioContext = new AudioContext()
   const analyser = audioContext.createAnalyser()
+  const gainNode = audioContext.createGain()
   const dataBuffer = new Float32Array(2048)
 
-  // Connect analyser to destination
-  analyser.connect(audioContext.destination)
+  // Connect analyser through an output gain node so callers can control local playback volume.
+  analyser.connect(gainNode)
+  gainNode.connect(audioContext.destination)
 
   return {
     audioContext,
     analyser,
+    gainNode,
     dataBuffer,
     frameId: null,
     onVolumeChange: undefined,
@@ -44,8 +48,26 @@ function updateFrame(manager: AudioManagerType) {
   manager.frameId = requestAnimationFrame(() => updateFrame(manager))
 }
 
-export async function playAudio(manager: AudioManagerType, source: ArrayBuffer | string): Promise<void> {
+function clampPlaybackVolume(value: unknown) {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(parsed))
+    return 1
+  return Math.min(1.5, Math.max(0, parsed))
+}
+
+export function setAudioPlaybackVolume(manager: AudioManagerType, volume: number) {
+  const normalized = clampPlaybackVolume(volume)
   try {
+    manager.gainNode.gain.setTargetAtTime(normalized, manager.audioContext.currentTime, 0.02)
+  }
+  catch {
+    manager.gainNode.gain.value = normalized
+  }
+}
+
+export async function playAudio(manager: AudioManagerType, source: ArrayBuffer | string, volume = 1): Promise<void> {
+  try {
+    setAudioPlaybackVolume(manager, volume)
     const buffer = typeof source === 'string'
       ? await (await fetch(source)).arrayBuffer()
       : source

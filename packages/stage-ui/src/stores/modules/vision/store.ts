@@ -18,7 +18,8 @@ export const useVisionStore = defineStore('vision', () => {
     if (!activeProvider.value)
       return null
 
-    return providersStore.providerMetadata[activeProvider.value] ?? null
+    const metadata = providersStore.providerMetadata[activeProvider.value] ?? null
+    return metadata && ['vision', 'chat'].includes(metadata.category) ? metadata : null
   })
 
   const supportsModelListing = computed(() => {
@@ -29,25 +30,25 @@ export const useVisionStore = defineStore('vision', () => {
     if (!activeProvider.value)
       return []
 
-    return providersStore.getModelsForProvider(activeProvider.value)
+    return providersStore.getVisionModelsForProvider(activeProvider.value)
   })
 
   const isLoadingActiveProviderModels = computed(() => {
     if (!activeProvider.value)
       return false
 
-    return providersStore.isLoadingModels[activeProvider.value] || false
+    return providersStore.isLoadingVisionModels[activeProvider.value] || false
   })
 
   const activeProviderModelError = computed(() => {
     if (!activeProvider.value)
       return null
 
-    return providersStore.modelLoadError[activeProvider.value] || null
+    return providersStore.visionModelLoadError[activeProvider.value] || null
   })
 
   const configured = computed(() => {
-    return !!activeProvider.value && !!activeModel.value
+    return !!activeProvider.value && !!activeModel.value && !!providerMetadata.value
   })
 
   function resetModelSelection() {
@@ -57,14 +58,16 @@ export const useVisionStore = defineStore('vision', () => {
   }
 
   async function loadModelsForProvider(provider: string) {
-    if (provider && providerMetadata.value?.capabilities.listModels !== undefined) {
-      await providersStore.fetchModelsForProvider(provider)
+    const metadata = providersStore.providerMetadata[provider]
+    if (provider && metadata && ['vision', 'chat'].includes(metadata.category) && metadata.capabilities.listModels !== undefined) {
+      await providersStore.fetchVisionModelsForProvider(provider)
     }
   }
 
   async function getModelsForProvider(provider: string) {
-    if (provider && providerMetadata.value?.capabilities.listModels !== undefined) {
-      return providersStore.getModelsForProvider(provider)
+    const metadata = providersStore.providerMetadata[provider]
+    if (provider && metadata && ['vision', 'chat'].includes(metadata.category) && metadata.capabilities.listModels !== undefined) {
+      return providersStore.getVisionModelsForProvider(provider)
     }
 
     return []

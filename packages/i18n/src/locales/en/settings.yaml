@@ -472,6 +472,9 @@ pages:
           description: Configure 3D VRM models and settings
         scene: Scene
   modules:
+    actions:
+      title: Actions
+      description: Claude Code task delegation, sandbox execution, and external artifact generation
     beat_sync:
       description: Vibe with beats from the audio source
       title: Beat Sync
@@ -781,6 +784,10 @@ pages:
         title: New
         description: "Fill in a new server, then click \"Save and restart\" — it'll move into \"Configured\" above."
         pending-badge: Unsaved
+        presets-title: Quick presets
+        minecraft-preset-description: Add a persistent Minecraft MCP. Open your Minecraft Java world to LAN first; the preset connects to localhost:25565 and AIRI starts it on first use, then keeps it alive until AIRI exits.
+        computer-use-preset-title: Windows Computer Use preset
+        computer-use-preset-description: Add Lumi's local Windows control MCP. Existing Playwright MCP remains the browser route; native window actions observe first and ask for confirmation before execution.
       status:
         unknown: not loaded
       actions:
@@ -788,7 +795,10 @@ pages:
         apply-and-restart: Save and restart
         restart: Restart MCP
         add-server: Add server
+        add-minecraft-preset: Add Minecraft MCP preset
+        add-computer-use-preset: Add Windows Computer Use preset
         add-env: Add var
+        add-header: Add header
         remove: Remove
         test: Test
         edit-json: Edit JSON
@@ -806,8 +816,12 @@ pages:
           placeholder: e.g. filesystem
         command:
           label: Command
-          description: Executable spawned over stdio.
+          description: Executable spawned over stdio. Fill either command or URL.
           placeholder: e.g. npx
+        url:
+          label: URL
+          description: Streamable HTTP MCP endpoint, such as the /mcp URL from the newer Playwright MCP server.
+          placeholder: e.g. http://localhost:8931/mcp
         args:
           label: Arguments
           description: One per line, in order.
@@ -816,10 +830,39 @@ pages:
           label: Working directory
           description: Optional directory used as the process working directory.
           placeholder: e.g. /Users/you/project
+        computer-use-interrupt-shortcut:
+          label: Computer Use stop shortcut
+          description: "Global key that immediately stops the active Computer Use session. Default: End."
+        startup-mode:
+          label: Startup mode
+          description: Choose when AIRI should start and keep this MCP server alive.
+          options:
+            on-startup: Start with AIRI
+            on-first-use: Start when tools are first used
+            manual: Manual only
+        long-running:
+          label: Long-running service
+          description: Gives games and automation tools longer request timeouts without limiting the MCP process lifetime.
+        persistent:
+          label: Persistent session
+          description: Marks this MCP as an external stateful world, login, or task session that AIRI should reuse until exit.
+        request-timeout:
+          label: Request timeout (ms)
+          description: Leave empty for the default. Long-running services default to 60000.
+          placeholder: "60000"
+        max-total-timeout:
+          label: Total wait limit (ms)
+          description: Leave empty for the default. Long-running services default to 180000.
+          placeholder: "180000"
         env:
           label: Environment
           description: Vars passed to the child process.
           key-placeholder: KEY
+          value-placeholder: value
+        headers:
+          label: Headers
+          description: Headers sent to HTTP MCP servers. Usually only needed for authenticated endpoints.
+          key-placeholder: Name
           value-placeholder: value
         enabled:
           label: Enabled
@@ -829,7 +872,7 @@ pages:
         placeholder: Paste mcp.json here…
       test:
         title: Test connection
-        description: We'll spawn the server briefly to check the command works and see what tools it exposes.
+        description: We'll connect briefly to check the MCP server works and see what tools it exposes.
         pick-server-label: Server
         no-servers: Nothing to test yet
         no-server-selected: Pick a server first.
@@ -842,12 +885,14 @@ pages:
       errors:
         empty-identifier: Server # {index} is missing an identifier.
         duplicate-identifier: Identifier "{name}" is used more than once — names need to be unique.
-        empty-command: '"{name}" is missing a command.'
+        empty-command: '"{name}" is missing a command or URL.'
         invalid-shape: That doesn't look like a valid mcp.json — the root needs an "mcpServers" field.
       messages:
         opened: Opened {path} in your file manager
         json-applied: JSON applied to the form. Click "Save and restart" to persist it to disk.
         restarted: All restarted! {started} started, {failed} failed, {skipped} skipped.
+        minecraft-preset-added: Minecraft MCP preset added. After saving and restarting, AIRI will start it automatically when the tool is first used.
+        computer-use-preset-added: Windows Computer Use MCP preset added. After saving and restarting, Lumi will use it through the existing MCP pipeline.
   flux:
     title: Flux
     buy: Charge
@@ -1045,6 +1090,15 @@ pages:
       alibaba-cloud-model-studio:
         description: bailian.console.aliyun.com
         title: Alibaba Cloud Model Studio
+      alibaba-cloud-model-studio-vision:
+        description: Qwen vision models via DashScope OpenAI-compatible API
+        title: Alibaba Bailian Vision
+      alibaba-cloud-model-studio-transcription:
+        description: DashScope realtime speech recognition via WebSocket
+        title: Alibaba Bailian Hearing
+      openai-compatible-vision:
+        description: OpenAI-compatible multimodal APIs, filtered to vision-capable models
+        title: OpenAI Compatible Vision
       amazon-bedrock:
         title: Amazon Bedrock
         description: aws.amazon.com/bedrock

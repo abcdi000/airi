@@ -547,7 +547,21 @@ onUnmounted(() => {
                 :title="metadata.localizedName || 'Unknown'"
                 :description="metadata.localizedDescription"
                 @click="trackProviderClick(metadata.id, 'hearing')"
-              />
+              >
+                <template #topRight>
+                  <div class="flex items-center gap-1">
+                    <RouterLink
+                      :to="`/settings/providers/transcription/${metadata.id}`"
+                      title="Edit configuration"
+                      type="button"
+                      class="rounded bg-neutral-100 p-1 text-neutral-600 transition-colors dark:bg-neutral-800/60 hover:bg-neutral-200 dark:text-neutral-300 dark:hover:bg-neutral-700/60"
+                      @click.stop
+                    >
+                      <div i-solar:settings-bold-duotone class="text-base" />
+                    </RouterLink>
+                  </div>
+                </template>
+              </RadioCardSimple>
               <RouterLink
                 to="/settings/providers#transcription"
                 border="2px solid"

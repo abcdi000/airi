@@ -16,6 +16,8 @@ import { categorizeResponse, createStreamingCategorizer } from './response-categ
 
 const STREAMING_UI_FLUSH_CHUNK_SIZE = 24
 
+type Awaitable<T> = T | Promise<T>
+
 function prependTextToContent<T extends { content?: unknown }>(msg: T, text: string): T {
   const content = msg.content
   if (content === undefined)
@@ -35,6 +37,59 @@ function prependTextToContent<T extends { content?: unknown }>(msg: T, text: str
   return msg
 }
 
+function appendTextToContent<T extends { content?: unknown }>(msg: T, text: string): T {
+  const content = msg.content
+  if (content === undefined)
+    return { ...msg, content: text }
+  if (typeof content === 'string')
+    return { ...msg, content: `${content}${text}` }
+
+  if (Array.isArray(content))
+    return { ...msg, content: [...content, { type: 'text', text }] }
+
+  return msg
+}
+
+function flattenContentPartsForTextOnlyProvider<T extends { content?: unknown }>(msg: T): T {
+  const content = msg.content
+  if (!Array.isArray(content))
+    return msg
+
+  const text = content
+    .map(part => (part && typeof part === 'object' && 'type' in part && part.type === 'text' && 'text' in part) ? String(part.text ?? '') : '')
+    .join('')
+
+  return { ...msg, content: text }
+}
+
+function replaceAssistantSpeech(message: StreamingAssistantMessage, speech: string) {
+  const toolProgress = message.slices
+    .filter((slice): slice is Extract<ChatSlices, { type: 'text' }> => slice.type === 'text' && slice.source === 'tool-progress')
+    .map(slice => slice.text)
+    .filter(Boolean)
+  message.content = [...toolProgress, speech].filter(Boolean).join('\n')
+
+  const firstTextIndex = message.slices.findIndex(slice => slice.type === 'text' && slice.source !== 'tool-progress')
+  if (firstTextIndex < 0) {
+    if (speech)
+      message.slices.push({ type: 'text', text: speech })
+    return
+  }
+
+  let textWritten = false
+  message.slices = message.slices
+    .map((slice) => {
+      if (slice.type !== 'text' || slice.source === 'tool-progress')
+        return slice
+      if (!textWritten) {
+        textWritten = true
+        return { ...slice, text: speech }
+      }
+      return { ...slice, text: '' }
+    })
+    .filter(slice => slice.type !== 'text' || slice.text.length > 0)
+}
+
 function cloneStreamingMessage(message: StreamingAssistantMessage): StreamingAssistantMessage {
   try {
     return structuredClone(message)
@@ -42,6 +97,50 @@ function cloneStreamingMessage(message: StreamingAssistantMessage): StreamingAss
   catch {
     return JSON.parse(JSON.stringify(message)) as StreamingAssistantMessage
   }
+}
+
+function getAssistantMessageText(message: StreamingAssistantMessage): string {
+  if (typeof message.content === 'string')
+    return message.content
+
+  return message.slices
+    .filter(slice => slice.type === 'text')
+    .map(slice => slice.text)
+    .join('')
+}
+
+function readProviderNumber(config: Record<string, unknown> | undefined, key: string, fallback = 0) {
+  const value = config?.[key]
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function limitProviderHistoryMessages(messages: ChatHistoryItem[], providerConfig?: Record<string, unknown>) {
+  const maxContextMessages = Math.round(readProviderNumber(providerConfig, 'maxContextMessages', 0))
+  if (maxContextMessages <= 0 || messages.length <= maxContextMessages)
+    return messages
+
+  const systemPrefix: ChatHistoryItem[] = []
+  const rest = messages.slice()
+  while (rest[0]?.role === 'system')
+    systemPrefix.push(rest.shift()!)
+
+  return [
+    ...systemPrefix,
+    ...rest.slice(-maxContextMessages),
+  ]
+}
+
+function resolveProviderMaxStreamSteps(providerConfig?: Record<string, unknown>) {
+  const maxToolSteps = Math.round(readProviderNumber(providerConfig, 'maxToolSteps', 0))
+  if (maxToolSteps > 0)
+    return maxToolSteps
+
+  const maxStreamSteps = Math.round(readProviderNumber(providerConfig, 'maxStreamSteps', 0))
+  if (maxStreamSteps > 0)
+    return maxStreamSteps
+
+  return undefined
 }
 
 /**
@@ -54,12 +153,32 @@ export interface ChatOrchestratorSendOptions {
   chatProvider: ChatProvider
   /** Provider-specific request options, currently used for headers. */
   providerConfig?: Record<string, unknown>
+  /** Optional per-send history boundary applied before provider message projection. */
+  providerHistoryTransform?: (messages: ChatHistoryItem[]) => ChatHistoryItem[]
   /** Image attachments appended to the user message content parts. */
   attachments?: { type: 'image', data: string, mimeType: string }[]
+  /** Extra text appended to the provider-facing user message without changing chat history. */
+  providerUserContext?: string
+  /** Whether image attachments should be sent to the chat provider. Defaults to true. */
+  sendAttachmentsToProvider?: boolean
+  /** Optional final provider-message projection hook. Does not mutate persisted chat history. */
+  providerMessageTransform?: (messages: Message[]) => Message[]
+  /** Optional final assistant speech cleanup hook. Does not affect provider reasoning content. */
+  assistantSpeechTransform?: (speech: string) => string
+  /** Optional final assistant message projection hook. Can split or rewrite the persisted message. */
+  assistantMessageTransform?: (message: StreamingAssistantMessage, messageText: string) => StreamingAssistantMessage[]
+  /** Converts confirmed tool outcomes into visible in-message progress text. */
+  toolResultTextTransform?: (params: { toolName: string, result: unknown, isError: boolean }) => string | undefined
   /** Tool definitions passed through to the LLM stream port. */
   tools?: StreamOptions['tools']
   /** Original transport input metadata used by bridge/devtools observers. */
   input?: ChatStreamEventContext['input']
+  /** Uses the text as provider-facing input without persisting a visible user bubble. */
+  hiddenUserMessage?: boolean
+  /** Final assistant texts that should be treated as intentional silence and not appended. */
+  suppressAssistantTexts?: string[]
+  /** Called when the final assistant text matches an intentional-silence marker. */
+  onAssistantSuppressed?: (text: string) => void
 }
 
 interface QueuedSend {
@@ -175,7 +294,7 @@ export interface ChatOrchestratorRuntimeDeps {
   /** Returns optional prompt text appended to the provider system message for this send. */
   getSystemPromptSupplement?: () => string | undefined
   /** Runtime context providers ingested immediately before prompt composition. */
-  runtimeContextProviders?: Array<() => ContextMessage | null | undefined>
+  runtimeContextProviders?: Array<(event: { messageText: string, sessionId: string }) => Awaitable<ContextMessage | null | undefined>>
   /** Clock used for persisted message timestamps. @default Date.now */
   now?: () => number
   /** Monotonic clock used for elapsed telemetry in milliseconds. @default performance.now */
@@ -235,13 +354,18 @@ export interface ChatOrchestratorRuntimeDeps {
   }) => void
   /** Called after user turn persistence, before provider prompt composition. */
   onUserTurnReady?: (event: {
+    sessionId: string
     messageText: string
     sessionMessages: ChatHistoryItem[]
-  }) => void
+    hasAttachments: boolean
+  }) => Awaitable<void>
   /** Called after assistant streaming and hook finalization. */
   onAssistantTurnReady?: (event: {
+    sessionId: string
     messageText: string
     sessionMessages: ChatHistoryItem[]
+    hasAttachments: boolean
+    hiddenUserMessage?: boolean
   }) => void
 }
 
@@ -267,6 +391,14 @@ export interface ChatOrchestratorRuntime {
 
 function defaultCreateId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
+function shouldSuppressAssistantText(text: string, suppressedTexts?: string[]) {
+  if (!suppressedTexts?.length)
+    return false
+
+  const normalized = text.trim().toLowerCase()
+  return suppressedTexts.some(item => normalized === item.trim().toLowerCase())
 }
 
 /**
@@ -321,9 +453,9 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       deps.foregroundStream.reset()
   }
 
-  function ingestRuntimeContexts() {
+  async function ingestRuntimeContexts(event: { messageText: string, sessionId: string }) {
     for (const provider of deps.runtimeContextProviders ?? []) {
-      const contextMessage = provider()
+      const contextMessage = await provider(event)
       if (contextMessage)
         deps.context.ingest(contextMessage)
     }
@@ -360,12 +492,6 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
 
     deps.session.ensureSession(sessionId)
 
-    // Datetime is no longer injected through the side-channel context store.
-    // It is applied at message-assembly time (see below) as a system-prompt
-    // date anchor + per-message [HH:MM] prefixes, which is more KV-cache
-    // friendly and less prone to weak models echoing timestamps verbatim.
-    ingestRuntimeContexts()
-
     const sendingCreatedAt = now()
 
     // TODO: Expire or prune stale runtime contexts from disconnected services before composing.
@@ -375,15 +501,6 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       composedMessage: [],
       input: options.input,
     }
-    deps.onLifecycle?.({
-      phase: 'before-compose',
-      channel: 'chat',
-      sessionId,
-      textPreview: sendingMessage,
-      details: {
-        contexts: streamingMessageContext.contexts,
-      },
-    })
 
     const isStaleGeneration = () => deps.session.getSessionGeneration(sessionId) !== generation
     const shouldAbort = () => isStaleGeneration()
@@ -409,8 +526,6 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
     const roundStartedAt = monotonicNow()
 
     try {
-      await hooks.emitBeforeMessageComposedHooks(sendingMessage, streamingMessageContext)
-
       const contentParts: CommonContentPart[] = [{ type: 'text', text: sendingMessage }]
 
       if (options.attachments) {
@@ -446,24 +561,96 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         createdAt: sendingCreatedAt,
         id: userMessageId,
       }
-      deps.session.appendSessionMessage(sessionId, userMessage)
+      if (!options.hiddenUserMessage)
+        deps.session.appendSessionMessage(sessionId, userMessage)
 
       // Cloud sync v1: only the raw text part round-trips; image attachments
       // and other non-text parts stay local.
-      deps.onUserMessageAppended?.({
-        sessionId,
-        message: userMessage,
-        messageText: sendingMessage,
-      })
+      if (!options.hiddenUserMessage) {
+        deps.onUserMessageAppended?.({
+          sessionId,
+          message: userMessage,
+          messageText: sendingMessage,
+        })
+      }
 
-      const sessionMessagesForSend = deps.session.getSessionMessages(sessionId)
-      deps.onUserTurnReady?.({
-        messageText: sendingMessage,
-        sessionMessages: sessionMessagesForSend,
+      const sessionMessagesForSend = options.hiddenUserMessage
+        ? [...deps.session.getSessionMessages(sessionId), userMessage]
+        : deps.session.getSessionMessages(sessionId)
+      if (!options.hiddenUserMessage) {
+        await deps.onUserTurnReady?.({
+          sessionId,
+          messageText: sendingMessage,
+          sessionMessages: sessionMessagesForSend,
+          hasAttachments: !!options.attachments?.length,
+        })
+      }
+
+      // Datetime is no longer injected through the side-channel context store.
+      // It is applied at message-assembly time (see below) as a user-turn
+      // local-time prefix, matching Lumi's original ChatSession behavior.
+      await ingestRuntimeContexts({ messageText: sendingMessage, sessionId })
+      streamingMessageContext.contexts = deps.context.snapshot()
+      deps.onLifecycle?.({
+        phase: 'before-compose',
+        channel: 'chat',
+        sessionId,
+        textPreview: sendingMessage,
+        details: {
+          contexts: streamingMessageContext.contexts,
+        },
       })
+      await hooks.emitBeforeMessageComposedHooks(sendingMessage, streamingMessageContext)
 
       const categorizer = createStreamingCategorizer(deps.getActiveProvider())
       let streamPosition = 0
+      const suppressionCandidates = (options.suppressAssistantTexts ?? [])
+        .map(text => text.trim().toLowerCase())
+        .filter(Boolean)
+      let pendingSuppressionText = ''
+      let suppressionPrefixResolved = suppressionCandidates.length === 0
+
+      const emitSpeechLiteral = async (speech: string) => {
+        if (!speech.trim())
+          return
+
+        await hooks.emitTokenLiteralHooks(speech, streamingMessageContext)
+
+        const lastSlice = buildingMessage.slices.findLast(slice => slice.type === 'text' && slice.source !== 'tool-progress')
+        if (lastSlice?.type === 'text') {
+          lastSlice.text += speech
+        }
+        else {
+          buildingMessage.slices.push({
+            type: 'text',
+            text: speech,
+          })
+        }
+        buildingMessage.content = buildingMessage.slices
+          .filter((slice): slice is Extract<ChatSlices, { type: 'text' }> => slice.type === 'text')
+          .map(slice => slice.text)
+          .join('\n')
+        patchForegroundStream(sessionId, buildingMessage)
+      }
+
+      const consumeSpeechLiteral = async (speech: string) => {
+        if (suppressionPrefixResolved) {
+          await emitSpeechLiteral(speech)
+          return
+        }
+
+        pendingSuppressionText += speech
+        const probe = pendingSuppressionText.trim().toLowerCase()
+        const mayStillBeSuppressed = !probe
+          || suppressionCandidates.some(candidate => candidate.startsWith(probe))
+        if (mayStillBeSuppressed)
+          return
+
+        suppressionPrefixResolved = true
+        const pending = pendingSuppressionText
+        pendingSuppressionText = ''
+        await emitSpeechLiteral(pending)
+      }
 
       const parser = useLlmmarkerParser({
         onLiteral: async (literal) => {
@@ -475,23 +662,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
           const speechOnly = categorizer.filterToSpeech(literal, streamPosition)
           streamPosition += literal.length
 
-          if (speechOnly.trim()) {
-            buildingMessage.content += speechOnly
-
-            await hooks.emitTokenLiteralHooks(speechOnly, streamingMessageContext)
-
-            const lastSlice = buildingMessage.slices.at(-1)
-            if (lastSlice?.type === 'text') {
-              lastSlice.text += speechOnly
-            }
-            else {
-              buildingMessage.slices.push({
-                type: 'text',
-                text: speechOnly,
-              })
-            }
-            patchForegroundStream(sessionId, buildingMessage)
-          }
+          await consumeSpeechLiteral(speechOnly)
         },
         onSpecial: async (special) => {
           if (shouldAbort())
@@ -504,16 +675,47 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
             return
 
           const finalCategorization = categorizeResponse(fullText, deps.getActiveProvider())
+          const finalSpeech = options.assistantSpeechTransform
+            ? options.assistantSpeechTransform(finalCategorization.speech)
+            : finalCategorization.speech
+          const finalSuppressed = shouldSuppressAssistantText(finalSpeech, options.suppressAssistantTexts)
+            || shouldSuppressAssistantText(fullText, options.suppressAssistantTexts)
+          if (!finalSuppressed && pendingSuppressionText) {
+            suppressionPrefixResolved = true
+            const pending = pendingSuppressionText
+            pendingSuppressionText = ''
+            await emitSpeechLiteral(pending)
+          }
 
           const reasoningContentField = buildingMessage.categorization?.reasoning?.trim()
           buildingMessage.categorization = {
-            speech: finalCategorization.speech,
+            speech: finalSpeech,
             reasoning: reasoningContentField || finalCategorization.reasoning,
           }
+          if (finalSpeech !== finalCategorization.speech)
+            replaceAssistantSpeech(buildingMessage, finalSpeech)
           patchForegroundStream(sessionId, buildingMessage)
         },
         minLiteralEmitLength: STREAMING_UI_FLUSH_CHUNK_SIZE,
       })
+
+      const toolNamesByCallId = new Map<string, string>()
+      const appendToolProgress = async (toolCallId: string, result: unknown, isError: boolean) => {
+        const toolName = toolNamesByCallId.get(toolCallId)
+        if (!toolName)
+          return
+
+        const text = options.toolResultTextTransform?.({ toolName, result, isError })?.trim()
+        if (!text)
+          return
+
+        buildingMessage.slices.push({ type: 'text', text, source: 'tool-progress' })
+        buildingMessage.content = buildingMessage.slices
+          .filter((slice): slice is Extract<ChatSlices, { type: 'text' }> => slice.type === 'text')
+          .map(slice => slice.text)
+          .join('\n')
+        patchForegroundStream(sessionId, buildingMessage)
+      }
 
       const toolCallQueue = createQueue<ChatSlices>({
         handlers: [
@@ -534,7 +736,11 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         ],
       })
 
-      const newMessages = buildProviderMessages(sessionMessagesForSend)
+      const limitedProviderHistory = limitProviderHistoryMessages(sessionMessagesForSend, options.providerConfig)
+      const providerHistoryMessages = options.providerHistoryTransform
+        ? options.providerHistoryTransform(limitedProviderHistory)
+        : limitedProviderHistory
+      const newMessages = buildProviderMessages(providerHistoryMessages)
       const systemPromptSupplement = deps.getSystemPromptSupplement?.()?.trim()
       if (systemPromptSupplement) {
         const systemMessage = newMessages.find(message => message.role === 'system')
@@ -575,13 +781,27 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         })
       }
 
-      streamingMessageContext.composedMessage = newMessages as Message[]
+      const providerUserContext = options.providerUserContext?.trim()
+      if (providerUserContext) {
+        const lastMessage = newMessages.at(-1)
+        if (lastMessage && lastMessage.role === 'user')
+          Object.assign(lastMessage, appendTextToContent(lastMessage, `\n\n${providerUserContext}`))
+      }
+
+      const providerMessagesBase = options.sendAttachmentsToProvider === false
+        ? newMessages.map(message => flattenContentPartsForTextOnlyProvider(message))
+        : newMessages
+      const providerMessages = options.providerMessageTransform
+        ? options.providerMessageTransform(providerMessagesBase as Message[])
+        : providerMessagesBase
+
+      streamingMessageContext.composedMessage = providerMessages as Message[]
       deps.onPromptProjection?.({
         sessionId,
         message: sendingMessage,
         contexts: contextsSnapshot,
         promptMessage: undefined,
-        composedMessage: newMessages as Message[],
+        composedMessage: providerMessages as Message[],
       })
       deps.onLifecycle?.({
         phase: 'after-compose',
@@ -589,7 +809,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         sessionId,
         textPreview: sendingMessage,
         details: {
-          composedMessage: newMessages,
+          composedMessage: providerMessages,
         },
       })
 
@@ -610,14 +830,16 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         hasVoice: !!options.input,
       })
 
-      await deps.llm.stream(options.model, options.chatProvider, newMessages as Message[], {
+      await deps.llm.stream(options.model, options.chatProvider, providerMessages as Message[], {
         headers,
         tools: options.tools,
         waitForTools: true,
+        maxSteps: resolveProviderMaxStreamSteps(options.providerConfig),
         captureToolErrors: true,
         onStreamEvent: async (event: StreamEvent) => {
           switch (event.type) {
             case 'tool-call':
+              toolNamesByCallId.set(event.toolCallId, event.toolName)
               toolCallQueue.enqueue({
                 type: 'tool-call',
                 toolCall: event,
@@ -630,6 +852,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
                 id: event.toolCallId,
                 result: event.result,
               })
+              await appendToolProgress(event.toolCallId, event.result, false)
 
               break
             case 'tool-error':
@@ -639,6 +862,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
                 isError: true,
                 result: event.result,
               })
+              await appendToolProgress(event.toolCallId, event.result, true)
 
               break
             case 'text-delta':
@@ -683,31 +907,63 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         latencyMs: Math.round(monotonicNow() - llmRequestStartedAt),
       })
 
-      if (!isStaleGeneration() && buildingMessage.slices.length > 0) {
-        const finalAssistant = buildingMessage
-        deps.session.appendSessionMessage(sessionId, finalAssistant)
-        deps.onAssistantMessageAppended?.({
-          sessionId,
-          message: finalAssistant,
-          messageText: fullText,
-        })
+      const assistantTextForSuppression = typeof buildingMessage.content === 'string'
+        ? buildingMessage.content
+        : ''
+      const suppressedAssistant = shouldSuppressAssistantText(assistantTextForSuppression, options.suppressAssistantTexts)
+        || shouldSuppressAssistantText(fullText, options.suppressAssistantTexts)
+      if (!isStaleGeneration() && suppressedAssistant) {
+        options.onAssistantSuppressed?.(assistantTextForSuppression || fullText)
+      }
+
+      const finalAssistantMessages = !isStaleGeneration() && !suppressedAssistant
+        ? (
+            options.assistantMessageTransform
+              ? options.assistantMessageTransform(cloneStreamingMessage(buildingMessage), fullText)
+              : [buildingMessage]
+          ).filter(message => message.slices.length > 0 || getAssistantMessageText(message).trim().length > 0)
+        : []
+
+      if (finalAssistantMessages.length > 0) {
+        for (const finalAssistant of finalAssistantMessages) {
+          const messageText = getAssistantMessageText(finalAssistant)
+          deps.session.appendSessionMessage(sessionId, finalAssistant)
+          deps.onAssistantMessageAppended?.({
+            sessionId,
+            message: finalAssistant,
+            messageText,
+          })
+        }
       }
 
       await hooks.emitStreamEndHooks(streamingMessageContext)
-      await hooks.emitAssistantResponseEndHooks(fullText, streamingMessageContext)
+      if (!suppressedAssistant)
+        await hooks.emitAssistantResponseEndHooks(fullText, streamingMessageContext)
 
       await hooks.emitAfterSendHooks(sendingMessage, streamingMessageContext)
-      await hooks.emitAssistantMessageHooks({ ...buildingMessage }, fullText, streamingMessageContext)
-      await hooks.emitChatTurnCompleteHooks({
-        output: { ...buildingMessage },
-        outputText: fullText,
-        toolCalls: sessionMessagesForSend.filter(msg => msg.role === 'tool') as ToolMessage[],
-      }, streamingMessageContext)
+      if (!suppressedAssistant) {
+        for (const finalAssistant of finalAssistantMessages) {
+          const messageText = getAssistantMessageText(finalAssistant)
+          await hooks.emitAssistantMessageHooks({ ...finalAssistant }, messageText, streamingMessageContext)
+        }
 
-      deps.onAssistantTurnReady?.({
-        messageText: fullText,
-        sessionMessages: sessionMessagesForSend,
-      })
+        const turnOutput = finalAssistantMessages.at(-1) ?? buildingMessage
+        await hooks.emitChatTurnCompleteHooks({
+          output: { ...turnOutput },
+          outputText: finalAssistantMessages.map(getAssistantMessageText).join('\n\n') || fullText,
+          toolCalls: sessionMessagesForSend.filter(msg => msg.role === 'tool') as ToolMessage[],
+        }, streamingMessageContext)
+      }
+
+      if (!suppressedAssistant) {
+        deps.onAssistantTurnReady?.({
+          sessionId,
+          messageText: finalAssistantMessages.map(getAssistantMessageText).join('\n\n') || fullText,
+          sessionMessages: sessionMessagesForSend,
+          hasAttachments: !!options.attachments?.length,
+          hiddenUserMessage: options.hiddenUserMessage,
+        })
+      }
 
       resetForegroundStream(sessionId)
       deps.onMessageRound?.({

@@ -10,7 +10,6 @@ import type {
 } from '@xsai-ext/providers/utils'
 import type { ProgressInfo } from '@xsai-transformers/shared/types'
 import type {
-  UnAlibabaCloudOptions,
   UnDeepgramOptions,
   UnElevenLabsOptions,
   UnMicrosoftOptions,
@@ -20,6 +19,7 @@ import type {
 
 import type { ProviderOnboardingField } from '../libs/providers/types'
 import type { AliyunRealtimeSpeechExtraOptions } from './providers/aliyun/stream-transcription'
+import type { DashScopeRealtimeAsrExtraOptions } from './providers/dashscope/stream-transcription'
 
 import { isStageTamagotchi, isUrl } from '@proj-airi/stage-shared'
 import { getCachedWebGPUCapabilities, isWebGPUSupported } from '@proj-airi/stage-shared/webgpu'
@@ -38,7 +38,6 @@ import { listModels } from '@xsai/model'
 import { uniqBy } from 'es-toolkit'
 import { defineStore } from 'pinia'
 import {
-  createUnAlibabaCloud,
   createUnDeepgram,
   createUnElevenLabs,
   createUnMicrosoft,
@@ -70,10 +69,386 @@ const ALIYUN_NLS_REGIONS = [
 
 type AliyunNlsRegion = typeof ALIYUN_NLS_REGIONS[number]
 
+const DASHSCOPE_COSYVOICE_ENDPOINT_CN = 'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer'
+const DASHSCOPE_COSYVOICE_ENDPOINT_INTL = 'https://dashscope-intl.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer'
+const DASHSCOPE_OPENAI_COMPAT_ENDPOINT_CN = 'https://dashscope.aliyuncs.com/compatible-mode/v1/'
+const DASHSCOPE_OPENAI_COMPAT_ENDPOINT_INTL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/'
+const DASHSCOPE_ASR_ENDPOINT_CN = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
+const DASHSCOPE_ASR_ENDPOINT_INTL = 'wss://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/inference'
+const DEFAULT_COSYVOICE_MODEL = 'cosyvoice-v3.5-flash'
+const DEFAULT_COSYVOICE_CLONE_VOICE_ID = 'cosyvoice-v3.5-flash-lumi-7e8e554c8a344a3eb13a9d3f729f0750'
+const DEFAULT_DASHSCOPE_VISION_MODEL = 'qwen3-vl-flash'
+const DEFAULT_DASHSCOPE_ASR_MODEL = 'fun-asr-realtime'
+
+const DASHSCOPE_KNOWN_VISION_MODEL_IDS = new Set([
+  'qwen-vl-plus',
+  'qwen-vl-max',
+  'qwen2-vl-7b-instruct',
+  'qwen2-vl-72b-instruct',
+  'qwen2.5-vl-3b-instruct',
+  'qwen2.5-vl-7b-instruct',
+  'qwen2.5-vl-32b-instruct',
+  'qwen2.5-vl-72b-instruct',
+  'qwen3-vl-plus',
+  'qwen3-vl-flash',
+  'qwen3-vl-235b-a22b-thinking',
+  'qwen3-vl-235b-a22b-instruct',
+  'qwen3.5-plus',
+  'qwen3.5-flash',
+  'qwen3.6-plus',
+  'qwen3.6-flash',
+  'qwen3.7-plus',
+])
+
+function dashscopeCosyVoiceConfigHash(config: Record<string, unknown>) {
+  return JSON.stringify({
+    apiKey: readProviderString(config, 'apiKey'),
+    baseUrl: normalizeDashscopeCosyVoiceBaseUrl(config),
+    model: readProviderString(config, 'model', DEFAULT_COSYVOICE_MODEL),
+    customVoiceId: readProviderString(config, 'customVoiceId', DEFAULT_COSYVOICE_CLONE_VOICE_ID),
+    region: readProviderString(config, 'region', 'cn'),
+    format: readProviderString(config, 'format', 'wav'),
+    sampleRate: readProviderNumber(config, 'sampleRate', 24000),
+    languageHint: readProviderString(config, 'languageHint', 'zh'),
+  })
+}
+
+function dashscopeVisionConfigHash(config: Record<string, unknown>) {
+  return JSON.stringify({
+    apiKey: readProviderString(config, 'apiKey'),
+    baseUrl: normalizeDashscopeVisionBaseUrl(config),
+    preferredVisionModel: readProviderString(config, 'preferredVisionModel', DEFAULT_DASHSCOPE_VISION_MODEL),
+    region: readProviderString(config, 'region', 'cn'),
+  })
+}
+
+function dashscopeAsrConfigHash(config: Record<string, unknown>) {
+  return JSON.stringify({
+    apiKey: readProviderString(config, 'apiKey'),
+    baseUrl: normalizeDashscopeAsrBaseUrl(config),
+    model: readProviderString(config, 'model', DEFAULT_DASHSCOPE_ASR_MODEL),
+    region: readProviderString(config, 'region', 'cn'),
+    sampleRate: readProviderNumber(config, 'sampleRate', 16000),
+    languageHints: readProviderString(config, 'languageHints', 'zh'),
+    workspaceId: readProviderString(config, 'workspaceId'),
+  })
+}
+
+function openAICompatibleVisionConfigHash(config: Record<string, unknown>) {
+  return JSON.stringify({
+    apiKey: readProviderString(config, 'apiKey'),
+    baseUrl: normalizeOpenAICompatibleBaseUrl(config.baseUrl, 'https://api.openai.com/v1/'),
+    preferredVisionModel: readProviderString(config, 'preferredVisionModel'),
+  })
+}
+
+function normalizeDashscopeCosyVoiceBaseUrl(config: Record<string, unknown>) {
+  const explicit = typeof config.baseUrl === 'string' ? config.baseUrl.trim() : ''
+  if (explicit && !explicit.includes('unspeech.hyp3r.link'))
+    return explicit
+
+  return config.region === 'intl'
+    ? DASHSCOPE_COSYVOICE_ENDPOINT_INTL
+    : DASHSCOPE_COSYVOICE_ENDPOINT_CN
+}
+
+function dashscopeFormatToMime(format: string) {
+  switch (format) {
+    case 'mp3': return 'audio/mpeg'
+    case 'wav': return 'audio/wav'
+    case 'pcm': return 'audio/L16'
+    case 'opus': return 'audio/opus'
+    default: return 'application/octet-stream'
+  }
+}
+
+function decodeBase64ToBytes(value: string) {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++)
+    bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+function readProviderString(config: Record<string, unknown>, key: string, fallback = '') {
+  const value = config[key]
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback
+}
+
+function readProviderNumber(config: Record<string, unknown>, key: string, fallback: number) {
+  const value = config[key]
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function normalizeOpenAICompatibleBaseUrl(value: unknown, fallback = '') {
+  let baseUrl = typeof value === 'string' ? value.trim() : ''
+  if (!baseUrl)
+    baseUrl = fallback
+  if (baseUrl && !baseUrl.endsWith('/'))
+    baseUrl += '/'
+  return baseUrl
+}
+
+function normalizeDashscopeVisionBaseUrl(config: Record<string, unknown>) {
+  const explicit = normalizeOpenAICompatibleBaseUrl(config.baseUrl)
+  if (explicit)
+    return explicit
+
+  return config.region === 'intl'
+    ? DASHSCOPE_OPENAI_COMPAT_ENDPOINT_INTL
+    : DASHSCOPE_OPENAI_COMPAT_ENDPOINT_CN
+}
+
+function normalizeDashscopeAsrBaseUrl(config: Record<string, unknown>) {
+  const workspaceId = readProviderString(config, 'workspaceId')
+  const explicit = typeof config.baseUrl === 'string'
+    ? config.baseUrl.trim().replace('{WorkspaceId}', workspaceId)
+    : ''
+  if (explicit)
+    return explicit
+
+  return config.region === 'intl'
+    ? DASHSCOPE_ASR_ENDPOINT_INTL.replace('{WorkspaceId}', workspaceId)
+    : DASHSCOPE_ASR_ENDPOINT_CN
+}
+
+function isDashscopeVisionModelId(modelId: string) {
+  const id = modelId.toLowerCase()
+  if (!id)
+    return false
+
+  if ([
+    'embed',
+    'embedding',
+    'rerank',
+    'tts',
+    'speech',
+    'audio',
+    'whisper',
+    'coder',
+    'math',
+  ].some(token => id.includes(token))) {
+    return false
+  }
+
+  if (DASHSCOPE_KNOWN_VISION_MODEL_IDS.has(id))
+    return true
+
+  return /^qwen(?:\d+(?:\.\d+)?)?-vl(?:-|$)/.test(id)
+    || /^qwen\d+(?:\.\d+)?-(?:plus|flash)(?:-|$)/.test(id)
+}
+
+function modelLooksVisionCapable(model: any) {
+  const id = String(model.id || model.name || '').toLowerCase()
+  const haystack = JSON.stringify({
+    id: model.id,
+    name: model.name,
+    description: model.description,
+    capabilities: model.capabilities,
+    modalities: model.modalities,
+    input_modalities: model.input_modalities,
+    inputModalities: model.inputModalities,
+    architecture: model.architecture,
+  }).toLowerCase()
+
+  if ([
+    'embedding',
+    'rerank',
+    'tts',
+    'speech',
+    'audio',
+    'whisper',
+    'transcribe',
+    'coder',
+    'math',
+  ].some(token => id.includes(token))) {
+    return false
+  }
+
+  if (haystack.includes('image') || haystack.includes('vision') || haystack.includes('visual') || haystack.includes('multimodal'))
+    return true
+
+  return isDashscopeVisionModelId(id)
+    || /\b(?:vl|vqa)\b/.test(id.replace(/[-_.]/g, ' '))
+    || id.includes('llava')
+    || id.includes('pixtral')
+    || id.includes('glm-4v')
+    || id.includes('kimi-vl')
+    || id.includes('internvl')
+    || id.includes('minicpm-v')
+    || id.includes('molmo')
+    || id.includes('phi-vision')
+    || id.includes('gpt-4o')
+    || id.includes('gpt-4.1')
+    || id.includes('gpt-5')
+    || id.includes('o3')
+    || id.includes('o4-mini')
+    || id.includes('gemini')
+    || id.includes('claude-3')
+    || id.includes('claude-4')
+    || id.includes('llama-4')
+}
+
+function filterVisionModels(providerId: string, models: any[]): ModelInfo[] {
+  return models
+    .filter(modelLooksVisionCapable)
+    .map((model: any) => {
+      const id = String(model.id || model.name || '')
+      return {
+        id,
+        name: model.name || model.display_name || id,
+        provider: providerId,
+        description: model.description || '',
+        contextLength: model.context_length || model.contextLength || 0,
+        deprecated: Boolean(model.deprecated),
+        capabilities: ['vision', 'image-understanding'],
+      } satisfies ModelInfo
+    })
+}
+
+function mapDashscopeVisionModel(providerId: string, model: any): ModelInfo {
+  const id = String(model.id || model.name || '')
+  return {
+    id,
+    name: model.name || model.display_name || id,
+    provider: providerId,
+    description: model.description || 'Qwen image/video understanding model via DashScope OpenAI-compatible API.',
+    contextLength: model.context_length || model.contextLength || 0,
+    deprecated: Boolean(model.deprecated),
+    capabilities: ['vision', 'image-understanding'],
+  }
+}
+
+async function parseDashscopeCosyVoiceAudio(response: Response, format: string): Promise<Response> {
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('text/event-stream')) {
+    const text = await response.text()
+    const chunks: Uint8Array[] = []
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:'))
+        continue
+      const payload = trimmed.slice(5).trim()
+      if (!payload || payload === '[DONE]')
+        continue
+      try {
+        const json = JSON.parse(payload)
+        const audioData = json?.output?.audio?.data
+        if (typeof audioData === 'string' && audioData)
+          chunks.push(decodeBase64ToBytes(audioData))
+      }
+      catch {}
+    }
+    if (chunks.length > 0) {
+      const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+      const merged = new Uint8Array(total)
+      let offset = 0
+      for (const chunk of chunks) {
+        merged.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+      return new Response(merged, { headers: { 'content-type': dashscopeFormatToMime(format) } })
+    }
+  }
+
+  const data = await response.json()
+  const audioData = data?.output?.audio?.data
+  if (typeof audioData === 'string' && audioData) {
+    return new Response(decodeBase64ToBytes(audioData), {
+      headers: { 'content-type': dashscopeFormatToMime(format) },
+    })
+  }
+
+  const audioUrl = data?.output?.audio?.url
+  if (typeof audioUrl !== 'string' || !audioUrl)
+    throw new Error(`DashScope CosyVoice response missing output.audio.url/data: ${JSON.stringify(data).slice(0, 500)}`)
+
+  const audioResponse = await fetch(audioUrl)
+  if (!audioResponse.ok)
+    throw new Error(`DashScope CosyVoice audio download failed: ${audioResponse.status} ${await audioResponse.text().catch(() => '')}`.slice(0, 500))
+
+  const bytes = await audioResponse.arrayBuffer()
+  return new Response(bytes, {
+    headers: { 'content-type': audioResponse.headers.get('content-type') || dashscopeFormatToMime(format) },
+  })
+}
+
+function buildDashscopeCosyVoiceProvider(config: Record<string, unknown>): SpeechProvider {
+  const apiKey = readProviderString(config, 'apiKey')
+  return {
+    speech: (model: string, _options?: Record<string, unknown>) => {
+      return {
+        baseURL: normalizeDashscopeCosyVoiceBaseUrl(config),
+        model: model || readProviderString(config, 'model', DEFAULT_COSYVOICE_MODEL),
+        fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+          const body = typeof init?.body === 'string'
+            ? JSON.parse(init.body) as Record<string, unknown>
+            : {}
+          const requestedModel = readProviderString(body, 'model', model || readProviderString(config, 'model', DEFAULT_COSYVOICE_MODEL))
+          const format = readProviderString(config, 'format', readProviderString(body, 'response_format', 'wav'))
+          const voice = readProviderString(body, 'voice')
+            || readProviderString(config, 'customVoiceId')
+            || readProviderString(config, 'voice')
+            || DEFAULT_COSYVOICE_CLONE_VOICE_ID
+
+          if (!apiKey)
+            throw new Error('DashScope API key is required for CosyVoice.')
+          if (!voice)
+            throw new Error('CosyVoice voice_id is required. Create or paste a cloned voice_id first.')
+
+          const input: Record<string, unknown> = {
+            text: readProviderString(body, 'input'),
+            voice,
+            format,
+            sample_rate: readProviderNumber(config, 'sampleRate', 24000),
+          }
+
+          const rate = readProviderNumber(config, 'rate', Number.NaN)
+          const pitch = readProviderNumber(config, 'pitch', Number.NaN)
+          const volume = readProviderNumber(config, 'volume', Number.NaN)
+          const instruction = readProviderString(config, 'instruction')
+          const languageHint = readProviderString(config, 'languageHint')
+          if (Number.isFinite(rate))
+            input.rate = rate
+          if (Number.isFinite(pitch))
+            input.pitch = pitch
+          if (Number.isFinite(volume))
+            input.volume = volume
+          if (instruction)
+            input.instruction = instruction
+          if (languageHint)
+            input.language_hints = [languageHint]
+          if (config.enableSsml === true)
+            input.enable_ssml = true
+
+          const upstream = await fetch(normalizeDashscopeCosyVoiceBaseUrl(config), {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+              ...(config.streamOutput === true ? { 'X-DashScope-SSE': 'enable' } : {}),
+            },
+            body: JSON.stringify({
+              model: requestedModel,
+              input,
+            }),
+          })
+
+          if (!upstream.ok)
+            return new Response(await upstream.text().catch(() => ''), { status: upstream.status, statusText: upstream.statusText })
+
+          return await parseDashscopeCosyVoiceAudio(upstream, format)
+        },
+      }
+    },
+  }
+}
+
 export interface ProviderMetadata {
   id: string
   order?: number
-  category: 'chat' | 'embed' | 'speech' | 'transcription'
+  category: 'chat' | 'embed' | 'speech' | 'transcription' | 'vision'
   tasks: string[]
   nameKey: string // i18n key for provider name
   name: string // Default name (fallback)
@@ -265,6 +640,111 @@ export const useProvidersStore = defineStore('providers', () => {
   // Centralized provider metadata with provider factory functions
   const authState = useAuthStore()
   const providerMetadata: Record<string, ProviderMetadata> = {
+    'alibaba-cloud-model-studio-vision': buildOpenAICompatibleProvider({
+      id: 'alibaba-cloud-model-studio-vision',
+      category: 'vision',
+      tasks: ['vision', 'image-to-text', 'image-understanding', 'visual-question-answering'],
+      name: 'Alibaba Bailian Vision',
+      nameKey: 'settings.pages.providers.provider.alibaba-cloud-model-studio-vision.title',
+      description: 'Qwen image understanding via DashScope OpenAI-compatible API.',
+      descriptionKey: 'settings.pages.providers.provider.alibaba-cloud-model-studio-vision.description',
+      icon: 'i-lobe-icons:alibabacloud',
+      iconColor: 'i-lobe-icons:alibabacloud-color',
+      defaultBaseUrl: DASHSCOPE_OPENAI_COMPAT_ENDPOINT_CN,
+      defaultOptions: () => ({
+        apiKey: '',
+        baseUrl: DASHSCOPE_OPENAI_COMPAT_ENDPOINT_CN,
+        region: 'cn',
+        preferredVisionModel: DEFAULT_DASHSCOPE_VISION_MODEL,
+        apiTestPassed: false,
+        apiTestConfigHash: '',
+      }),
+      creator: createOpenAI,
+      capabilities: {
+        listModels: async (config: Record<string, unknown>) => {
+          const apiKey = readProviderString(config, 'apiKey')
+          const baseURL = normalizeDashscopeVisionBaseUrl(config)
+          if (!apiKey || !baseURL)
+            return []
+
+          const models = await listModels({
+            apiKey,
+            baseURL,
+          })
+
+          return models
+            .filter((model: any) => isDashscopeVisionModelId(String(model.id || model.name || '')))
+            .map(model => mapDashscopeVisionModel('alibaba-cloud-model-studio-vision', model))
+        },
+      },
+      validators: {
+        chatPingCheckAvailable: false,
+        validateProviderConfig: (config: Record<string, unknown>) => {
+          const errors: Error[] = []
+          if (!readProviderString(config, 'apiKey'))
+            errors.push(new Error('DashScope API key is required.'))
+          if (!normalizeDashscopeVisionBaseUrl(config))
+            errors.push(new Error('DashScope OpenAI-compatible base URL is required.'))
+          if (config.apiTestPassed !== true || config.apiTestConfigHash !== dashscopeVisionConfigHash(config))
+            errors.push(new Error('Run the vision API test after changing configuration.'))
+
+          return {
+            errors,
+            reason: errors.map(error => error.message).join(', '),
+            valid: errors.length === 0,
+          }
+        },
+      },
+      pricing: 'paid',
+      deployment: 'cloud',
+    }),
+    'openai-compatible-vision': buildOpenAICompatibleProvider({
+      id: 'openai-compatible-vision',
+      category: 'vision',
+      tasks: ['vision', 'image-to-text', 'image-understanding', 'visual-question-answering'],
+      name: 'OpenAI Compatible Vision',
+      nameKey: 'settings.pages.providers.provider.openai-compatible-vision.title',
+      description: 'Connect to any OpenAI-compatible multimodal API and use only vision-capable models.',
+      descriptionKey: 'settings.pages.providers.provider.openai-compatible-vision.description',
+      icon: 'i-lobe-icons:openai',
+      defaultBaseUrl: 'https://api.openai.com/v1/',
+      creator: createOpenAI,
+      capabilities: {
+        listModels: async (config: Record<string, unknown>) => {
+          const apiKey = readProviderString(config, 'apiKey')
+          const baseURL = normalizeOpenAICompatibleBaseUrl(config.baseUrl, 'https://api.openai.com/v1/')
+          if (!apiKey || !baseURL)
+            return []
+
+          const models = await listModels({
+            apiKey,
+            baseURL,
+          })
+
+          return filterVisionModels('openai-compatible-vision', models)
+        },
+      },
+      validators: {
+        chatPingCheckAvailable: false,
+        validateProviderConfig: (config: Record<string, unknown>) => {
+          const errors: Error[] = []
+          if (!readProviderString(config, 'apiKey'))
+            errors.push(new Error('API Key is required.'))
+          if (!normalizeOpenAICompatibleBaseUrl(config.baseUrl))
+            errors.push(new Error('Base URL is required.'))
+          if (config.apiTestPassed !== true || config.apiTestConfigHash !== openAICompatibleVisionConfigHash(config))
+            errors.push(new Error('Run the vision API test after changing configuration.'))
+
+          return {
+            errors,
+            reason: errors.map(error => error.message).join(', '),
+            valid: errors.length === 0,
+          }
+        },
+      },
+      pricing: 'paid',
+      deployment: 'cloud',
+    }),
     'speech-noop': {
       id: 'speech-noop',
       category: 'speech',
@@ -749,6 +1229,147 @@ export const useProvidersStore = defineStore('providers', () => {
         },
       },
     }),
+    'alibaba-cloud-model-studio-transcription': {
+      id: 'alibaba-cloud-model-studio-transcription',
+      category: 'transcription',
+      tasks: ['speech-to-text', 'automatic-speech-recognition', 'asr', 'stt', 'streaming-transcription'],
+      nameKey: 'settings.pages.providers.provider.alibaba-cloud-model-studio-transcription.title',
+      name: 'Alibaba Cloud Model Studio ASR',
+      descriptionKey: 'settings.pages.providers.provider.alibaba-cloud-model-studio-transcription.description',
+      description: 'DashScope realtime speech recognition',
+      icon: 'i-lobe-icons:alibabacloud',
+      defaultOptions: () => ({
+        apiKey: '',
+        baseUrl: DASHSCOPE_ASR_ENDPOINT_CN,
+        region: 'cn',
+        model: DEFAULT_DASHSCOPE_ASR_MODEL,
+        sampleRate: 16000,
+        languageHints: 'zh',
+        maxSentenceSilence: 700,
+        semanticPunctuationEnabled: false,
+        punctuationPredictionEnabled: true,
+        inverseTextNormalizationEnabled: true,
+        heartbeat: true,
+      }),
+      transcriptionFeatures: {
+        supportsGenerate: false,
+        supportsStreamOutput: true,
+        supportsStreamInput: true,
+      },
+      createProvider: async (config) => {
+        const apiKey = readProviderString(config, 'apiKey')
+        const baseUrl = normalizeDashscopeAsrBaseUrl(config)
+        const model = readProviderString(config, 'model', DEFAULT_DASHSCOPE_ASR_MODEL)
+        const sampleRate = readProviderNumber(config, 'sampleRate', model.includes('8k') ? 8000 : 16000)
+        const languageHints = readProviderString(config, 'languageHints', 'zh')
+          .split(',')
+          .map(value => value.trim())
+          .filter(Boolean)
+
+        if (!apiKey)
+          throw new Error('DashScope API key is required.')
+
+        return {
+          transcription: (modelOverride: string, extraOptions?: DashScopeRealtimeAsrExtraOptions) => ({
+            apiKey,
+            baseURL: baseUrl,
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+            },
+            model: modelOverride || model,
+            sampleRate,
+            languageHints,
+            workspaceId: readProviderString(config, 'workspaceId'),
+            vocabularyId: readProviderString(config, 'vocabularyId'),
+            maxSentenceSilence: readProviderNumber(config, 'maxSentenceSilence', 700),
+            semanticPunctuationEnabled: config.semanticPunctuationEnabled === true,
+            punctuationPredictionEnabled: config.punctuationPredictionEnabled !== false,
+            inverseTextNormalizationEnabled: config.inverseTextNormalizationEnabled !== false,
+            disfluencyRemovalEnabled: config.disfluencyRemovalEnabled === true,
+            multiThresholdModeEnabled: config.multiThresholdModeEnabled === true,
+            heartbeat: config.heartbeat !== false,
+            ...extraOptions,
+          }),
+        } as TranscriptionProviderWithExtraOptions<string, DashScopeRealtimeAsrExtraOptions>
+      },
+      capabilities: {
+        listModels: async () => {
+          return [
+            {
+              id: 'fun-asr-realtime',
+              name: 'Fun-ASR Realtime',
+              provider: 'alibaba-cloud-model-studio-transcription',
+              description: 'Recommended low-latency realtime ASR with hotword support and Chinese dialect coverage.',
+              contextLength: 0,
+              deprecated: false,
+            },
+            {
+              id: 'fun-asr-realtime-2026-02-28',
+              name: 'Fun-ASR Realtime 2026-02-28',
+              provider: 'alibaba-cloud-model-studio-transcription',
+              description: 'Versioned realtime Fun-ASR model.',
+              contextLength: 0,
+              deprecated: false,
+            },
+            {
+              id: 'fun-asr-realtime-2025-11-07',
+              name: 'Fun-ASR Realtime 2025-11-07',
+              provider: 'alibaba-cloud-model-studio-transcription',
+              description: 'Versioned realtime Fun-ASR model.',
+              contextLength: 0,
+              deprecated: false,
+            },
+            {
+              id: 'paraformer-realtime-v2',
+              name: 'Paraformer Realtime v2',
+              provider: 'alibaba-cloud-model-studio-transcription',
+              description: 'Legacy realtime ASR model supporting Chinese, English, Japanese, Korean, German, French, and Russian.',
+              contextLength: 0,
+              deprecated: false,
+            },
+            {
+              id: 'paraformer-realtime-8k-v2',
+              name: 'Paraformer Realtime 8k v2',
+              provider: 'alibaba-cloud-model-studio-transcription',
+              description: '8kHz telephone-scene realtime ASR model.',
+              contextLength: 0,
+              deprecated: false,
+            },
+          ] satisfies ModelInfo[]
+        },
+      },
+      validators: {
+        chatPingCheckAvailable: false,
+        validateProviderConfig: (config) => {
+          const errors: Error[] = []
+          const apiKey = readProviderString(config, 'apiKey')
+          const baseUrl = normalizeDashscopeAsrBaseUrl(config)
+          const model = readProviderString(config, 'model', DEFAULT_DASHSCOPE_ASR_MODEL)
+          const sampleRate = readProviderNumber(config, 'sampleRate', 16000)
+
+          if (!apiKey)
+            errors.push(new Error('DashScope API key is required.'))
+          if (!baseUrl || !baseUrl.startsWith('wss://'))
+            errors.push(new Error('DashScope ASR Base URL must start with wss://.'))
+          if (baseUrl.includes('{WorkspaceId}'))
+            errors.push(new Error('International DashScope ASR endpoint requires Workspace ID.'))
+          if (!model)
+            errors.push(new Error('Realtime ASR model is required.'))
+          if (model.includes('8k') && sampleRate !== 8000)
+            errors.push(new Error('8k realtime ASR models require sampleRate=8000.'))
+          if (!model.includes('8k') && sampleRate !== 16000)
+            errors.push(new Error('Realtime ASR microphone input should use sampleRate=16000.'))
+          if (config.apiTestPassed === true && config.apiTestConfigHash !== dashscopeAsrConfigHash(config))
+            errors.push(new Error('Configuration changed after the last successful ASR test. Test again if you need the green provider status.'))
+
+          return {
+            errors,
+            reason: errors.length > 0 ? errors.map(error => error.message).join(', ') : '',
+            valid: errors.length === 0 || errors.every(error => error.message.includes('last successful ASR test')),
+          }
+        },
+      },
+    },
     'aliyun-nls-transcription': {
       id: 'aliyun-nls-transcription',
       category: 'transcription',
@@ -1259,44 +1880,93 @@ export const useProvidersStore = defineStore('providers', () => {
       description: 'bailian.console.aliyun.com',
       iconColor: 'i-lobe-icons:alibabacloud',
       defaultOptions: () => ({
-        baseUrl: 'https://unspeech.hyp3r.link/v1/',
+        baseUrl: DASHSCOPE_COSYVOICE_ENDPOINT_CN,
+        region: 'cn',
+        model: DEFAULT_COSYVOICE_MODEL,
+        customVoiceId: DEFAULT_COSYVOICE_CLONE_VOICE_ID,
+        format: 'wav',
+        sampleRate: 24000,
+        languageHint: 'zh',
+        apiTestPassed: false,
+        apiTestConfigHash: '',
       }),
-      createProvider: async config => createUnAlibabaCloud((config.apiKey as string).trim(), (config.baseUrl as string).trim()),
+      createProvider: async config => buildDashscopeCosyVoiceProvider(config),
       capabilities: {
-        listVoices: async (config) => {
-          const provider = createUnAlibabaCloud((config.apiKey as string).trim(), (config.baseUrl as string).trim()) as VoiceProviderWithExtraOptions<UnAlibabaCloudOptions>
+        listVoices: async (config, modelOverride) => {
+          const model = modelOverride || readProviderString(config, 'model', DEFAULT_COSYVOICE_MODEL)
+          const customVoiceId = readProviderString(config, 'customVoiceId', DEFAULT_COSYVOICE_CLONE_VOICE_ID)
+          const voices: VoiceInfo[] = []
 
-          const voices = await listVoices({
-            ...provider.voice(),
-          })
-
-          return voices.map((voice) => {
-            return {
-              id: voice.id,
-              name: voice.name,
+          if (customVoiceId) {
+            voices.push({
+              id: customVoiceId,
+              name: customVoiceId.includes('lumi') ? 'Lumi Clone' : customVoiceId,
+              description: 'CosyVoice cloned/custom voice_id.',
               provider: 'alibaba-cloud-model-studio',
-              compatibleModels: voice.compatible_models,
-              previewURL: voice.preview_audio_url,
-              languages: voice.languages,
-              gender: voice.labels?.gender,
-            }
-          })
+              compatibleModels: [model],
+              languages: [{ code: 'zh-CN', title: 'Chinese' }],
+              gender: 'female',
+            })
+          }
+
+          // v3.5 models are clone/design-only and do not expose system voices.
+          // Keep a tiny built-in roster for older models so users can still
+          // sanity-test their key without first enrolling a custom voice.
+          if (!model.startsWith('cosyvoice-v3.5')) {
+            voices.push(
+              {
+                id: model === 'cosyvoice-v2' ? 'longxiaochun_v2' : 'longanyang',
+                name: model === 'cosyvoice-v2' ? 'Longxiaochun v2' : 'Longanyang',
+                description: 'Common CosyVoice system voice.',
+                provider: 'alibaba-cloud-model-studio',
+                compatibleModels: [model],
+                languages: [{ code: 'zh-CN', title: 'Chinese' }],
+                gender: 'female',
+              },
+            )
+          }
+
+          return uniqBy(voices, voice => voice.id)
         },
         listModels: async () => {
           return [
             {
-              id: 'cosyvoice-v1',
-              name: 'CosyVoice',
+              id: 'cosyvoice-v3.5-flash',
+              name: 'CosyVoice v3.5 Flash',
               provider: 'alibaba-cloud-model-studio',
-              description: '',
+              description: 'Low-latency CosyVoice v3.5 model for voice clone/design voices. Beijing region only.',
+              contextLength: 0,
+              deprecated: false,
+            },
+            {
+              id: 'cosyvoice-v3.5-plus',
+              name: 'CosyVoice v3.5 Plus',
+              provider: 'alibaba-cloud-model-studio',
+              description: 'Higher-quality CosyVoice v3.5 model for voice clone/design voices. Beijing region only.',
+              contextLength: 0,
+              deprecated: false,
+            },
+            {
+              id: 'cosyvoice-v3-flash',
+              name: 'CosyVoice v3 Flash',
+              provider: 'alibaba-cloud-model-studio',
+              description: 'CosyVoice v3 flash model. Supports system and custom voices.',
+              contextLength: 0,
+              deprecated: false,
+            },
+            {
+              id: 'cosyvoice-v3-plus',
+              name: 'CosyVoice v3 Plus',
+              provider: 'alibaba-cloud-model-studio',
+              description: 'CosyVoice v3 plus model. Supports system and custom voices.',
               contextLength: 0,
               deprecated: false,
             },
             {
               id: 'cosyvoice-v2',
-              name: 'CosyVoice (New)',
+              name: 'CosyVoice v2',
               provider: 'alibaba-cloud-model-studio',
-              description: '',
+              description: 'Older CosyVoice model kept for compatibility.',
               contextLength: 0,
               deprecated: false,
             },
@@ -1306,20 +1976,20 @@ export const useProvidersStore = defineStore('providers', () => {
       validators: {
         chatPingCheckAvailable: false,
         validateProviderConfig: (config) => {
+          const baseUrl = readProviderString(config, 'baseUrl')
           const errors = [
             !config.apiKey && new Error('API key is required.'),
-            !config.baseUrl && new Error('Base URL is required.'),
+            !baseUrl && new Error('Base URL is required.'),
+            baseUrl && (!isUrl(baseUrl) || new URL(baseUrl).host.length === 0) && new Error('Base URL must be an absolute URL.'),
+            !config.customVoiceId && new Error('CosyVoice voice_id is required.'),
+            config.apiTestPassed !== true && new Error('Run a successful API test before enabling Alibaba Cloud Model Studio.'),
+            config.apiTestConfigHash !== dashscopeCosyVoiceConfigHash(config) && new Error('Configuration changed after the last successful API test. Run the test again.'),
           ].filter(Boolean)
-
-          const res = baseUrlValidator.value(config.baseUrl)
-          if (res) {
-            return res
-          }
 
           return {
             errors,
             reason: errors.filter(e => e).map(e => String(e)).join(', ') || '',
-            valid: !!config.apiKey && !!config.baseUrl,
+            valid: errors.length === 0,
           }
         },
       },
@@ -1565,14 +2235,14 @@ export const useProvidersStore = defineStore('providers', () => {
       description: 'api.xiaomimimo.com',
       icon: 'i-simple-icons:xiaomi',
       defaultOptions: () => ({
-        baseUrl: 'https://api.xiaomimimo.com/v1/',
+        baseUrl: 'https://api.xiaomimimo.com/v1',
         model: 'mimo-v2.5-tts',
         voice: 'mimo_default',
         format: 'wav',
       }),
       createProvider: async (config) => {
         const apiKey = (config.apiKey as string)?.trim() ?? ''
-        const baseUrl = ((config.baseUrl as string) || 'https://api.xiaomimimo.com/v1/').replace(/\/+$/, '')
+        const baseUrl = ((config.baseUrl as string) || 'https://api.xiaomimimo.com/v1').replace(/\/+$/, '')
         const defaultModel = (config.model as string) || 'mimo-v2.5-tts'
         const defaultVoice = (config.voice as string) || 'mimo_default'
         const defaultFormat = (config.format as string) || 'wav'
@@ -1589,6 +2259,9 @@ export const useProvidersStore = defineStore('providers', () => {
               const body = JSON.parse(init.body)
               const text = body.input as string
               const modelId = (body.model as string) || defaultModel
+              if (!apiKey) {
+                throw new Error('MiMo API key is required. Configure the Xiaomi MiMo provider API key first.')
+              }
               const format = (body.response_format as string) || defaultFormat
               const stylePrompt = typeof body.style_prompt === 'string'
                 ? body.style_prompt.trim()
@@ -1601,9 +2274,7 @@ export const useProvidersStore = defineStore('providers', () => {
                   ? config.voiceSample.trim()
                   : ''
 
-              const userPrompt = modelId === 'mimo-v2.5-tts-voiceclone'
-                ? stylePrompt
-                : stylePrompt || 'Use a natural, clear speaking style.'
+              const userPrompt = stylePrompt
 
               const audio: Record<string, string> = { format }
               if (modelId === 'mimo-v2.5-tts-voiceclone') {
@@ -1625,6 +2296,7 @@ export const useProvidersStore = defineStore('providers', () => {
                 headers: {
                   'Content-Type': 'application/json',
                   'api-key': apiKey,
+                  'Authorization': `Bearer ${apiKey}`,
                 },
                 body: JSON.stringify({
                   model: modelId,
@@ -1637,7 +2309,8 @@ export const useProvidersStore = defineStore('providers', () => {
               })
 
               if (!response.ok || !response.body) {
-                throw new Error(`MiMo TTS request failed: ${response.status} ${response.statusText}`)
+                const errorText = await response.text().catch(() => '')
+                throw new Error(`MiMo TTS request failed: ${response.status} ${response.statusText}${errorText ? ` - ${errorText.slice(0, 500)}` : ''}`)
               }
 
               const data = await response.json()
@@ -1684,12 +2357,17 @@ export const useProvidersStore = defineStore('providers', () => {
             id: 'mimo-v2.5-tts-voiceclone',
             name: 'MiMo v2.5 TTS Voice Clone',
             provider: 'mimo-audio-speech',
-            description: 'Clone a voice from a base64-encoded audio sample',
+            description: 'Clone a voice from an mp3/wav audio sample',
             contextLength: 0,
             deprecated: false,
           },
         ],
         listVoices: async () => [
+          { id: 'mimo_default', name: 'MiMo 默认', provider: 'mimo-audio-speech', gender: 'female', languages: [{ code: 'en', title: 'English' }, { code: 'zh', title: 'Chinese' }] },
+          { id: '冰糖', name: '冰糖', provider: 'mimo-audio-speech', gender: 'female', languages: [{ code: 'zh', title: 'Chinese' }] },
+          { id: '茉莉', name: '茉莉', provider: 'mimo-audio-speech', gender: 'female', languages: [{ code: 'zh', title: 'Chinese' }] },
+          { id: '苏打', name: '苏打', provider: 'mimo-audio-speech', gender: 'male', languages: [{ code: 'zh', title: 'Chinese' }] },
+          { id: '白桦', name: '白桦', provider: 'mimo-audio-speech', gender: 'male', languages: [{ code: 'zh', title: 'Chinese' }] },
           { id: 'mimo_default', name: 'MiMo-默认', provider: 'mimo-audio-speech', gender: 'female', languages: [{ code: 'en', title: 'English' }, { code: 'zh', title: 'Chinese' }] },
           { id: '冰糖', name: '冰糖', provider: 'mimo-audio-speech', gender: 'female', languages: [{ code: 'zh', title: 'Chinese' }] },
           { id: '茉莉', name: '茉莉', provider: 'mimo-audio-speech', gender: 'female', languages: [{ code: 'zh', title: 'Chinese' }] },
@@ -1699,7 +2377,10 @@ export const useProvidersStore = defineStore('providers', () => {
           { id: 'Chloe', name: 'Chloe', provider: 'mimo-audio-speech', gender: 'female', languages: [{ code: 'en', title: 'English' }] },
           { id: 'Milo', name: 'Milo', provider: 'mimo-audio-speech', gender: 'male', languages: [{ code: 'en', title: 'English' }] },
           { id: 'Dean', name: 'Dean', provider: 'mimo-audio-speech', gender: 'male', languages: [{ code: 'en', title: 'English' }] },
-        ],
+        ].filter((voice, index, voices) => {
+          const officialVoiceIds = new Set(['mimo_default', '冰糖', '茉莉', '苏打', '白桦', 'Mia', 'Chloe', 'Milo', 'Dean'])
+          return officialVoiceIds.has(voice.id) && voices.findIndex(candidate => candidate.id === voice.id) === index
+        }),
       },
       validators: {
         chatPingCheckAvailable: false,
@@ -2272,6 +2953,7 @@ export const useProvidersStore = defineStore('providers', () => {
 
   // const validatedCredentials = ref<Record<string, string>>({})
   const providerRuntimeState = ref<Record<string, ProviderRuntimeState>>({})
+  const visionProviderRuntimeState = ref<Record<string, Pick<ProviderRuntimeState, 'models' | 'isLoadingModels' | 'modelLoadError'>>>({})
   const providerValidationInFlight = new Map<string, Promise<boolean>>()
   const providerRevalidationLoops = new Map<string, { resume: () => void }>()
 
@@ -2379,6 +3061,13 @@ export const useProvidersStore = defineStore('providers', () => {
         modelLoadError: null,
       }
     }
+    if (!visionProviderRuntimeState.value[providerId]) {
+      visionProviderRuntimeState.value[providerId] = {
+        models: [],
+        isLoadingModels: false,
+        modelLoadError: null,
+      }
+    }
   }
 
   // Initialize all providers
@@ -2455,9 +3144,26 @@ export const useProvidersStore = defineStore('providers', () => {
     return result
   })
 
+  const isLoadingVisionModels = computed(() => {
+    const result: Record<string, boolean> = {}
+    for (const [key, state] of Object.entries(visionProviderRuntimeState.value)) {
+      result[key] = state.isLoadingModels
+    }
+    return result
+  })
+
+  const visionModelLoadError = computed(() => {
+    const result: Record<string, string | null> = {}
+    for (const [key, state] of Object.entries(visionProviderRuntimeState.value)) {
+      result[key] = state.modelLoadError
+    }
+    return result
+  })
+
   function deleteProvider(providerId: string) {
     delete providerCredentials.value[providerId]
     delete providerRuntimeState.value[providerId]
+    delete visionProviderRuntimeState.value[providerId]
     unmarkProviderAdded(providerId)
   }
 
@@ -2485,6 +3191,7 @@ export const useProvidersStore = defineStore('providers', () => {
     providerCredentials.value = {}
     addedProviders.value = {}
     providerRuntimeState.value = {}
+    visionProviderRuntimeState.value = {}
 
     Object.keys(providerMetadata).forEach(initializeProvider)
     await updateConfigurationStatus()
@@ -2541,6 +3248,59 @@ export const useProvidersStore = defineStore('providers', () => {
   // Get models for a specific provider
   function getModelsForProvider(providerId: string) {
     return providerRuntimeState.value[providerId]?.models || []
+  }
+
+  async function fetchVisionModelsForProvider(providerId: string) {
+    const metadata = providerMetadata[providerId]
+    if (!metadata)
+      return []
+
+    const config = providerCredentials.value[providerId]
+    if (!config && metadata.requiresCredentials !== false)
+      return []
+
+    if (!visionProviderRuntimeState.value[providerId]) {
+      visionProviderRuntimeState.value[providerId] = {
+        models: [],
+        isLoadingModels: false,
+        modelLoadError: null,
+      }
+    }
+
+    const runtimeState = visionProviderRuntimeState.value[providerId]
+    runtimeState.isLoadingModels = true
+    runtimeState.modelLoadError = null
+
+    try {
+      const rawModels = metadata.capabilities.listModels ? await metadata.capabilities.listModels(config || {}) : []
+      const models = metadata.category === 'vision'
+        ? rawModels
+        : filterVisionModels(providerId, rawModels)
+
+      runtimeState.models = uniqBy(models.filter(model => !!model.id), m => m.id)
+        .map(model => ({
+          id: model.id,
+          name: model.name,
+          description: model.description,
+          contextLength: model.contextLength,
+          deprecated: model.deprecated,
+          provider: providerId,
+          capabilities: model.capabilities,
+        }))
+      return runtimeState.models
+    }
+    catch (error) {
+      console.error(`Error fetching vision models for ${providerId}:`, error)
+      runtimeState.modelLoadError = error instanceof Error ? error.message : 'Unknown error'
+      return []
+    }
+    finally {
+      runtimeState.isLoadingModels = false
+    }
+  }
+
+  function getVisionModelsForProvider(providerId: string) {
+    return visionProviderRuntimeState.value[providerId]?.models || []
   }
 
   // Get all available models across all configured providers
@@ -2713,6 +3473,19 @@ export const useProvidersStore = defineStore('providers', () => {
     return availableProvidersMetadata.value.filter(metadata => metadata.category === 'transcription')
   })
 
+  const allVisionProvidersMetadata = computed(() => {
+    return availableProvidersMetadata.value.filter((metadata) => {
+      if (metadata.category === 'vision')
+        return true
+      if (metadata.category !== 'chat')
+        return false
+      // The chat OpenAI-compatible provider is intentionally not reused here:
+      // vision has its own OpenAI-compatible provider so consciousness and
+      // vision can point at different base URLs/API vendors.
+      return metadata.id !== 'openai-compatible'
+    })
+  })
+
   const configuredChatProvidersMetadata = computed(() => {
     return allChatProvidersMetadata.value.filter(metadata => configuredProviders.value[metadata.id])
   })
@@ -2723,6 +3496,10 @@ export const useProvidersStore = defineStore('providers', () => {
 
   const configuredTranscriptionProvidersMetadata = computed(() => {
     return allAudioTranscriptionProvidersMetadata.value.filter(metadata => configuredProviders.value[metadata.id])
+  })
+
+  const configuredVisionProvidersMetadata = computed(() => {
+    return allVisionProvidersMetadata.value.filter(metadata => configuredProviders.value[metadata.id])
   })
 
   function isProviderConfigDirty(providerId: string) {
@@ -2754,6 +3531,10 @@ export const useProvidersStore = defineStore('providers', () => {
     return persistedProvidersMetadata.value.filter(metadata => metadata.category === 'transcription')
   })
 
+  const persistedVisionProvidersMetadata = computed(() => {
+    return persistedProvidersMetadata.value.filter(metadata => metadata.category === 'vision')
+  })
+
   function getProviderConfig(providerId: string) {
     return providerCredentials.value[providerId]
   }
@@ -2768,6 +3549,7 @@ export const useProvidersStore = defineStore('providers', () => {
     availableProviders,
     configuredProviders,
     providerRuntimeState,
+    visionProviderRuntimeState,
     providerMetadata,
     getProviderMetadata,
     getTranscriptionFeatures,
@@ -2777,8 +3559,12 @@ export const useProvidersStore = defineStore('providers', () => {
     availableModels,
     isLoadingModels,
     modelLoadError,
+    isLoadingVisionModels,
+    visionModelLoadError,
     fetchModelsForProvider,
     getModelsForProvider,
+    fetchVisionModelsForProvider,
+    getVisionModelsForProvider,
     allAvailableModels,
     loadModelsForConfiguredProviders,
     getProviderInstance,
@@ -2790,12 +3576,15 @@ export const useProvidersStore = defineStore('providers', () => {
     allChatProvidersMetadata,
     allAudioSpeechProvidersMetadata,
     allAudioTranscriptionProvidersMetadata,
+    allVisionProvidersMetadata,
     configuredChatProvidersMetadata,
     configuredSpeechProvidersMetadata,
     configuredTranscriptionProvidersMetadata,
+    configuredVisionProvidersMetadata,
     persistedProvidersMetadata,
     persistedChatProvidersMetadata,
     persistedSpeechProvidersMetadata,
     persistedTranscriptionProvidersMetadata,
+    persistedVisionProvidersMetadata,
   }
 })

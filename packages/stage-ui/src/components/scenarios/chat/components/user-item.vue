@@ -37,6 +37,20 @@ const content = computed(() => {
   return ''
 })
 
+const imageUrls = computed(() => {
+  const raw = props.message.content
+  if (!Array.isArray(raw))
+    return []
+
+  return raw
+    .filter(part => 'type' in part && part.type === 'image_url')
+    .map((part) => {
+      const imageUrl = (part as { image_url?: { url?: string } }).image_url
+      return imageUrl?.url
+    })
+    .filter((url): url is string => !!url)
+})
+
 const containerClasses = computed(() => [
   'flex',
   props.variant === 'mobile' ? 'ml-0 flex-row' : 'ml-12 flex-row-reverse',
@@ -68,6 +82,15 @@ const copyText = computed(() => getChatHistoryItemCopyText(props.message as Chat
         >
           <div>
             <span text-sm text="black/60 dark:white/65" font-normal class="inline <sm:hidden">{{ label }}</span>
+          </div>
+          <div v-if="imageUrls.length" class="mb-2 grid max-w-[min(360px,70vw)] gap-2" :class="imageUrls.length === 1 ? 'grid-cols-1' : 'grid-cols-2'">
+            <img
+              v-for="(url, index) in imageUrls"
+              :key="index"
+              :src="url"
+              alt="Attached image"
+              class="max-h-56 w-full rounded-lg object-cover"
+            >
           </div>
           <MarkdownRenderer
             :content="content as string"

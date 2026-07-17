@@ -1,9 +1,10 @@
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { Message, Tool } from '@xsai/shared-chat'
 
-import { describe, expect, it, vi } from 'vitest'
+import { stepCountAtLeast } from '@xsai/shared-chat'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { isContentArrayRelatedError, sanitizeMessages, streamFrom } from './llm-service'
+import { dedupeToolsByName, isContentArrayRelatedError, sanitizeMessages, streamFrom } from './llm-service'
 
 const { streamTextMock } = vi.hoisted(() => ({
   streamTextMock: vi.fn(),
@@ -27,6 +28,12 @@ const provider = {
   }),
 } as unknown as ChatProvider
 
+beforeEach(() => {
+  streamTextMock.mockReset()
+  ;(stepCountAtLeast as unknown as ReturnType<typeof vi.fn>).mockReset()
+  ;(stepCountAtLeast as unknown as ReturnType<typeof vi.fn>).mockReturnValue('stop-when')
+})
+
 function createMockStreamResult(steps: Promise<unknown[]> = Promise.resolve([])) {
   return {
     steps,
@@ -35,6 +42,73 @@ function createMockStreamResult(steps: Promise<unknown[]> = Promise.resolve([]))
     totalUsage: Promise.resolve(undefined),
   }
 }
+
+describe('dedupeToolsByName', () => {
+  it('dedupes provider tools by function name and lets later entries win', () => {
+    const builtinFallback = {
+      type: 'function',
+      function: {
+        name: 'builtIn_mcpCallTool',
+        description: 'fallback',
+        parameters: { type: 'object', properties: {} },
+      },
+      execute: vi.fn(),
+    } satisfies Tool
+    const runtimeTool = {
+      type: 'function',
+      function: {
+        name: 'builtIn_mcpCallTool',
+        description: 'runtime',
+        parameters: { type: 'object', properties: {} },
+      },
+      execute: vi.fn(),
+    } satisfies Tool
+    const uniqueTool = {
+      type: 'function',
+      function: {
+        name: 'mcp_browser_navigate',
+        description: 'Navigate browser.',
+        parameters: { type: 'object', properties: {} },
+      },
+      execute: vi.fn(),
+    } satisfies Tool
+
+    expect(dedupeToolsByName([builtinFallback, runtimeTool, uniqueTool])).toEqual([
+      runtimeTool,
+      uniqueTool,
+    ])
+  })
+})
+
+describe('streamFrom step budget', () => {
+  it('uses a larger default step budget for multi-tool tasks', async () => {
+    streamTextMock.mockReturnValueOnce(createMockStreamResult())
+
+    await streamFrom({
+      model: 'model-a',
+      chatProvider: provider,
+      messages: [{ role: 'user', content: 'browse until done' }] as Message[],
+    })
+
+    expect(stepCountAtLeast).toHaveBeenCalledWith(64)
+    expect(streamTextMock.mock.calls[0]?.[0].stopWhen).toBe('stop-when')
+  })
+
+  it('allows callers to override and clamps the stream step budget', async () => {
+    streamTextMock.mockReturnValueOnce(createMockStreamResult())
+
+    await streamFrom({
+      model: 'model-a',
+      chatProvider: provider,
+      messages: [{ role: 'user', content: 'browse until done' }] as Message[],
+      options: {
+        maxSteps: 200,
+      },
+    })
+
+    expect(stepCountAtLeast).toHaveBeenCalledWith(200)
+  })
+})
 
 describe('streamFrom tool error capture', () => {
   /**
@@ -232,6 +306,19 @@ describe('isContentArrayRelatedError', () => {
      * // -> true
      */
     const wire = 'Remote sent 400 response: {"error":{"message":"Failed to deserialize the JSON body into the target type: messages[7]: invalid type: sequence, expected a string at line 1 column 5603","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}'
+    expect(isContentArrayRelatedError(wire)).toBe(true)
+    expect(isContentArrayRelatedError(new Error(wire))).toBe(true)
+  })
+
+  it('detects Rust/serde providers that reject image_url parts in history', () => {
+    /**
+     * @example
+     * isContentArrayRelatedError(
+     *   `Remote sent 400 response: {"error":{"message":"Failed to deserialize the JSON body into the target type: messages[35]: unknown variant image_url, expected text at line 1 column 705835"}}`
+     * )
+     * // -> true
+     */
+    const wire = 'Remote sent 400 response: {"error":{"message":"Failed to deserialize the JSON body into the target type: messages[35]: unknown variant image_url, expected text at line 1 column 705835","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}'
     expect(isContentArrayRelatedError(wire)).toBe(true)
     expect(isContentArrayRelatedError(new Error(wire))).toBe(true)
   })

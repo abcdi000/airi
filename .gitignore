@@ -109,6 +109,20 @@ web-ext.config.ts
 # Data
 .postgres
 twitter-session.json
+docs/lumi/migrated-data/
+scripts/lumi/__pycache__/
+*.pyc
+external-plugins/lumi-diary/config.json
+
+# Local agent/runtime artifacts
+.codex/
+.tmp/
+.computer-use-mcp/
+.playwright-mcp/
+**/.computer-use-mcp/
+**/.playwright-mcp/
+moussy-snapshot-*.yml
+external-mcp/
 
 # Symlinks created by nix build
 result*

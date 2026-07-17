@@ -1,6 +1,6 @@
 import type { IntentHandle, IntentOptions, PlaybackItem } from '@proj-airi/pipelines-audio'
 
-import type { StreamingTtsPipelineOptions } from './streaming-pipeline'
+import type { HybridStreamingTtsOptions, StreamingTtsPipelineOptions } from './streaming-pipeline'
 
 import { createStreamingTtsPipeline } from './streaming-pipeline'
 
@@ -72,7 +72,14 @@ export interface StreamingSessionSnapshot {
   model: string
   voice: string
   bufferEntireSession: boolean
+  serverUrl?: string
+  wsPath?: string
+  token?: string
+  requiresAuth?: boolean
+  responseFormat?: 'mp3' | 'opus' | 'aac' | 'flac' | 'pcm' | 'wav'
   extraBody: Record<string, unknown>
+  hybrid?: HybridStreamingTtsOptions
+  onDebug?: StreamingTtsPipelineOptions['onDebug']
   /**
    * `ownerId` to stamp on each `PlaybackItem`. Mirrors the value the
    * segmenter-based intent uses (`activeCardId`) so playback manager
@@ -156,11 +163,19 @@ export function createStreamingTtsSession<TAudio = AudioBuffer>(
   let terminated = false
 
   const handle = pipelineFactory({
+    debugSessionId: intentId,
     model: snapshot.model,
     voice: snapshot.voice,
+    serverUrl: snapshot.serverUrl,
+    wsPath: snapshot.wsPath,
+    token: snapshot.token,
+    requiresAuth: snapshot.requiresAuth,
+    responseFormat: snapshot.responseFormat,
     audioContext,
     bufferEntireSession: snapshot.bufferEntireSession,
     extraBody: snapshot.extraBody,
+    hybrid: snapshot.hybrid,
+    onDebug: snapshot.onDebug,
     onSentence: ({ index, text, audio }) => {
       if (terminated)
         return

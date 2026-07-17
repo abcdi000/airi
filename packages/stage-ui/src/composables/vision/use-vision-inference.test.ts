@@ -3,6 +3,7 @@ import { reactive, toRefs } from 'vue'
 
 const stream = vi.fn()
 const getProviderInstance = vi.fn()
+const getProviderMetadata = vi.fn()
 
 vi.mock('pinia', async () => {
   const actual = await vi.importActual<typeof import('pinia')>('pinia')
@@ -21,6 +22,7 @@ vi.mock('../../stores/llm', () => ({
 vi.mock('../../stores/providers', () => ({
   useProvidersStore: () => ({
     getProviderInstance,
+    getProviderMetadata,
   }),
 }))
 
@@ -49,6 +51,8 @@ describe('useVisionInference', () => {
         baseURL: 'https://example.com/v1/',
       }),
     })
+    getProviderMetadata.mockReset()
+    getProviderMetadata.mockReturnValue({ category: 'vision' })
   })
 
   afterEach(() => {
@@ -58,6 +62,9 @@ describe('useVisionInference', () => {
   it('passes an abort signal to llmStore.stream', async () => {
     stream.mockImplementation(async (_model, _provider, _messages, options) => {
       expect(options?.abortSignal).toBeInstanceOf(AbortSignal)
+      expect(options?.supportsTools).toBe(false)
+      expect(options?.waitForTools).toBe(false)
+      expect(options?.captureToolErrors).toBe(false)
       options?.onStreamEvent?.({ type: 'text-delta', text: 'Frame summary' })
     })
 

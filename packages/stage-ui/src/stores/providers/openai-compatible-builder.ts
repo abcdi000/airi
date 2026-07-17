@@ -43,7 +43,7 @@ export function buildOpenAICompatibleProvider(
     description: string
     nameKey: string
     descriptionKey: string
-    category?: 'chat' | 'embed' | 'speech' | 'transcription'
+    category?: 'chat' | 'embed' | 'speech' | 'transcription' | 'vision'
     tasks?: string[]
     defaultBaseUrl?: string
     creator: ProviderCreator
@@ -204,7 +204,7 @@ export function buildOpenAICompatibleProvider(
               headers: additionalHeaders,
               model,
               messages: message.messages(message.user('ping')),
-              max_tokens: 1,
+              max_tokens: 32,
             })
             return null
           }

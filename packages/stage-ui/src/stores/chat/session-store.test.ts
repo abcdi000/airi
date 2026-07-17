@@ -1,8 +1,10 @@
 import type { ChatSessionMeta, ChatSessionRecord, ChatSessionsIndex } from '../../types/chat-session'
 
 import { createPinia, setActivePinia } from 'pinia'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe as baseDescribe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
+
+const describe = baseDescribe.sequential
 
 // Refs the store reads through the mocked `useAuthStore` / `useAiriCardStore`.
 // Tests mutate these to simulate auth and card swaps.
@@ -26,6 +28,64 @@ vi.mock('pinia', async () => {
     ...actual,
     storeToRefs: (store: any) => store,
   }
+})
+
+describe('chat-session-store · Lumi main timeline', () => {
+  it('uses a single deterministic main timeline for Lumi and marks old sessions as legacy', async () => {
+    const oldMeta: ChatSessionMeta = {
+      sessionId: 'old-lumi-session',
+      userId: 'local',
+      characterId: 'lumi',
+      createdAt: 10,
+      updatedAt: 20,
+    }
+    const oldIndex: ChatSessionsIndex = {
+      userId: 'local',
+      characters: {
+        lumi: {
+          activeSessionId: 'old-lumi-session',
+          sessions: { 'old-lumi-session': oldMeta },
+        },
+      },
+    }
+    getIndexMock.mockResolvedValue(oldIndex)
+    getSessionMock.mockResolvedValue({
+      meta: oldMeta,
+      messages: [
+        { role: 'system', content: 'system', id: 'sys' },
+        { role: 'user', content: 'Doggy old message', id: 'u1' },
+      ] as any,
+    })
+    activeCardIdRef.value = 'lumi'
+
+    const store = useChatSessionStore()
+    await store.initialize()
+
+    expect(store.activeSessionId).not.toBe('old-lumi-session')
+    expect(store.sessionMetas[store.activeSessionId]?.timelineType).toBe('main')
+    expect(store.sessionMetas['old-lumi-session']?.timelineType).toBe('legacy')
+    expect(store.sessionMetas['old-lumi-session']?.parentTimelineId).toBe(store.activeSessionId)
+    expect(store.getSessionMessages(store.activeSessionId).some(message => message.id === 'u1')).toBe(true)
+  })
+
+  it('clears only the visible Lumi chat window without deleting stored main timeline messages', async () => {
+    activeCardIdRef.value = 'lumi'
+    const store = useChatSessionStore()
+    await store.initialize()
+    const sessionId = store.activeSessionId
+    store.setSessionMessages(sessionId, [
+      { role: 'system', content: 'system', id: 'sys' },
+      { role: 'user', content: 'first visible message', id: 'u1' },
+      { role: 'assistant', content: 'reply', id: 'a1', slices: [], tool_results: [] },
+    ] as any)
+
+    store.cleanupMessages(sessionId)
+    await flushMicrotasks()
+
+    expect(store.getSessionMessages(sessionId).map(message => message.id)).toEqual(['sys', 'u1', 'a1'])
+    expect(store.getVisibleSessionMessages(sessionId)).toEqual([])
+    expect(store.sessionMetas[sessionId]?.visibleFromMessageId).toBe('a1')
+  })
 })
 
 vi.mock('../auth', () => ({
@@ -111,6 +171,15 @@ beforeEach(() => {
   dropOutboxForSessionMock.mockReset().mockResolvedValue(undefined)
   getTombstonesMock.mockReset().mockResolvedValue([])
   removeTombstonesMock.mockReset().mockResolvedValue(undefined)
+})
+
+afterEach(() => {
+  try {
+    useChatSessionStore().$dispose()
+  }
+  catch {
+    // Store may not have been instantiated in a failed setup.
+  }
 })
 
 async function flushMicrotasks(rounds = 8) {

@@ -21,6 +21,7 @@ import McpConnectionTestPanel from './components/McpConnectionTestPanel.vue'
 import McpJsonEditor from './components/McpJsonEditor.vue'
 import McpServerForm from './components/McpServerForm.vue'
 
+import { useTamagotchiMcpToolsStore } from '../../../stores/mcp-tools'
 import {
   electronMcpApplyAndRestart,
   electronMcpGetRuntimeStatus,
@@ -34,6 +35,8 @@ import {
   buildConfigFile,
   buildServerConfig,
   createServerForm,
+  createMinecraftMcpServerForm,
+  createWindowsComputerUseMcpServerForm,
   findServerIdentifierByRowId,
   loadServerForms,
   previewServerCommand,
@@ -49,6 +52,7 @@ const invokeGetRuntimeStatus = useElectronEventaInvoke(electronMcpGetRuntimeStat
 const invokeReadConfigText = useElectronEventaInvoke(electronMcpReadConfigText)
 const invokeWriteConfigText = useElectronEventaInvoke(electronMcpWriteConfigText)
 const invokeTestServer = useElectronEventaInvoke(electronMcpTestServer)
+const mcpToolsStore = useTamagotchiMcpToolsStore()
 
 const servers = ref<ServerForm[]>([])
 const runtime = ref<ElectronMcpStdioRuntimeStatus>()
@@ -141,6 +145,15 @@ async function refreshRuntime() {
   runtime.value = await invokeGetRuntimeStatus()
 }
 
+async function refreshRuntimeTools() {
+  try {
+    await mcpToolsStore.refresh()
+  }
+  catch (e) {
+    console.warn('[MCP settings] Failed to refresh MCP LLM tools:', e)
+  }
+}
+
 async function loadFromDisk() {
   const { text } = await invokeReadConfigText()
   try {
@@ -217,6 +230,35 @@ function addServer() {
     testRowId.value = server.rowId
 }
 
+function createUniqueIdentifier(base: string) {
+  const used = new Set(servers.value.map(server => server.identifier.trim()).filter(Boolean))
+  if (!used.has(base))
+    return base
+
+  let index = 2
+  while (used.has(`${base}_${index}`))
+    index += 1
+  return `${base}_${index}`
+}
+
+function addMinecraftPreset() {
+  const server = createMinecraftMcpServerForm()
+  server.identifier = createUniqueIdentifier(server.identifier)
+  servers.value.push(server)
+  expandedIds.value.add(server.rowId)
+  testRowId.value = server.rowId
+  infoMessage.value = tn('messages.minecraft-preset-added')
+}
+
+function addComputerUsePreset() {
+  const server = createWindowsComputerUseMcpServerForm()
+  server.identifier = createUniqueIdentifier(server.identifier)
+  servers.value.push(server)
+  expandedIds.value.add(server.rowId)
+  testRowId.value = server.rowId
+  infoMessage.value = tn('messages.computer-use-preset-added')
+}
+
 function removeServer(rowId: string) {
   const i = servers.value.findIndex(s => s.rowId === rowId)
   if (i >= 0)
@@ -239,6 +281,7 @@ async function saveAndRestart() {
     savedSig.value = JSON.stringify(parsed)
     const result = await invokeApplyAndRestart()
     await refreshRuntime()
+    await refreshRuntimeTools()
     infoMessage.value = tn('messages.restarted', {
       started: result.started.length,
       failed: result.failed.length,
@@ -260,6 +303,7 @@ async function restartServers() {
   try {
     const result = await invokeApplyAndRestart()
     await refreshRuntime()
+    await refreshRuntimeTools()
     infoMessage.value = tn('messages.restarted', {
       started: result.started.length,
       failed: result.failed.length,
@@ -304,7 +348,7 @@ async function runConnectionTest() {
     testResult.value = { ok: false, error: tn('test.server-disabled', { name: target.identifier || '?' }), durationMs: 0 }
     return
   }
-  if (!target.command.trim()) {
+  if (!target.command.trim() && !target.url.trim()) {
     testResult.value = { ok: false, error: tn('errors.empty-command', { name: target.identifier || '?' }), durationMs: 0 }
     return
   }
@@ -325,7 +369,7 @@ async function runConnectionTest() {
 }
 
 onMounted(async () => {
-  const results = await Promise.allSettled([refreshRuntime(), loadFromDisk()])
+  const results = await Promise.allSettled([refreshRuntime(), loadFromDisk(), refreshRuntimeTools()])
   const reasons = results
     .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
     .map(r => errorMessageFrom(r.reason) ?? 'Unknown error')
@@ -449,6 +493,38 @@ onMounted(async () => {
         <p class="text-xs text-neutral-500 dark:text-neutral-400">
           {{ tn('add.description') }}
         </p>
+      </div>
+
+      <div class="flex flex-col gap-3 rounded-lg border border-primary-500/20 bg-primary-500/5 p-3">
+        <div class="flex flex-col gap-1">
+          <div class="text-sm font-medium">
+            {{ tn('add.presets-title') }}
+          </div>
+          <p class="text-xs text-neutral-500 dark:text-neutral-400">
+            {{ tn('add.minecraft-preset-description') }}
+          </p>
+        </div>
+        <Button
+          variant="secondary" size="sm" :disabled="isBusy"
+          icon="i-solar:gamepad-bold-duotone" :label="tn('actions.add-minecraft-preset')"
+          @click="addMinecraftPreset"
+        />
+      </div>
+
+      <div class="flex flex-col gap-3 rounded-lg border border-primary-500/20 bg-primary-500/5 p-3">
+        <div class="flex flex-col gap-1">
+          <div class="text-sm font-medium">
+            {{ tn('add.computer-use-preset-title') }}
+          </div>
+          <p class="text-xs text-neutral-500 dark:text-neutral-400">
+            {{ tn('add.computer-use-preset-description') }}
+          </p>
+        </div>
+        <Button
+          variant="secondary" size="sm" :disabled="isBusy"
+          icon="i-solar:cursor-square-bold-duotone" :label="tn('actions.add-computer-use-preset')"
+          @click="addComputerUsePreset"
+        />
       </div>
 
       <article

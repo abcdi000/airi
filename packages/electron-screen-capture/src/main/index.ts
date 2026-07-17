@@ -200,6 +200,25 @@ export function initScreenCaptureForWindow(window: BrowserWindow, options?: Init
     return sources.map(source => toSerializableDesktopCapturerSource(source))
   })
 
+  defineInvokeHandler(context, screenCapture.captureSource, async (request) => {
+    const sources = await desktopCapturer.getSources(request.options)
+    const source = request.sourceId
+      ? sources.find(source => source.id === request.sourceId) ?? sources.find(source => source.id.startsWith('screen:'))
+      : sources.find(source => source.id.startsWith('screen:')) ?? sources[0]
+
+    if (!source)
+      throw new Error('No screen capture source is available.')
+    if (!source.thumbnail || source.thumbnail.isEmpty())
+      throw new Error(`Capture source "${source.id}" did not provide an image.`)
+
+    const mimeType = request.mimeType || 'image/png'
+    const buffer = mimeType === 'image/jpeg'
+      ? source.thumbnail.toJPEG(request.quality ?? 90)
+      : source.thumbnail.toPNG()
+
+    return `data:${mimeType};base64,${buffer.toString('base64')}`
+  })
+
   defineInvokeHandler(context, screenCapture.setSource, async (request, eventaOptions) => {
     // FIXME: Would be better if `onlySameWindow` in `createContext` also filters out invocations here.
     if (window.webContents.id !== eventaOptions?.raw.ipcMainEvent.sender.id)

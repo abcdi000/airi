@@ -18,9 +18,17 @@ export interface ScreenCaptureSetSourceRequest {
   timeout?: number
 }
 
+export interface ScreenCaptureCaptureSourceRequest {
+  options: SourcesOptions
+  sourceId?: string
+  mimeType?: 'image/png' | 'image/jpeg'
+  quality?: number
+}
+
 export const screenCaptureGetSources = defineInvokeEventa<SerializableDesktopCapturerSource[], SourcesOptions>('eventa:invoke:electron:screen-capture:get-sources')
 export const screenCaptureSetSourceEx = defineInvokeEventa<string, ScreenCaptureSetSourceRequest>('eventa:invoke:electron:screen-capture:set-source')
 export const screenCaptureResetSource = defineInvokeEventa<void, string>('eventa:invoke:electron:screen-capture:reset-source')
+export const screenCaptureCaptureSource = defineInvokeEventa<string, ScreenCaptureCaptureSourceRequest>('eventa:invoke:electron:screen-capture:capture-source')
 
 export const screenCaptureCheckMacOSPermission = defineInvokeEventa<ReturnType<typeof systemPreferences.getMediaAccessStatus>, never>('eventa:invoke:electron:screen-capture:check-macos-permission')
 export const screenCaptureRequestMacOSPermission = defineInvokeEventa<void, never>('eventa:invoke:electron:screen-capture:request-macos-permission')
@@ -29,6 +37,7 @@ export const screenCapture = {
   getSources: screenCaptureGetSources,
   setSource: screenCaptureSetSourceEx,
   resetSource: screenCaptureResetSource,
+  captureSource: screenCaptureCaptureSource,
   checkMacOSPermission: screenCaptureCheckMacOSPermission,
   requestMacOSPermission: screenCaptureRequestMacOSPermission,
 }

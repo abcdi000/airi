@@ -17,6 +17,7 @@ export interface StreamOptions {
   toolsCompatibility?: Map<string, boolean>
   supportsTools?: boolean
   waitForTools?: boolean
+  maxSteps?: number
   captureToolErrors?: boolean
   tools?: Tool[] | (() => Promise<Tool[] | undefined>)
   /**

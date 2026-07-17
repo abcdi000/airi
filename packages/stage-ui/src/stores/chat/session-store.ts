@@ -25,6 +25,7 @@ import {
 import { SERVER_URL } from '../../libs/server'
 import { capturePosthogEvent } from '../analytics/posthog'
 import { useAuthStore } from '../auth'
+import { LUMI_AIRI_CARD_ID } from '../../constants/lumi-card'
 import { useAiriCardStore } from '../modules/airi-card'
 import { mergeLoadedSessionMessages } from './session-message-merge'
 
@@ -46,6 +47,24 @@ interface CloudMergePayload {
  * and so a future schema migration / manual replay can recover them.
  */
 const OUTBOX_MAX_ATTEMPTS = 5
+const LUMI_MAIN_TIMELINE_PREFIX = 'lumi-main'
+
+function stableHash(input: string) {
+  let hash = 2166136261
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function getLumiMainTimelineSessionId(userId: string) {
+  return `${LUMI_MAIN_TIMELINE_PREFIX}-${stableHash(`${userId || 'local'}:${LUMI_AIRI_CARD_ID}`)}`
+}
+
+function isLumiCharacter(characterId?: string) {
+  return characterId === LUMI_AIRI_CARD_ID
+}
 
 export const useChatSessionStore = defineStore('chat-session', () => {
   const { userId, token: authToken } = storeToRefs(useAuthStore())
@@ -367,8 +386,13 @@ export const useChatSessionStore = defineStore('chat-session', () => {
    * - The new session id. When `setActive` is not `false` the session is
    *   also made the active one.
    */
-  async function createSession(characterId: string, options?: { setActive?: boolean, messages?: ChatHistoryItem[], title?: string }) {
+  async function createSession(characterId: string, options?: { setActive?: boolean, messages?: ChatHistoryItem[], title?: string, timelineType?: ChatSessionMeta['timelineType'], parentTimelineId?: string, syncedToMain?: boolean }) {
     const currentUserId = getCurrentUserId()
+    if (isLumiCharacter(characterId) && options?.timelineType !== 'branch' && options?.timelineType !== 'legacy') {
+      await ensureLumiMainTimelineSession(currentUserId, characterId)
+      return activeSessionId.value
+    }
+
     const sessionId = nanoid()
     const now = Date.now()
     const meta: ChatSessionMeta = {
@@ -376,6 +400,9 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       userId: currentUserId,
       characterId,
       title: options?.title,
+      timelineType: options?.timelineType,
+      parentTimelineId: options?.parentTimelineId,
+      syncedToMain: options?.syncedToMain,
       createdAt: now,
       updatedAt: now,
     }
@@ -531,6 +558,91 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     }
   }
 
+  async function ensureLumiMainTimelineSession(currentUserId = getCurrentUserId(), characterId = LUMI_AIRI_CARD_ID) {
+    const mainSessionId = getLumiMainTimelineSessionId(currentUserId)
+    if (!index.value)
+      index.value = { userId: currentUserId, characters: {} }
+
+    const characterIndex = index.value.characters[characterId] ?? {
+      activeSessionId: mainSessionId,
+      sessions: {},
+    }
+
+    const knownMain = characterIndex.sessions[mainSessionId] ?? sessionMetas.value[mainSessionId]
+    if (knownMain) {
+      const nextMeta: ChatSessionMeta = {
+        ...knownMain,
+        sessionId: mainSessionId,
+        userId: currentUserId,
+        characterId,
+        timelineType: 'main',
+      }
+      sessionMetas.value[mainSessionId] = nextMeta
+      characterIndex.sessions[mainSessionId] = nextMeta
+      characterIndex.activeSessionId = mainSessionId
+      index.value.characters[characterId] = characterIndex
+      activeSessionId.value = mainSessionId
+      await loadSession(mainSessionId)
+      ensureSession(mainSessionId)
+      await persistIndex()
+      return mainSessionId
+    }
+
+    const legacyCandidates = Object.values(characterIndex.sessions)
+      .filter(meta => meta.sessionId !== mainSessionId)
+      .filter(meta => meta.characterId === characterId)
+      .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+
+    const sourceMeta = legacyCandidates[0]
+    let initialMessages: ChatHistoryItem[] = [generateInitialMessage()]
+    if (sourceMeta) {
+      await loadSession(sourceMeta.sessionId)
+      const sourceMessages = sessionMessages.value[sourceMeta.sessionId]
+      if (sourceMessages?.length)
+        initialMessages = cloneDeep(sourceMessages)
+    }
+
+    const now = Date.now()
+    const mainMeta: ChatSessionMeta = {
+      sessionId: mainSessionId,
+      userId: currentUserId,
+      characterId,
+      title: 'Lumi Main Timeline',
+      timelineType: 'main',
+      createdAt: sourceMeta?.createdAt ?? now,
+      updatedAt: now,
+    }
+
+    sessionMetas.value[mainSessionId] = mainMeta
+    replaceSessionMessages(mainSessionId, initialMessages, { persist: false })
+    loadedSessions.add(mainSessionId)
+    ensureGeneration(mainSessionId)
+
+    for (const legacyMeta of legacyCandidates) {
+      const nextLegacyMeta: ChatSessionMeta = {
+        ...legacyMeta,
+        timelineType: legacyMeta.timelineType === 'branch' ? 'branch' : 'legacy',
+        parentTimelineId: legacyMeta.parentTimelineId ?? mainSessionId,
+      }
+      sessionMetas.value[legacyMeta.sessionId] = nextLegacyMeta
+      characterIndex.sessions[legacyMeta.sessionId] = nextLegacyMeta
+      void persistSession(legacyMeta.sessionId)
+    }
+
+    characterIndex.sessions[mainSessionId] = mainMeta
+    characterIndex.activeSessionId = mainSessionId
+    index.value.characters[characterId] = characterIndex
+
+    await enqueuePersist(() => chatSessionsRepo.saveSession(mainSessionId, {
+      meta: cloneDeep(mainMeta),
+      messages: cloneDeep(initialMessages),
+    }))
+    await persistIndex()
+    activeSessionId.value = mainSessionId
+
+    return mainSessionId
+  }
+
   /**
    * Load the per-user index, pick (or mint) the active session for the
    * current character, and hydrate it into memory. Reentrant: concurrent
@@ -550,6 +662,11 @@ export const useChatSessionStore = defineStore('chat-session', () => {
         await loadIndexForUser(currentUserId)
       if (isStaleEpoch())
         return
+
+      if (isLumiCharacter(characterId)) {
+        await ensureLumiMainTimelineSession(currentUserId, characterId)
+        return
+      }
 
       const characterIndex = getCharacterIndex(characterId)
       if (!characterIndex) {
@@ -1191,6 +1308,28 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     },
   })
 
+  function getVisibleMessageStartIndex(sessionId = activeSessionId.value) {
+    if (!sessionId)
+      return 0
+    const meta = sessionMetas.value[sessionId]
+    const allMessages = sessionMessages.value[sessionId] ?? []
+    const visibleFromMessageId = meta?.visibleFromMessageId
+    if (!visibleFromMessageId)
+      return 0
+    const index = allMessages.findIndex(message => message.id === visibleFromMessageId)
+    return index >= 0 ? Math.min(index + 1, allMessages.length) : 0
+  }
+
+  function getVisibleSessionMessages(sessionId = activeSessionId.value) {
+    if (!sessionId)
+      return []
+    const allMessages = sessionMessages.value[sessionId] ?? []
+    return allMessages.slice(getVisibleMessageStartIndex(sessionId))
+  }
+
+  const visibleMessageStartIndex = computed(() => getVisibleMessageStartIndex(activeSessionId.value))
+  const visibleMessages = computed<ChatHistoryItem[]>(() => getVisibleSessionMessages(activeSessionId.value))
+
   function setActiveSession(sessionId: string) {
     activeSessionId.value = sessionId
 
@@ -1242,6 +1381,19 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   function cleanupMessages(sessionId = activeSessionId.value) {
     ensureGeneration(sessionId)
     sessionGenerations.value[sessionId] += 1
+    const meta = sessionMetas.value[sessionId]
+    if (isLumiCharacter(meta?.characterId)) {
+      const current = ensureSessionMessageIds(sessionId)
+      const anchor = current[current.length - 1]
+      if (!anchor?.id)
+        return
+      sessionMetas.value[sessionId] = {
+        ...meta!,
+        visibleFromMessageId: anchor.id,
+      }
+      void persistSession(sessionId)
+      return
+    }
     setSessionMessages(sessionId, [generateInitialMessage()])
   }
 
@@ -1305,7 +1457,49 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     const parentMessages = getSessionMessages(options.fromSessionId)
     const forkIndex = options.atIndex ?? parentMessages.length
     const nextMessages = parentMessages.slice(0, forkIndex)
-    return await createSession(characterId, { setActive: false, messages: nextMessages })
+    return await createSession(characterId, {
+      setActive: false,
+      messages: nextMessages,
+      timelineType: isLumiCharacter(characterId) ? 'branch' : undefined,
+      parentTimelineId: isLumiCharacter(characterId) ? getLumiMainTimelineSessionId(getCurrentUserId()) : undefined,
+    })
+  }
+
+  async function completeBranchAndSyncToMain(branchSessionId: string, summary: string) {
+    const branchMeta = sessionMetas.value[branchSessionId]
+    if (!branchMeta || branchMeta.timelineType !== 'branch')
+      throw new Error('Branch session not found')
+
+    const mainSessionId = branchMeta.parentTimelineId ?? getLumiMainTimelineSessionId(branchMeta.userId)
+    await ensureLumiMainTimelineSession(branchMeta.userId, branchMeta.characterId)
+    await loadSession(mainSessionId)
+
+    const now = Date.now()
+    appendSessionMessage(mainSessionId, {
+      id: nanoid(),
+      role: 'assistant',
+      content: [
+        '[system_notice]',
+        'title: 分支任务同步',
+        'status: synced_to_main',
+        `source_branch: ${branchSessionId}`,
+        '',
+        summary,
+      ].join('\n'),
+      createdAt: now,
+    } as ChatHistoryItem)
+
+    sessionMetas.value[branchSessionId] = {
+      ...branchMeta,
+      syncedToMain: true,
+      updatedAt: now,
+    }
+    if (index.value?.characters[branchMeta.characterId]?.sessions[branchSessionId])
+      index.value.characters[branchMeta.characterId].sessions[branchSessionId] = sessionMetas.value[branchSessionId]
+    await persistSession(branchSessionId)
+    await persistIndex()
+
+    return { mainSessionId, branchSessionId, syncedToMain: true }
   }
 
   async function exportSessions(): Promise<ChatSessionsExport> {
@@ -1405,6 +1599,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
 
     activeSessionId,
     messages,
+    visibleMessages,
+    visibleMessageStartIndex,
 
     setActiveSession,
     applyRemoteSnapshot,
@@ -1418,6 +1614,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     appendSessionMessage,
     persistSessionMessages,
     getSessionMessages,
+    getVisibleSessionMessages,
+    getVisibleMessageStartIndex,
     sessionMessages,
     sessionMetas,
     getSessionGeneration,
@@ -1425,6 +1623,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     getSessionGenerationValue,
 
     forkSession,
+    completeBranchAndSyncToMain,
     exportSessions,
     importSessions,
     createSession,

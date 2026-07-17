@@ -31,8 +31,20 @@ export const electronOpenMainDevtools = defineInvokeEventa('eventa:invoke:electr
 export const electronOpenSettings = defineInvokeEventa<void, { route?: string }>('eventa:invoke:electron:windows:settings:open')
 export const electronSettingsNavigate = defineEventa<{ route: string }>('eventa:event:electron:windows:settings:navigate')
 export const electronOpenChat = defineInvokeEventa('eventa:invoke:electron:windows:chat:open')
+export const electronOpenMiniChat = defineInvokeEventa('eventa:invoke:electron:windows:mini-chat:open')
+export const electronOpenMinecraftMcpMonitor = defineInvokeEventa('eventa:invoke:electron:windows:minecraft-mcp-monitor:open')
 export const electronOpenSettingsDevtools = defineInvokeEventa('eventa:invoke:electron:windows:settings:devtools:open')
 export const electronOpenDevtoolsWindow = defineInvokeEventa<void, { key: string, route?: string, width?: number, height?: number, x?: number, y?: number }>('eventa:invoke:electron:windows:devtools:open')
+
+export interface ElectronWindowBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export const electronWindowAnimateBounds = defineInvokeEventa<void, [ElectronWindowBounds, number?]>('eventa:invoke:electron:window:animate-bounds')
+export const electronWindowStopBoundsAnimation = defineInvokeEventa<void>('eventa:invoke:electron:window:stop-bounds-animation')
 
 export interface ElectronServerChannelConfig {
   tlsConfig?: ServerOptions['tlsConfig'] | null
@@ -182,11 +194,18 @@ export interface PluginHostDebugSnapshot {
 }
 
 export interface ElectronMcpStdioServerConfig {
-  command: string
+  command?: string
+  url?: string
+  headers?: Record<string, string>
   args?: string[]
   env?: Record<string, string>
   cwd?: string
   enabled?: boolean
+  startupMode?: 'on_startup' | 'on_first_use' | 'manual'
+  longRunning?: boolean
+  persistent?: boolean
+  requestTimeoutMs?: number
+  maxTotalTimeoutMs?: number
 }
 
 export interface ElectronMcpStdioConfigFile {
@@ -207,6 +226,11 @@ export interface ElectronMcpStdioServerRuntimeStatus {
   args: string[]
   pid: number | null
   lastError?: string
+  startupMode?: 'on_startup' | 'on_first_use' | 'manual'
+  longRunning?: boolean
+  persistent?: boolean
+  requestTimeoutMs?: number
+  maxTotalTimeoutMs?: number
 }
 
 export interface ElectronMcpStdioRuntimeStatus {
@@ -221,11 +245,14 @@ export interface ElectronMcpToolDescriptor {
   toolName: string
   description?: string
   inputSchema: Record<string, unknown>
+  serverLongRunning?: boolean
+  serverPersistent?: boolean
 }
 
 export interface ElectronMcpCallToolPayload {
   name: string
   arguments?: Record<string, unknown>
+  debug?: Record<string, unknown>
 }
 
 export interface ElectronMcpCallToolResult {
@@ -252,11 +279,19 @@ export interface ElectronMcpStdioTestPayload {
   config: ElectronMcpStdioServerConfig
 }
 
+export interface ElectronMcpComputerUseChatTurn {
+  sourceId: string
+  turnId: string
+}
+
 export const electronMcpOpenConfigFile = defineInvokeEventa<{ path: string }>('eventa:invoke:electron:mcp:open-config-file')
 export const electronMcpApplyAndRestart = defineInvokeEventa<ElectronMcpStdioApplyResult>('eventa:invoke:electron:mcp:apply-and-restart')
 export const electronMcpGetRuntimeStatus = defineInvokeEventa<ElectronMcpStdioRuntimeStatus>('eventa:invoke:electron:mcp:get-runtime-status')
 export const electronMcpListTools = defineInvokeEventa<ElectronMcpToolDescriptor[]>('eventa:invoke:electron:mcp:list-tools')
 export const electronMcpCallTool = defineInvokeEventa<ElectronMcpCallToolResult, ElectronMcpCallToolPayload>('eventa:invoke:electron:mcp:call-tool')
+export const electronMcpInterruptComputerUse = defineInvokeEventa<{ interrupted: boolean }>('eventa:invoke:electron:mcp:interrupt-computer-use')
+export const electronMcpSetComputerUseChatActive = defineInvokeEventa<void, { sourceId: string, active: boolean, reset?: boolean, turnId?: string }>('eventa:invoke:electron:mcp:set-computer-use-chat-active')
+export const electronMcpGetComputerUseChatTurn = defineInvokeEventa<ElectronMcpComputerUseChatTurn | undefined>('eventa:invoke:electron:mcp:get-computer-use-chat-turn')
 export const electronMcpReadConfigText = defineInvokeEventa<ElectronMcpStdioConfigText>('eventa:invoke:electron:mcp:read-config-text')
 export const electronMcpWriteConfigText = defineInvokeEventa<ElectronMcpStdioConfigText, { text: string }>('eventa:invoke:electron:mcp:write-config-text')
 export const electronMcpTestServer = defineInvokeEventa<ElectronMcpStdioTestResult, ElectronMcpStdioTestPayload>('eventa:invoke:electron:mcp:test-server')
@@ -294,7 +329,151 @@ export const electronWindowLifecycleChanged = defineEventa<ElectronWindowLifecyc
 export const electronGetWindowLifecycleState = defineInvokeEventa<ElectronWindowLifecycleState>('eventa:invoke:electron:window:get-lifecycle-state')
 export const electronWindowSetAlwaysOnTop = defineInvokeEventa<void, boolean>('eventa:invoke:electron:window:set-always-on-top')
 export const electronAppOpenUserDataFolder = defineInvokeEventa<{ path: string }>('eventa:invoke:electron:app:open-user-data-folder')
+export const electronAppOpenPath = defineInvokeEventa<{ path: string }, { path: string }>('eventa:invoke:electron:app:open-path')
 export const electronAppQuit = defineInvokeEventa<void>('eventa:invoke:electron:app:quit')
+
+export interface ElectronLumiMemorySnapshot {
+  fragments: Record<string, any>[]
+  events: Record<string, any>[]
+  seedId: string
+  dbPath?: string
+}
+
+export interface ElectronLumiMemoryVectorRecord {
+  memoryId: string
+  model: string
+  signature: string
+  vector: number[]
+  device?: string
+  updatedAt: string
+}
+
+export interface ElectronLumiMemoryVectorStatus {
+  available: boolean
+  running: boolean
+  model: string
+  device: string
+  phase?: string
+  indexedCount: number
+  totalCount: number
+  missingCount: number
+  downloadPercent?: number
+  downloadedBytes?: number
+  downloadTotalBytes?: number
+  downloadSpeedBytesPerSecond?: number
+  progress?: string
+  lastError?: string
+}
+
+export interface ElectronLumiMemoryVectorSearchResult {
+  scores: Record<string, number>
+  status: ElectronLumiMemoryVectorStatus
+}
+
+export const electronLumiMemoryGetSnapshot = defineInvokeEventa<ElectronLumiMemorySnapshot>('eventa:invoke:electron:lumi-memory:get-snapshot')
+export const electronLumiMemoryReplaceSnapshot = defineInvokeEventa<ElectronLumiMemorySnapshot, ElectronLumiMemorySnapshot>('eventa:invoke:electron:lumi-memory:replace-snapshot')
+export const electronLumiMemoryUpsertMemory = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-memory:upsert-memory')
+export const electronLumiMemoryDeleteMemory = defineInvokeEventa<void, { id: string }>('eventa:invoke:electron:lumi-memory:delete-memory')
+export const electronLumiMemoryGetVectors = defineInvokeEventa<ElectronLumiMemoryVectorRecord[], { model: string }>('eventa:invoke:electron:lumi-memory:get-vectors')
+export const electronLumiMemoryUpsertVector = defineInvokeEventa<void, ElectronLumiMemoryVectorRecord>('eventa:invoke:electron:lumi-memory:upsert-vector')
+export const electronLumiMemoryDeleteVector = defineInvokeEventa<void, { memoryId: string, model?: string }>('eventa:invoke:electron:lumi-memory:delete-vector')
+export const electronLumiMemoryVectorStatus = defineInvokeEventa<ElectronLumiMemoryVectorStatus>('eventa:invoke:electron:lumi-memory:vector-status')
+export const electronLumiMemoryBackfillVectors = defineInvokeEventa<ElectronLumiMemoryVectorStatus, { limit?: number }>('eventa:invoke:electron:lumi-memory:backfill-vectors')
+export const electronLumiMemorySearchVectors = defineInvokeEventa<ElectronLumiMemoryVectorSearchResult, { query: string, limit?: number }>('eventa:invoke:electron:lumi-memory:search-vectors')
+export const electronLumiMemorySyncVector = defineInvokeEventa<ElectronLumiMemoryVectorStatus, Record<string, any>>('eventa:invoke:electron:lumi-memory:sync-vector')
+export const electronLumiMemorySaveEvent = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-memory:save-event')
+export const electronLumiMemorySetSeedId = defineInvokeEventa<void, { seedId: string }>('eventa:invoke:electron:lumi-memory:set-seed-id')
+export const electronLumiMemoryClear = defineInvokeEventa<void>('eventa:invoke:electron:lumi-memory:clear')
+
+export interface ElectronLumiUserProfileSnapshot {
+  entries: Record<string, any>[]
+  pendingUpdates: Record<string, any>[]
+  events: Record<string, any>[]
+  autoUpdateEnabled: boolean
+  bootstrapVersion: string
+  dbPath?: string
+  meta?: Record<string, any>
+}
+
+export const electronLumiUserProfileGetSnapshot = defineInvokeEventa<ElectronLumiUserProfileSnapshot>('eventa:invoke:electron:lumi-user-profile:get-snapshot')
+export const electronLumiUserProfileReplaceSnapshot = defineInvokeEventa<ElectronLumiUserProfileSnapshot, ElectronLumiUserProfileSnapshot>('eventa:invoke:electron:lumi-user-profile:replace-snapshot')
+export const electronLumiUserProfileSaveEntry = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-user-profile:save-entry')
+export const electronLumiUserProfileUpdateEntry = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-user-profile:update-entry')
+export const electronLumiUserProfileArchiveEntry = defineInvokeEventa<void, { id: string }>('eventa:invoke:electron:lumi-user-profile:archive-entry')
+export const electronLumiUserProfileDeleteEntry = defineInvokeEventa<void, { id: string }>('eventa:invoke:electron:lumi-user-profile:delete-entry')
+export const electronLumiUserProfileSaveEvidence = defineInvokeEventa<void, { entryId: string, evidence: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:save-evidence')
+export const electronLumiUserProfileSaveHistory = defineInvokeEventa<void, { entryId?: string, history?: Record<string, any>, event?: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:save-history')
+export const electronLumiUserProfileSavePendingUpdate = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-user-profile:save-pending-update')
+export const electronLumiUserProfileApprovePendingUpdate = defineInvokeEventa<void, { id: string, entry?: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:approve-pending-update')
+export const electronLumiUserProfileRejectPendingUpdate = defineInvokeEventa<void, { id: string }>('eventa:invoke:electron:lumi-user-profile:reject-pending-update')
+export const electronLumiUserProfileSetMeta = defineInvokeEventa<void, { key: string, value: any }>('eventa:invoke:electron:lumi-user-profile:set-meta')
+export const electronLumiUserProfileClear = defineInvokeEventa<void>('eventa:invoke:electron:lumi-user-profile:clear')
+
+export interface ElectronLumiCurrentStateSnapshot {
+  state: Record<string, any> | null
+  dbPath?: string
+}
+
+export const electronLumiCurrentStateGetSnapshot = defineInvokeEventa<ElectronLumiCurrentStateSnapshot>('eventa:invoke:electron:lumi-current-state:get-snapshot')
+export const electronLumiCurrentStateSaveSnapshot = defineInvokeEventa<ElectronLumiCurrentStateSnapshot, ElectronLumiCurrentStateSnapshot>('eventa:invoke:electron:lumi-current-state:save-snapshot')
+export const electronLumiCurrentStateClear = defineInvokeEventa<void>('eventa:invoke:electron:lumi-current-state:clear')
+
+export interface ElectronClaudeCodeAgentRunPayload {
+  userRequest: string
+  taskType?: string
+  permissionMode?: string
+  targetName?: string
+  condaEnv?: string
+  settings?: Record<string, any>
+  continueFromTaskId?: string
+  continueFromTaskName?: string
+  detached?: boolean
+}
+
+export interface ElectronClaudeCodeAgentResult {
+  taskId: string
+  status: 'running' | 'success' | 'failed' | 'cancelled' | 'timeout'
+  stdout: string
+  stderr: string
+  changedFiles: string[]
+  createdFiles: string[]
+  modifiedFiles: string[]
+  deletedFiles: string[]
+  startedAt: string
+  endedAt: string
+  exitCode?: number
+  error?: string
+  diagnostics?: Record<string, any>
+  task?: Record<string, any>
+  log?: Record<string, any>
+}
+
+export interface ElectronClaudeCodeAgentTaskEvent {
+  id: string
+  taskId: string
+  type: 'created' | 'started' | 'stdout' | 'stderr' | 'permission_request' | 'permission_decision' | 'completed' | 'error'
+  message: string
+  createdAt: string
+  data?: Record<string, any>
+}
+
+export interface ElectronClaudeCodeAgentTaskSnapshot {
+  taskId?: string
+  events: ElectronClaudeCodeAgentTaskEvent[]
+  log?: Record<string, any>
+  running: boolean
+}
+
+export const electronClaudeCodeAgentRunTask = defineInvokeEventa<ElectronClaudeCodeAgentResult, ElectronClaudeCodeAgentRunPayload>('eventa:invoke:electron:lumi-agent:claude-code:run-task')
+export const electronClaudeCodeAgentCancelTask = defineInvokeEventa<void, { taskId: string }>('eventa:invoke:electron:lumi-agent:claude-code:cancel-task')
+export const electronClaudeCodeAgentGetLog = defineInvokeEventa<Record<string, any> | undefined, { taskId: string, settings?: Record<string, any> }>('eventa:invoke:electron:lumi-agent:claude-code:get-log')
+export const electronClaudeCodeAgentListLogs = defineInvokeEventa<Record<string, any>[], { limit?: number, settings?: Record<string, any> }>('eventa:invoke:electron:lumi-agent:claude-code:list-logs')
+export const electronClaudeCodeAgentOpenTaskWindow = defineInvokeEventa<void, { taskId?: string, settings?: Record<string, any> }>('eventa:invoke:electron:lumi-agent:claude-code:open-task-window')
+export const electronClaudeCodeAgentPickCommand = defineInvokeEventa<{ path?: string }>('eventa:invoke:electron:lumi-agent:claude-code:pick-command')
+export const electronClaudeCodeAgentSearchCommand = defineInvokeEventa<{ path?: string, candidates: string[], error?: string }, { command?: string }>('eventa:invoke:electron:lumi-agent:claude-code:search-command')
+export const electronClaudeCodeAgentGetTaskSnapshot = defineInvokeEventa<ElectronClaudeCodeAgentTaskSnapshot, { taskId?: string, settings?: Record<string, any> }>('eventa:invoke:electron:lumi-agent:claude-code:get-task-snapshot')
+export const electronClaudeCodeAgentApproveTaskPermission = defineInvokeEventa<void, { taskId: string }>('eventa:invoke:electron:lumi-agent:claude-code:approve-permission')
+export const electronClaudeCodeAgentRejectTaskPermission = defineInvokeEventa<void, { taskId: string }>('eventa:invoke:electron:lumi-agent:claude-code:reject-permission')
 
 export type ElectronGodotStageState = 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
 

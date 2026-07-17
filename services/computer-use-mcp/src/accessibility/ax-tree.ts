@@ -12,6 +12,7 @@ import type { AXNode, AXSnapshot, AXSnapshotRequest, AXSnapshotTextOptions } fro
 import { platform } from 'node:process'
 
 import { runSwiftScript } from '../utils/swift'
+import { runWindowsHelper } from '../executors/windows-helper'
 
 let nextSnapshotId = 1
 
@@ -238,23 +239,32 @@ export async function captureAXTree(
   config: ComputerUseConfig,
   request: AXSnapshotRequest = {},
 ): Promise<AXSnapshot> {
-  if (platform !== 'darwin') {
-    throw new Error('accessibility tree capture is only supported on macOS')
-  }
-
-  const { stdout } = await runSwiftScript({
-    swiftBinary: config.binaries.swift,
-    timeoutMs: config.timeoutMs,
-    source: axTreeScript(),
-    stdinPayload: {
+  let raw: RawAXOutput
+  if (platform === 'win32') {
+    raw = await runWindowsHelper<RawAXOutput>(config, 'accessibility', {
       pid: request.pid,
       maxDepth: request.maxDepth ?? 15,
-      maxNodes: request.maxNodes ?? 2000,
+      maxNodes: request.maxNodes ?? 800,
       verbose: request.verbose ?? false,
-    },
-  })
-
-  const raw = JSON.parse(stdout.trim()) as RawAXOutput
+    })
+  }
+  else if (platform === 'darwin') {
+    const { stdout } = await runSwiftScript({
+      swiftBinary: config.binaries.swift,
+      timeoutMs: config.timeoutMs,
+      source: axTreeScript(),
+      stdinPayload: {
+        pid: request.pid,
+        maxDepth: request.maxDepth ?? 15,
+        maxNodes: request.maxNodes ?? 2000,
+        verbose: request.verbose ?? false,
+      },
+    })
+    raw = JSON.parse(stdout.trim()) as RawAXOutput
+  }
+  else {
+    throw new Error(`accessibility tree capture is not supported on ${platform}`)
+  }
   const snapshotId = String(nextSnapshotId++)
   const uidToNode = new Map<string, AXNode>()
 

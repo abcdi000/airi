@@ -8,7 +8,7 @@ import type {
   ScreenshotArtifact,
 } from '../types'
 
-import { imageContent, textContent } from './content'
+import { textContent } from './content'
 import { describeExecutionTarget, describeForegroundContext, describePolicy } from './formatters'
 
 export function buildApprovalResponse(
@@ -98,7 +98,6 @@ export function buildSuccessResponse(params: {
   return {
     content: [
       textContent(params.summary),
-      ...(params.screenshot ? [imageContent(params.screenshot)] : []),
     ],
     structuredContent: params.structuredContent,
   }

@@ -4,6 +4,7 @@ import type { ManifestV1, PluginLoadOptions } from '../../../shared/types'
 
 import { isAbsolute, join } from 'node:path'
 import { cwd } from 'node:process'
+import { pathToFileURL } from 'node:url'
 
 function isPluginDefinition(value: unknown): value is ReturnType<typeof definePlugin> {
   return typeof value === 'object'
@@ -36,6 +37,40 @@ async function coercePluginFromModule(moduleValue: unknown): Promise<Plugin> {
   }
 
   throw new Error('Failed to resolve plugin module. The entrypoint must export either definePlugin(...) or Plugin hooks.')
+}
+
+function splitPathSuffix(entrypoint: string): { path: string, suffix: string } {
+  const queryIndex = entrypoint.indexOf('?')
+  const hashIndex = entrypoint.indexOf('#')
+  const suffixIndex = [queryIndex, hashIndex].filter(index => index >= 0).sort((a, b) => a - b)[0]
+
+  if (suffixIndex === undefined) {
+    return { path: entrypoint, suffix: '' }
+  }
+
+  return {
+    path: entrypoint.slice(0, suffixIndex),
+    suffix: entrypoint.slice(suffixIndex),
+  }
+}
+
+function hasSupportedImportScheme(entrypoint: string): boolean {
+  try {
+    const url = new URL(entrypoint)
+    return url.protocol === 'file:' || url.protocol === 'data:' || url.protocol === 'node:'
+  }
+  catch {
+    return false
+  }
+}
+
+export function toFileSystemImportSpecifier(entrypoint: string): string {
+  if (hasSupportedImportScheme(entrypoint)) {
+    return entrypoint
+  }
+
+  const { path, suffix } = splitPathSuffix(entrypoint)
+  return `${pathToFileURL(path).href}${suffix}`
 }
 
 /**
@@ -81,7 +116,7 @@ export class FileSystemLoader {
 
   async loadLazyPluginFor(manifest: ManifestV1, options?: PluginLoadOptions) {
     const entrypoint = this.resolveEntrypointFor(manifest, options)
-    const pluginModule = await import(entrypoint)
+    const pluginModule = await import(toFileSystemImportSpecifier(entrypoint))
 
     if (isPluginDefinition(pluginModule)) {
       return pluginModule
@@ -99,7 +134,7 @@ export class FileSystemLoader {
 
   async loadPluginFor(manifest: ManifestV1, options?: PluginLoadOptions) {
     const entrypoint = this.resolveEntrypointFor(manifest, options)
-    const pluginModule = await import(entrypoint)
+    const pluginModule = await import(toFileSystemImportSpecifier(entrypoint))
     return coercePluginFromModule(pluginModule)
   }
 }

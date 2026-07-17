@@ -3,7 +3,7 @@ import type { SourcesOptions } from 'electron'
 import type { MaybeRefOrGetter } from 'vue'
 
 import { useElectronScreenCapture } from '@proj-airi/electron-screen-capture/vue'
-import { computed, ref, shallowRef, watch } from 'vue'
+import { computed, ref, shallowRef, toRaw, toValue, watch } from 'vue'
 
 import { createObjectUrlFromBytes } from '../utils/create-object-url-from-bytes'
 
@@ -42,6 +42,7 @@ export function useVisionScreenCapture(sourcesOptions: MaybeRefOrGetter<SourcesO
 
   const {
     getSources,
+    captureSource,
     selectWithSource,
   } = useElectronScreenCapture(window.electron.ipcRenderer, sourcesOptions)
 
@@ -52,6 +53,19 @@ export function useVisionScreenCapture(sourcesOptions: MaybeRefOrGetter<SourcesO
       return false
 
     return stream.getVideoTracks().some(track => track.readyState === 'live')
+  }
+
+  function bytesToDataUrl(bytes: Uint8Array | undefined, mime = 'image/jpeg') {
+    if (!bytes || bytes.length === 0)
+      return null
+
+    let binary = ''
+    const chunkSize = 0x8000
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      const chunk = bytes.subarray(offset, offset + chunkSize)
+      binary += String.fromCharCode(...chunk)
+    }
+    return `data:${mime};base64,${btoa(binary)}`
   }
 
   function clearActiveStream() {
@@ -174,11 +188,49 @@ export function useVisionScreenCapture(sourcesOptions: MaybeRefOrGetter<SourcesO
     return canvas.toDataURL('image/jpeg', quality)
   }
 
+  async function captureSourceThumbnail(sourceId = activeSourceId.value) {
+    if (!sourceId)
+      return null
+
+    const freshSources = await getSources()
+    const source = freshSources.find(source => source.id === sourceId)
+      ?? freshSources.find(source => source.id.startsWith('screen:'))
+    const dataUrl = bytesToDataUrl(source?.thumbnail, 'image/jpeg')
+    if (!dataUrl)
+      return null
+
+    revokeSourceObjectUrls(sources.value)
+    sources.value = freshSources.map(source => ({
+      ...source,
+      appIconURL: source.appIcon && source.appIcon.length > 0 ? createObjectUrlFromBytes(source.appIcon, 'image/png') : undefined,
+      thumbnailURL: source.thumbnail && source.thumbnail.length > 0 ? createObjectUrlFromBytes(source.thumbnail, 'image/jpeg') : undefined,
+    }))
+    if (source?.id) {
+      activeSourceId.value = source.id
+      activeStreamSourceId.value = ''
+    }
+    return dataUrl
+  }
+
+  async function captureSourceDataUrl(sourceId = activeSourceId.value) {
+    const dataUrl = await captureSource({
+      options: toRaw(toValue(sourcesOptions)),
+      sourceId,
+      mimeType: 'image/png',
+    })
+    if (sourceId) {
+      activeSourceId.value = sourceId
+      activeStreamSourceId.value = ''
+    }
+    return dataUrl
+  }
+
   return {
     sources,
     activeSourceId,
     activeSource,
     activeStream,
+    activeStreamSourceId,
     isRefetching,
     hasFetchedOnce,
     refetchSources,
@@ -186,5 +238,7 @@ export function useVisionScreenCapture(sourcesOptions: MaybeRefOrGetter<SourcesO
     stopStream,
     cleanup,
     captureFrame,
+    captureSourceDataUrl,
+    captureSourceThumbnail,
   }
 }

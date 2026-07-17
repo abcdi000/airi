@@ -69,6 +69,13 @@ function shouldSkipModelId(modelId: string): boolean {
   ].some(fragment => modelId.includes(fragment))
 }
 
+function normalizeBaseUrl(value: unknown) {
+  let baseUrl = typeof value === 'string' ? value.trim() : value instanceof URL ? value.toString() : ''
+  if (baseUrl && !baseUrl.endsWith('/'))
+    baseUrl += '/'
+  return baseUrl
+}
+
 async function resolveModels<TConfig extends { apiKey?: string | null, baseUrl?: string | URL | null }>(
   config: TConfig,
   provider: ProviderInstance,
@@ -78,7 +85,7 @@ async function resolveModels<TConfig extends { apiKey?: string | null, baseUrl?:
     return providerExtra.listModels(config, provider)
   }
   if (!isModelProvider(provider)) {
-    return listModels({ baseURL: config.baseUrl!, apiKey: config.apiKey! })
+    return listModels({ baseURL: normalizeBaseUrl(config.baseUrl), apiKey: config.apiKey! })
   }
 
   return listModels(provider.model())
@@ -136,11 +143,11 @@ export function createOpenAICompatibleValidators<TConfig extends { apiKey?: stri
     try {
       await generateText({
         apiKey: config.apiKey,
-        baseURL: config.baseUrl!,
+        baseURL: normalizeBaseUrl(config.baseUrl),
         headers: additionalHeaders,
         model: normalizedModel,
         messages: message.messages(message.user('ping')),
-        max_tokens: 1,
+        max_tokens: 32,
       })
 
       return { connectivityOk: true, chatOk: true }

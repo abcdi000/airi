@@ -1,0 +1,41 @@
+{
+  "name": "@proj-airi/playwright-extra-mcp",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Extensible Playwright MCP launcher for Lumi",
+  "license": "MIT",
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "bin": "./dist/bin/run.mjs",
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "boss-forensics": "tsx ./src/bin/boss-forensics.ts",
+    "cdp-forensics": "tsx ./src/bin/cdp-forensics.ts",
+    "capture-identity": "tsx ./src/bin/capture-identity.ts",
+    "decode-boss-safety": "tsx ./src/bin/decode-boss-safety.ts",
+    "smoke": "tsx ./src/bin/smoke.ts",
+    "start": "tsx ./src/bin/run.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config ./vitest.config.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "catalog:",
+    "@playwright/mcp": "0.0.78",
+    "playwright": "1.62.0-alpha-1783623505000",
+    "playwright-extra": "catalog:",
+    "puppeteer-extra-plugin-stealth": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.2",
+    "tsdown": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "^5.9.3",
+    "vitest": "catalog:vitest"
+  }
+}

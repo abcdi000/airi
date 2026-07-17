@@ -21,6 +21,7 @@ const {
   allChatProvidersMetadata,
   allAudioSpeechProvidersMetadata,
   allAudioTranscriptionProvidersMetadata,
+  allVisionProvidersMetadata,
 } = storeToRefs(providersStore)
 
 const allArtistryProvidersMetadata = computed(() => {
@@ -99,6 +100,13 @@ const providerBlocksConfig = [
     providersRef: allAudioTranscriptionProvidersMetadata,
   },
   {
+    id: 'vision',
+    icon: 'i-solar:eye-bold-duotone',
+    title: t('settings.pages.modules.vision.title'),
+    description: t('settings.pages.modules.vision.description'),
+    providersRef: allVisionProvidersMetadata,
+  },
+  {
     id: 'artistry',
     icon: 'i-solar:palette-bold-duotone',
     title: t('settings.pages.providers.categories.artistry.title'),
@@ -143,6 +151,7 @@ const providerBlocks = computed(() => {
         .map(provider => ({
           ...provider,
           renderIndex: globalIndex++,
+          routeCategory: block.id === 'vision' ? 'vision' : provider.category,
         }))
 
       return {
@@ -251,7 +260,7 @@ const providerBlocks = computed(() => {
           :icon="provider.icon"
           :icon-color="provider.iconColor"
           :icon-image="provider.iconImage"
-          :to="`/settings/providers/${provider.category}/${provider.id}`"
+          :to="`/settings/providers/${provider.routeCategory || provider.category}/${provider.id}`"
           :configured="provider.configured"
           :pricing="provider.pricing as any"
           :deployment="provider.deployment as any"

@@ -2,7 +2,7 @@
 import type { ChatAssistantMessage, ChatHistoryItem, ContextMessage } from '../../../../types/chat'
 import type { ChatToolCallRendererRegistry } from './tool-call-renderer'
 
-import { computed, provide, ref } from 'vue'
+import { computed, provide, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import ChatAssistantItem from './assistant-item.vue'
@@ -21,12 +21,19 @@ const props = withDefaults(defineProps<{
   userLabel?: string
   errorLabel?: string
   retryLabel?: string
+  splitAssistantTextBubbles?: boolean
   variant?: 'desktop' | 'mobile'
   toolCallRenderers?: ChatToolCallRendererRegistry
+  baseIndex?: number
+  initialRenderLimit?: number
+  pageSize?: number
 }>(), {
   sending: false,
   variant: 'desktop',
   toolCallRenderers: () => ({}),
+  baseIndex: 0,
+  initialRenderLimit: 160,
+  pageSize: 80,
 })
 
 const emit = defineEmits<{
@@ -56,7 +63,7 @@ function shouldShowPlaceholder(message: ChatHistoryItem) {
 
   return message.context?.createdAt === ts || message.createdAt === ts
 }
-const renderMessages = computed<ChatHistoryItem[]>(() => {
+const fullRenderMessages = computed<ChatHistoryItem[]>(() => {
   if (!props.sending)
     return props.messages
 
@@ -71,43 +78,83 @@ const renderMessages = computed<ChatHistoryItem[]>(() => {
   return [...props.messages, streaming.value]
 })
 
+const pagedStartOffset = ref(0)
+const renderMessages = computed<ChatHistoryItem[]>(() => fullRenderMessages.value.slice(pagedStartOffset.value))
+const canLoadEarlier = computed(() => pagedStartOffset.value > 0)
+
+watch(
+  () => [fullRenderMessages.value.length, props.initialRenderLimit] as const,
+  ([length, limit], previous) => {
+    const previousLength = previous?.[0]
+    const nextDefaultStart = Math.max(0, length - limit)
+    if (previousLength === undefined || pagedStartOffset.value >= Math.max(0, previousLength - limit))
+      pagedStartOffset.value = nextDefaultStart
+    else
+      pagedStartOffset.value = Math.min(pagedStartOffset.value, nextDefaultStart)
+  },
+  { immediate: true },
+)
+
 useChatHistoryScroll({
   containerRef: chatHistoryRef,
   messages: renderMessages,
   getKey: getChatHistoryItemKey,
 })
 
+function getOriginalIndex(localIndex: number) {
+  return props.baseIndex + pagedStartOffset.value + localIndex
+}
+
+function getFullLocalIndex(localIndex: number) {
+  return pagedStartOffset.value + localIndex
+}
+
+function loadEarlierMessages() {
+  pagedStartOffset.value = Math.max(0, pagedStartOffset.value - props.pageSize)
+}
+
 function emitCopyMessage(message: ChatHistoryItem, index: number) {
+  const originalIndex = getOriginalIndex(index)
   emit('copyMessage', {
     message,
-    index,
-    key: getChatHistoryItemKey(message, index),
+    index: originalIndex,
+    key: getChatHistoryItemKey(message, originalIndex),
   })
 }
 
 function emitDeleteMessage(message: ChatHistoryItem, index: number) {
+  const originalIndex = getOriginalIndex(index)
   emit('deleteMessage', {
     message,
-    index,
-    key: getChatHistoryItemKey(message, index),
+    index: originalIndex,
+    key: getChatHistoryItemKey(message, originalIndex),
   })
 }
 
 function emitRetryMessage(message: ChatHistoryItem, index: number) {
+  const originalIndex = getOriginalIndex(index)
   emit('retryMessage', {
     message,
-    index,
-    key: getChatHistoryItemKey(message, index),
+    index: originalIndex,
+    key: getChatHistoryItemKey(message, originalIndex),
   })
 }
 </script>
 
 <template>
   <div ref="chatHistoryRef" v-auto-animate flex="~ col" relative h-full w-full overflow-y-auto rounded-xl px="<sm:2" py="<sm:2" :class="variant === 'mobile' ? 'gap-1' : 'gap-2'">
-    <template v-for="(message, index) in renderMessages" :key="getChatHistoryItemKey(message, index)">
+    <button
+      v-if="canLoadEarlier"
+      type="button"
+      class="mx-auto my-1 rounded-full border border-primary-200/50 px-3 py-1 text-xs text-primary-600 transition hover:bg-primary-50 dark:border-primary-700/50 dark:text-primary-200 dark:hover:bg-primary-900/30"
+      @click="loadEarlierMessages"
+    >
+      加载更早消息
+    </button>
+    <template v-for="(message, index) in renderMessages" :key="getChatHistoryItemKey(message, getOriginalIndex(index))">
       <div
-        :data-chat-message-index="index"
-        :data-chat-message-key="String(getChatHistoryItemKey(message, index))"
+        :data-chat-message-index="getOriginalIndex(index)"
+        :data-chat-message-key="String(getChatHistoryItemKey(message, getOriginalIndex(index)))"
         :data-chat-message-role="message.role"
       >
         <ChatErrorItem
@@ -115,7 +162,7 @@ function emitRetryMessage(message: ChatHistoryItem, index: number) {
           :message="message"
           :label="labels.error"
           :retry-label="labels.retry"
-          :can-retry="renderMessages[index - 1]?.role === 'user'"
+          :can-retry="fullRenderMessages[getFullLocalIndex(index) - 1]?.role === 'user'"
           :show-placeholder="sending && index === renderMessages.length - 1"
           :variant="variant"
           @copy="emitCopyMessage(message, index)"
@@ -128,6 +175,7 @@ function emitRetryMessage(message: ChatHistoryItem, index: number) {
           :label="labels.assistant"
           :show-placeholder="shouldShowPlaceholder(message) && showStreamingPlaceholder"
           :variant="variant"
+          :split-text-bubbles="splitAssistantTextBubbles"
           :tool-call-renderers="toolCallRenderers"
           @copy="emitCopyMessage(message, index)"
           @delete="emitDeleteMessage(message, index)"

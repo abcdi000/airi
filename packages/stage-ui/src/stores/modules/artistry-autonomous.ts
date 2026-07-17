@@ -142,12 +142,13 @@ LATEST ${target === 'assistant' ? 'COMPANION RESPONSE' : 'USER INPUT'}:
         },
       ]
 
-      const modelId = consciousnessStore.activeModel
-      const providerId = consciousnessStore.activeProvider
+      const modelId = artistry.directorModel || consciousnessStore.activeModel
+      const providerId = artistry.directorProvider || consciousnessStore.activeProvider
 
       artistLog('Sending rolled-up prompt to Director LLM...', {
         model: modelId,
         provider: providerId,
+        source: artistry.directorProvider && artistry.directorModel ? 'artistry-director' : 'consciousness-fallback',
         historyCount: recentHistory.length,
         textSubstring: inputText.substring(0, 50),
         target,

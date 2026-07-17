@@ -216,6 +216,36 @@ export function registerComputerUseTools(params: RegisterComputerUseToolsOptions
   )
 
   server.tool(
+    'desktop_list_processes',
+    {
+      limit: z.number().int().min(1).max(64).optional().describe('Maximum number of matching processes to return'),
+      app: z.string().optional().describe('Optional process-name or main-window-title substring filter, for example QQ'),
+    },
+    async (input) => {
+      if (!runtime.executor.listProcesses) {
+        return {
+          isError: true,
+          content: [textContent('Process observation is unavailable for the configured desktop executor.')],
+          structuredContent: { status: 'unavailable', executor: runtime.executor.kind },
+        }
+      }
+
+      const observation = await runtime.executor.listProcesses(input)
+      const summary = observation.processes.length
+        ? observation.processes.map(process => `${process.appName} (PID ${process.pid}${process.hasMainWindow ? ', main window' : ', background'})`).join('; ')
+        : `No process matched ${input.app || 'the requested filter'}.`
+      return {
+        content: [textContent(summary)],
+        structuredContent: {
+          status: 'executed',
+          action: 'list_processes',
+          observation,
+        },
+      }
+    },
+  )
+
+  server.tool(
     'desktop_screenshot',
     {
       label: z.string().optional().describe('Optional label for the saved screenshot file'),
@@ -255,9 +285,10 @@ export function registerComputerUseTools(params: RegisterComputerUseToolsOptions
     'desktop_type_text',
     {
       text: z.string().min(1).describe('Text to type into the focused UI element'),
+      targetApp: z.string().min(1).optional().describe('Windows only: atomically focus and verify this app before injecting text; use this for desktop messaging instead of a separate loose focus step'),
       x: z.number().optional().describe('Optional global logical screen X coordinate to click before typing'),
       y: z.number().optional().describe('Optional global logical screen Y coordinate to click before typing'),
-      pressEnter: z.boolean().optional().describe('Whether to press Enter after typing'),
+      pressEnter: z.boolean().optional().describe('Whether to press Enter after typing. This submits a key event only; it does not independently prove delivery.'),
       captureAfter: z.boolean().optional().describe('Whether to return a fresh screenshot after the action'),
     },
     async (input: TypeTextActionInput) => executeAction({ kind: 'type_text', input }, 'desktop_type_text'),
@@ -267,6 +298,7 @@ export function registerComputerUseTools(params: RegisterComputerUseToolsOptions
     'desktop_press_keys',
     {
       keys: z.array(z.string()).min(1).describe('Single key chord, e.g. ["ctrl", "l"]'),
+      targetApp: z.string().min(1).optional().describe('Windows only: atomically focus and verify this app before sending the shortcut'),
       captureAfter: z.boolean().optional().describe('Whether to return a fresh screenshot after the action'),
     },
     async input => executeAction({ kind: 'press_keys', input }, 'desktop_press_keys'),

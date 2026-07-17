@@ -10,10 +10,17 @@ export interface ServerForm {
   rowId: string
   identifier: string
   command: string
+  url: string
+  headersEntries: { key: string, value: string }[]
   argsText: string
   envEntries: { key: string, value: string }[]
   cwd: string
   enabled: boolean
+  startupMode: 'on_startup' | 'on_first_use' | 'manual'
+  longRunning: boolean
+  persistent: boolean
+  requestTimeoutMs: string
+  maxTotalTimeoutMs: string
 }
 
 /** Editable MCP server rows derived from persisted config. */
@@ -47,10 +54,81 @@ export function createServerForm(): ServerForm {
     rowId: makeRowId(),
     identifier: '',
     command: '',
+    url: '',
+    headersEntries: [],
     argsText: '',
     envEntries: [],
     cwd: '',
     enabled: true,
+    startupMode: 'on_startup',
+    longRunning: false,
+    persistent: false,
+    requestTimeoutMs: '',
+    maxTotalTimeoutMs: '',
+  }
+}
+
+export function createMinecraftMcpServerForm(): ServerForm {
+  return {
+    rowId: makeRowId(),
+    identifier: 'minecraft',
+    command: 'node',
+    url: '',
+    headersEntries: [],
+    argsText: [
+      'dist/main.js',
+      '--host',
+      'localhost',
+      '--port',
+      '25565',
+      '--username',
+      'LumiBot',
+      '--version',
+      '1.20.1',
+      '--auth',
+      'offline',
+    ].join('\n'),
+    envEntries: [],
+    cwd: 'external-mcp/minecraft-mcp-server',
+    enabled: true,
+    startupMode: 'on_first_use',
+    longRunning: true,
+    persistent: true,
+    requestTimeoutMs: '60000',
+    maxTotalTimeoutMs: '180000',
+  }
+}
+
+/** Creates the Windows Computer Use MCP row used by the normal MCP manager. */
+export function createWindowsComputerUseMcpServerForm(): ServerForm {
+  return {
+    rowId: makeRowId(),
+    identifier: 'computer_use',
+    command: 'pnpm',
+    url: '',
+    headersEntries: [],
+    argsText: [
+      '-F',
+      '@proj-airi/computer-use-mcp',
+      'start',
+    ].join('\n'),
+    envEntries: [
+      { key: 'COMPUTER_USE_EXECUTOR', value: 'windows-local' },
+      { key: 'COMPUTER_USE_APPROVAL_MODE', value: 'never' },
+      { key: 'COMPUTER_USE_MAX_OPERATIONS', value: '16' },
+      { key: 'COMPUTER_USE_MAX_OPERATION_UNITS', value: '96' },
+      { key: 'COMPUTER_USE_INTERRUPT_SHORTCUT', value: 'End' },
+      // Playwright is already the dedicated browser route for Lumi. Keeping this
+      // bridge off prevents a second browser-control surface from competing with it.
+      { key: 'COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED', value: 'false' },
+    ],
+    cwd: '.',
+    enabled: true,
+    startupMode: 'on_first_use',
+    longRunning: true,
+    persistent: true,
+    requestTimeoutMs: '60000',
+    maxTotalTimeoutMs: '180000',
   }
 }
 
@@ -61,9 +139,13 @@ export function findServerIdentifierByRowId(servers: ServerForm[], rowId: string
 
 /** Converts one editable server row into persisted MCP server config. */
 export function buildServerConfig(server: ServerForm): ElectronMcpStdioServerConfig {
-  const config: ElectronMcpStdioServerConfig = {
-    command: server.command.trim(),
-  }
+  const config: ElectronMcpStdioServerConfig = {}
+
+  if (server.command.trim())
+    config.command = server.command.trim()
+
+  if (server.url.trim())
+    config.url = server.url.trim()
 
   const args = splitArgsText(server.argsText)
   if (args.length)
@@ -73,11 +155,32 @@ export function buildServerConfig(server: ServerForm): ElectronMcpStdioServerCon
   if (Object.keys(env).length)
     config.env = env
 
+  const headers = envToObject(server.headersEntries)
+  if (Object.keys(headers).length)
+    config.headers = headers
+
   if (server.cwd.trim())
     config.cwd = server.cwd.trim()
 
   if (!server.enabled)
     config.enabled = false
+
+  if (server.startupMode !== 'on_startup')
+    config.startupMode = server.startupMode
+
+  if (server.longRunning)
+    config.longRunning = true
+
+  if (server.persistent)
+    config.persistent = true
+
+  const requestTimeoutMs = Number(server.requestTimeoutMs)
+  if (Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0)
+    config.requestTimeoutMs = Math.round(requestTimeoutMs)
+
+  const maxTotalTimeoutMs = Number(server.maxTotalTimeoutMs)
+  if (Number.isFinite(maxTotalTimeoutMs) && maxTotalTimeoutMs > 0)
+    config.maxTotalTimeoutMs = Math.round(maxTotalTimeoutMs)
 
   return config
 }
@@ -98,7 +201,7 @@ export function buildConfigFile(
     if (seenIdentifiers.has(identifier))
       throw new Error(translateMessage('errors.duplicate-identifier', { name: identifier }))
 
-    if (!server.command.trim())
+    if (!server.command.trim() && !server.url.trim())
       throw new Error(translateMessage('errors.empty-command', { name: identifier }))
 
     seenIdentifiers.add(identifier)
@@ -137,11 +240,18 @@ export function loadServerForms(
   const servers = Object.entries(config.mcpServers ?? {}).map(([identifier, server]) => ({
     rowId: makeRowId(),
     identifier,
-    command: server.command,
+    command: server.command ?? '',
+    url: server.url ?? '',
+    headersEntries: Object.entries(server.headers ?? {}).map(([key, value]) => ({ key, value })),
     argsText: (server.args ?? []).join('\n'),
     envEntries: Object.entries(server.env ?? {}).map(([key, value]) => ({ key, value })),
     cwd: server.cwd ?? '',
     enabled: server.enabled !== false,
+    startupMode: server.startupMode ?? 'on_startup',
+    longRunning: server.longRunning === true,
+    persistent: server.persistent === true,
+    requestTimeoutMs: server.requestTimeoutMs ? String(server.requestTimeoutMs) : '',
+    maxTotalTimeoutMs: server.maxTotalTimeoutMs ? String(server.maxTotalTimeoutMs) : '',
   }))
 
   const selectedRowId = options.selectedIdentifier
@@ -157,5 +267,8 @@ export function loadServerForms(
 
 /** Previews the command line assembled from one server row. */
 export function previewServerCommand(server: ServerForm) {
+  if (server.url.trim())
+    return server.url.trim()
+
   return [server.command, ...splitArgsText(server.argsText)].join(' ')
 }

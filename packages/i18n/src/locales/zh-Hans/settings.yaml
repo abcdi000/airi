@@ -453,6 +453,9 @@ pages:
           description: 配置 3D VRM 模型
         scene: 场景
   modules:
+    actions:
+      title: 动作
+      description: Claude Code 任务委托、沙箱执行与外部产物生成
     beat_sync:
       description: 随音源节拍律动
       title: 同步音律
@@ -745,6 +748,10 @@ pages:
         title: 新建
         description: '填写新的服务器配置，然后点击「保存并重启」，完成后将会更新至上方的「已配置」'
         pending-badge: 未保存
+        presets-title: 快速预设
+        minecraft-preset-description: 添加 Minecraft 持久 MCP。请先在 Minecraft Java 世界里「对局域网开放」，默认连接 localhost:25565；AIRI 会在首次使用时启动它，并尽量常驻到 AIRI 关闭。
+        computer-use-preset-title: Windows Computer Use 预设
+        computer-use-preset-description: 添加 Lumi 的本地 Windows 控制 MCP。网页仍由现有 Playwright MCP 处理；原生窗口操作会先观察、再执行，并在每个动作前请求你的确认。
       status:
         unknown: 未加载
       actions:
@@ -752,7 +759,10 @@ pages:
         apply-and-restart: 保存并重启
         restart: 刷新 MCP 状态
         add-server: 添加
+        add-minecraft-preset: 添加 Minecraft MCP 预设
+        add-computer-use-preset: 添加 Windows Computer Use 预设
         add-env: 添加变量
+        add-header: 添加请求头
         remove: 移除
         test: 测试
         edit-json: 编辑 JSON
@@ -770,8 +780,12 @@ pages:
           placeholder: 例如：filesystem
         command:
           label: 命令
-          description: 通过 stdio 启动的可执行程序。
+          description: 通过 stdio 启动的可执行程序。stdio 与 URL 至少填一个。
           placeholder: 例如：npx
+        url:
+          label: URL
+          description: Streamable HTTP MCP 服务地址，例如新版 Playwright MCP 的 /mcp 地址。
+          placeholder: 例如：http://localhost:8931/mcp
         args:
           label: 命令参数
           description: 每行一个，按顺序传入。
@@ -780,9 +794,38 @@ pages:
           label: 工作目录
           description: 可选，作为启动进程时使用的当前工作目录。
           placeholder: 例如 /Users/you/project
+        computer-use-interrupt-shortcut:
+          label: Computer Use 强制中断快捷键
+          description: 全局按键，会立即停止正在运行的 Computer Use 会话。默认 End。
+        startup-mode:
+          label: 启动方式
+          description: 选择 AIRI 什么时候启动并常驻这个 MCP 服务。
+          options:
+            on-startup: 跟随 AIRI 启动
+            on-first-use: 首次使用工具时启动
+            manual: 仅手动启动
+        long-running:
+          label: 长任务服务
+          description: 给游戏、自动化等耗时工具更长的调用超时；不会强行限制 MCP 进程寿命。
+        persistent:
+          label: 持久会话
+          description: 表示这个 MCP 保留外部世界、登录或任务状态，AIRI 会尽量复用同一个进程直到退出。
+        request-timeout:
+          label: 单次请求超时（毫秒）
+          description: 留空使用默认值；长任务默认 60000。
+          placeholder: "60000"
+        max-total-timeout:
+          label: 总等待上限（毫秒）
+          description: 留空使用默认值；长任务默认 180000。
+          placeholder: "180000"
         env:
           label: 环境变量
           description: 注入到子进程的环境变量。
+          key-placeholder: 名称
+          value-placeholder: 值
+        headers:
+          label: 请求头
+          description: 传给 HTTP MCP 服务的请求头，通常只有需要鉴权时才填写。
           key-placeholder: 名称
           value-placeholder: 值
         enabled:
@@ -793,7 +836,7 @@ pages:
         placeholder: 在这里粘贴 mcp.json...
       test:
         title: 测试连接
-        description: 我们会临时把它启动一次，看看命令能不能跑、能列出哪些工具
+        description: 我们会临时连接一次，看看 MCP 服务能不能跑、能列出哪些工具
         pick-server-label: 服务器
         no-servers: 还没有可以测试的服务器
         no-server-selected: 先选一个服务器吧
@@ -806,12 +849,14 @@ pages:
       errors:
         empty-identifier: 服务器 # {index} is missing an identifier.
         duplicate-identifier: 标识符 "{name}" 重复了，每个服务器要用不同的名字。
-        empty-command: '"{name}" 还没填启动命令。'
+        empty-command: '"{name}" 还没填启动命令或 URL。'
         invalid-shape: mcp.json 结构不对，最外层得有 "mcpServers" 这个字段。
       messages:
         opened: 已经在文件管理器里打开 {path} 啦
         json-applied: JSON 已经解析完成了，点「保存并重启」就写到磁盘上啦。
         restarted: 重启好啦！启动了 {started} 个，失败 {failed} 个，跳过 {skipped} 个
+        minecraft-preset-added: 已添加 Minecraft MCP 预设。保存并重启后，首次调用工具时会自动启动它。
+        computer-use-preset-added: 已添加 Windows Computer Use MCP 预设。保存并重启后，Lumi 会通过现有 MCP 链路使用它。
   flux:
     title: Flux
     buy: 充值
@@ -995,6 +1040,15 @@ pages:
       alibaba-cloud-model-studio:
         description: bailian.console.aliyun.com
         title: 阿里百炼
+      alibaba-cloud-model-studio-vision:
+        description: 通过 DashScope OpenAI 兼容接口调用千问视觉模型
+        title: 阿里百炼视觉
+      alibaba-cloud-model-studio-transcription:
+        description: 通过 DashScope WebSocket 调用百炼实时语音识别
+        title: 阿里百炼听觉
+      openai-compatible-vision:
+        description: OpenAI 兼容多模态接口，仅列出视觉相关模型
+        title: OpenAI 兼容（视觉）
       amazon-bedrock:
         title: Amazon Bedrock
         description: aws.amazon.com/bedrock

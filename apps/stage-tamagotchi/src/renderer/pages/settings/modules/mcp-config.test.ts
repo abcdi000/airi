@@ -5,6 +5,8 @@ import { parseElectronMcpConfigText } from '../../../../shared/mcp-config'
 import {
   buildConfigFile,
   buildServerConfig,
+  createMinecraftMcpServerForm,
+  createWindowsComputerUseMcpServerForm,
   findServerIdentifierByRowId,
   loadServerForms,
   syncJsonDraftFromServers,
@@ -44,10 +46,17 @@ describe('mcp-config helpers', () => {
       rowId: 'mcp-static',
       identifier: 'filesystem',
       command: ' npx ',
+      url: '',
+      headersEntries: [],
       argsText: '-y\n@modelcontextprotocol/server-filesystem',
       envEntries: [{ key: ' ROOT ', value: '/tmp' }],
       cwd: ' /Users/doji/dojiwork/airi ',
       enabled: true,
+      startupMode: 'on_startup' as const,
+      longRunning: false,
+      persistent: false,
+      requestTimeoutMs: '',
+      maxTotalTimeoutMs: '',
     }
 
     expect(buildServerConfig(server)).toEqual({
@@ -77,10 +86,17 @@ describe('mcp-config helpers', () => {
         rowId: 'pending',
         identifier: '',
         command: '',
+        url: '',
+        headersEntries: [],
         argsText: '',
         envEntries: [],
         cwd: '',
         enabled: true,
+        startupMode: 'on_startup',
+        longRunning: false,
+        persistent: false,
+        requestTimeoutMs: '',
+        maxTotalTimeoutMs: '',
       }],
       previousDraft,
       translateMessage,
@@ -102,6 +118,49 @@ describe('mcp-config helpers', () => {
     }))).toThrow('mcpServers.filesystem.env: Invalid input: expected record, received array')
   })
 
+  it('supports Streamable HTTP MCP server configs', () => {
+    const server = {
+      rowId: 'mcp-http',
+      identifier: 'playwright',
+      command: '',
+      url: ' http://localhost:8931/mcp ',
+      headersEntries: [{ key: ' Authorization ', value: 'Bearer test' }],
+      argsText: '',
+      envEntries: [],
+      cwd: '',
+      enabled: true,
+      startupMode: 'on_first_use' as const,
+      longRunning: true,
+      persistent: true,
+      requestTimeoutMs: '60000',
+      maxTotalTimeoutMs: '180000',
+    }
+
+    expect(buildServerConfig(server)).toEqual({
+      url: 'http://localhost:8931/mcp',
+      headers: { Authorization: 'Bearer test' },
+      startupMode: 'on_first_use',
+      longRunning: true,
+      persistent: true,
+      requestTimeoutMs: 60000,
+      maxTotalTimeoutMs: 180000,
+    })
+
+    expect(parseElectronMcpConfigText(JSON.stringify({
+      mcpServers: {
+        playwright: {
+          url: 'http://localhost:8931/mcp',
+        },
+      },
+    }))).toEqual({
+      mcpServers: {
+        playwright: {
+          url: 'http://localhost:8931/mcp',
+        },
+      },
+    })
+  })
+
   it('rejects unknown keys that the main process would reject too', () => {
     expect(() => parseElectronMcpConfigText(JSON.stringify({
       mcpServers: {
@@ -111,5 +170,88 @@ describe('mcp-config helpers', () => {
         },
       },
     }))).toThrow('mcpServers.filesystem: Unrecognized key: "extraField"')
+  })
+
+  it('preserves MCP startup mode in form conversion and JSON validation', () => {
+    const parsed = parseElectronMcpConfigText(JSON.stringify({
+      mcpServers: {
+        anilist: {
+          command: 'npx',
+          args: ['-y', 'anilist-mcp'],
+          startupMode: 'on_first_use',
+        },
+      },
+    }))
+
+    const loaded = loadServerForms(parsed)
+
+    expect(loaded.servers[0]?.startupMode).toBe('on_first_use')
+    expect(buildServerConfig(loaded.servers[0]!)).toEqual({
+      command: 'npx',
+      args: ['-y', 'anilist-mcp'],
+      startupMode: 'on_first_use',
+    })
+  })
+
+  it('creates a persistent Minecraft MCP preset', () => {
+    const server = createMinecraftMcpServerForm()
+
+    expect(buildServerConfig(server)).toEqual({
+      command: 'node',
+      args: [
+        'dist/main.js',
+        '--host',
+        'localhost',
+        '--port',
+        '25565',
+        '--username',
+        'LumiBot',
+        '--version',
+        '1.20.1',
+        '--auth',
+        'offline',
+      ],
+      cwd: 'external-mcp/minecraft-mcp-server',
+      startupMode: 'on_first_use',
+      longRunning: true,
+      persistent: true,
+      requestTimeoutMs: 60000,
+      maxTotalTimeoutMs: 180000,
+    })
+  })
+
+  it('creates the Windows Computer Use preset through the standard MCP config shape', () => {
+    const server = createWindowsComputerUseMcpServerForm()
+
+    expect(buildServerConfig(server)).toEqual({
+      command: 'pnpm',
+      args: ['-F', '@proj-airi/computer-use-mcp', 'start'],
+      env: {
+        COMPUTER_USE_EXECUTOR: 'windows-local',
+        COMPUTER_USE_APPROVAL_MODE: 'never',
+        COMPUTER_USE_MAX_OPERATIONS: '16',
+        COMPUTER_USE_MAX_OPERATION_UNITS: '96',
+        COMPUTER_USE_INTERRUPT_SHORTCUT: 'End',
+        COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED: 'false',
+      },
+      cwd: '.',
+      startupMode: 'on_first_use',
+      longRunning: true,
+      persistent: true,
+      requestTimeoutMs: 60000,
+      maxTotalTimeoutMs: 180000,
+    })
+  })
+
+  it('rejects MCP total timeouts shorter than request timeouts', () => {
+    expect(() => parseElectronMcpConfigText(JSON.stringify({
+      mcpServers: {
+        minecraft: {
+          command: 'npx',
+          requestTimeoutMs: 60000,
+          maxTotalTimeoutMs: 1000,
+        },
+      },
+    }))).toThrow('maxTotalTimeoutMs must be greater than or equal to requestTimeoutMs')
   })
 })

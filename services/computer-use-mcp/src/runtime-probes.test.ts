@@ -40,6 +40,37 @@ function createMultiDisplaySnapshot(): MultiDisplaySnapshot {
 }
 
 describe('buildCoordinateSpaceInfo', () => {
+  it('uses the local Windows virtual display when no bounds are configured', () => {
+    const info = buildCoordinateSpaceInfo({
+      config: createTestConfig({
+        executor: 'windows-local',
+        allowedBounds: undefined,
+      }),
+      lastScreenshot: {
+        path: 'C:/temp/screenshot.png',
+        width: 1707,
+        height: 1067,
+        capturedAt: '2026-07-10T00:00:00.000Z',
+        placeholder: false,
+      },
+      displayInfo: {
+        available: true,
+        platform: 'win32',
+        logicalWidth: 1707,
+        logicalHeight: 1067,
+        pixelWidth: 1707,
+        pixelHeight: 1067,
+        combinedBounds: { x: 0, y: 0, width: 1707, height: 1067 },
+      },
+    })
+
+    expect(info).toMatchObject({
+      readyForMutations: true,
+      aligned: true,
+      allowedBounds: { x: 0, y: 0, width: 1707, height: 1067 },
+    })
+  })
+
   it('requires a screenshot before real input', () => {
     const info = buildCoordinateSpaceInfo({
       config: baseConfig,

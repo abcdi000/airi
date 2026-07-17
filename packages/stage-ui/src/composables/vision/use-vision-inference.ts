@@ -46,9 +46,12 @@ export function useVisionInference() {
     if (!activeProvider.value || !activeModel.value)
       throw new Error('Vision provider/model not configured')
 
+    const metadata = providersStore.getProviderMetadata(activeProvider.value)
+    if (!['vision', 'chat'].includes(metadata.category))
+      throw new Error(`Configured provider "${activeProvider.value}" is not a Vision provider. Reconfigure the Vision module.`)
+
     const provider = await providersStore.getProviderInstance<ChatProvider>(activeProvider.value)
-    const workload = getVisionWorkload(input.workloadId)
-    const prompt = input.promptOverride ?? workload.prompt
+    const prompt = input.promptOverride ?? getVisionWorkload(input.workloadId).prompt
     const { url } = parseDataUrl(input.imageDataUrl)
     const visionProvider = activeProvider.value === 'ollama'
       ? {
@@ -85,6 +88,12 @@ export function useVisionInference() {
     try {
       await llmStore.stream(activeModel.value, visionProvider, messages, {
         abortSignal: abortController.signal,
+        // Vision modules are pure image-understanding calls. Keep them isolated
+        // from chat/runtime tools so Qwen-VL and other multimodal providers do
+        // not receive Lumi memory/MCP/function schemas or wait for tool rounds.
+        supportsTools: false,
+        waitForTools: false,
+        captureToolErrors: false,
         onStreamEvent: (event) => {
           if (event.type === 'text-delta') {
             buffer += event.text

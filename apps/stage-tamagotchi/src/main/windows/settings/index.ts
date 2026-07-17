@@ -6,6 +6,7 @@ import type { McpStdioManager } from '../../services/airi/mcp-servers'
 import type { AutoUpdater } from '../../services/electron/auto-updater'
 import type { GlobalShortcutService } from '../../services/electron/global-shortcut'
 import type { DevtoolsWindowManager } from '../devtools'
+import type { MiniChatWindowManager } from '../mini-chat'
 import type { WidgetsWindowManager } from '../widgets'
 
 import { join, resolve } from 'node:path'
@@ -28,6 +29,7 @@ export interface SettingsWindowManager {
 
 export function setupSettingsWindowReusableFunc(params: {
   widgetsManager: WidgetsWindowManager
+  miniChatWindow: MiniChatWindowManager
   autoUpdater: AutoUpdater
   devtoolsWindow: DevtoolsWindowManager
   onWindowCreated?: (window: BrowserWindow) => void
@@ -69,6 +71,7 @@ export function setupSettingsWindowReusableFunc(params: {
     settingsContext = await setupSettingsWindowInvokes({
       settingsWindow: window,
       widgetsManager: params.widgetsManager,
+      miniChatWindow: params.miniChatWindow,
       autoUpdater: params.autoUpdater,
       devtoolsWindow: params.devtoolsWindow,
       serverChannel: params.serverChannel,

@@ -1,6 +1,6 @@
 # computer-use-mcp
 
-AIRI-specific macOS desktop orchestration MCP service.
+AIRI-specific desktop orchestration MCP service.
 
 ## Why This Exists
 
@@ -81,6 +81,11 @@ capabilities into one observable, controllable task system.
   - window observation via `NSWorkspace + CGWindowList`
   - input injection via Swift + Quartz `CGEvent`
   - app open/focus via `open -a` and `activate`
+- `windows-local`
+  - Windows desktop backend for the normal AIRI MCP configuration flow
+  - window observation via Win32 enumeration and semantic grounding via Windows UI Automation
+  - screenshots and keyboard/mouse input via a local, audited native helper using GDI and `SendInput`
+  - the helper is compiled from AIRI-owned source into the local session cache; it does not use browser automation or a remote desktop service
 - `linux-x11`
   - retained as a legacy experimental backend
   - not the main v1 story anymore
@@ -154,7 +159,7 @@ Workflow orchestration:
 
 ## Policy Model
 
-The current macOS v1 boundary is intentionally narrow and explicit:
+The local executor boundary is intentionally narrow and explicit:
 
 - global screen coordinates are allowed for UI actions
 - `allowApps` is not used as a hard gate for click/type/scroll
@@ -282,6 +287,21 @@ Use the two surfaces differently:
 - `browser_dom_*` for real browser pages, cross-frame DOM reads, form filling, selector-based interaction, and iframe-heavy flows
 - `browser_agent_run` for goal-driven browser tasks where AIRI should delegate the web exploration loop instead of manually hard-coding each browser step
 
+### Windows Computer Use preset
+
+On Windows, add **Windows Computer Use preset** from Settings -> MCP Integration.
+It writes a regular `computer_use` entry to the same `mcp.json` used by every
+other AIRI MCP server, starts it on first use, and keeps the session persistent.
+
+The preset intentionally leaves `COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED=false`:
+Lumi's existing `playwright` MCP remains the only browser-control route. The
+computer-use service is for native windows, files, dialogs, and other desktop
+surfaces that Playwright cannot reach.
+
+When a desktop mutation returns `approval_required`, AIRI's Electron main
+process shows a native approve/reject dialog. The approval-control tools are
+not exposed to the model, so it cannot approve its own actions.
+
 ## Validation Commands
 
 - `pnpm -F @proj-airi/computer-use-mcp typecheck`
@@ -345,8 +365,9 @@ Less convincing demos:
 
 ## Known Limits
 
-- macOS only for the main v1 path
-- no accessibility tree grounding yet
+- Windows uses the current interactive desktop session. Elevated windows may
+  reject UI Automation or `SendInput` because of Windows integrity-level isolation.
+- Window capture and input require an unlocked, interactive Windows desktop.
 - PTY/TUI terminal support is product-supported on the self-acquire mainline; legacy outward terminal reroute remains secondary
 - no multi-monitor orchestration policy yet
 - global coordinates are allowed, so the safety boundary is approval + audit, not strict app isolation

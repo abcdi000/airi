@@ -59,6 +59,8 @@ describe('registerComputerUseTools coordinate contract', () => {
     expect(schemas.get('desktop_click')?.y.description).toBe('Global logical screen Y coordinate, not Retina backing pixels')
     expect(schemas.get('desktop_type_text')?.x.description).toBe('Optional global logical screen X coordinate to click before typing')
     expect(schemas.get('desktop_type_text')?.y.description).toBe('Optional global logical screen Y coordinate to click before typing')
+    expect(schemas.get('desktop_type_text')?.targetApp.description).toContain('atomically focus and verify')
+    expect(schemas.get('desktop_press_keys')?.targetApp.description).toContain('atomically focus and verify')
     expect(schemas.get('desktop_scroll')?.x.description).toBe('Optional global logical screen X coordinate to move to before scrolling')
     expect(schemas.get('desktop_scroll')?.y.description).toBe('Optional global logical screen Y coordinate to move to before scrolling')
   })

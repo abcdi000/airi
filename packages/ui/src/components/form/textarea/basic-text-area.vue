@@ -34,11 +34,22 @@ function onPaste(e: ClipboardEvent) {
   if (!e.clipboardData)
     return
 
-  const { files } = e.clipboardData
+  const files = filesFromClipboard(e.clipboardData)
   if (files.length > 0) {
     e.preventDefault()
-    events('pasteFile', Array.from(files))
+    events('pasteFile', files)
   }
+}
+
+function filesFromClipboard(data: DataTransfer): File[] {
+  const files = Array.from(data.files)
+  if (files.length > 0)
+    return files
+
+  return Array.from(data.items)
+    .filter(item => item.kind === 'file')
+    .map(item => item.getAsFile())
+    .filter((file): file is File => !!file)
 }
 
 // javascript - Creating a textarea with auto-resize - Stack Overflow

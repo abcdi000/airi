@@ -77,6 +77,21 @@ describe('isCloudSyncableMessage', () => {
     expect(isCloudSyncableMessage({ role: 'user', content: 'x' })).toBe(true)
     expect(isCloudSyncableMessage({ role: 'assistant', content: 'x', slices: [], tool_results: [] })).toBe(true)
   })
+
+  it('keeps Lumi memory debug assistant messages local-only', () => {
+    expect(isCloudSyncableMessage({
+      role: 'assistant',
+      content: '[memory_search]\nfound: 2',
+      slices: [{ type: 'text', text: '[memory_search]\nfound: 2' }],
+      tool_results: [],
+    })).toBe(false)
+    expect(isCloudSyncableMessage({
+      role: 'assistant',
+      content: '[memory_write]\nstored: 1',
+      slices: [{ type: 'text', text: '[memory_write]\nstored: 1' }],
+      tool_results: [],
+    })).toBe(false)
+  })
 })
 
 describe('wireMessageToLocal', () => {

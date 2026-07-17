@@ -133,4 +133,74 @@ describe('chatHistory retry actions', () => {
 
     expect(document.body.textContent).not.toContain('Retry')
   })
+
+  it('renders only the latest page and preserves original message indexes', async () => {
+    const messages: ChatHistoryItem[] = Array.from({ length: 200 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `message-${index}`,
+      id: `m-${index}`,
+      ...(index % 2 === 0 ? {} : { slices: [], tool_results: [] }),
+    } as ChatHistoryItem))
+
+    const Harness = defineComponent({
+      components: { ChatHistory },
+      setup() {
+        return { messages }
+      },
+      template: `
+        <ChatHistory
+          :messages="messages"
+          :initial-render-limit="50"
+        />
+      `,
+    })
+
+    await render(Harness, {
+      global: {
+        plugins: [createTestI18n()],
+      },
+    })
+
+    const nodes = Array.from(document.querySelectorAll('[data-chat-message-index]'))
+    expect(nodes).toHaveLength(50)
+    expect(nodes[0].getAttribute('data-chat-message-index')).toBe('150')
+    expect(nodes.at(-1)?.getAttribute('data-chat-message-index')).toBe('199')
+  })
+
+  it('renders short assistant lines as separate visual bubbles with custom assistant label', async () => {
+    const messages: ChatHistoryItem[] = [
+      {
+        role: 'assistant',
+        content: '第一句短回复。\n第二句补充。',
+        slices: [{ type: 'text', text: '第一句短回复。\n第二句补充。' }],
+        tool_results: [],
+      },
+    ]
+
+    const Harness = defineComponent({
+      components: { ChatHistory },
+      setup() {
+        return { messages }
+      },
+      template: `
+        <ChatHistory
+          :messages="messages"
+          assistant-label="Lumi"
+          split-assistant-text-bubbles
+        />
+      `,
+    })
+
+    await render(Harness, {
+      global: {
+        plugins: [createTestI18n()],
+      },
+    })
+
+    const bubbles = Array.from(document.querySelectorAll('[data-chat-assistant-bubble="split"]'))
+    expect(bubbles).toHaveLength(2)
+    expect(document.body.textContent).toContain('Lumi')
+    expect(document.body.textContent).toContain('第一句短回复。')
+    expect(document.body.textContent).toContain('第二句补充。')
+  })
 })

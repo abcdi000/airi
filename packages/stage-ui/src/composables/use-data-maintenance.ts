@@ -7,6 +7,8 @@ import { useModelStore } from '@proj-airi/stage-ui-three'
 import { useChatOrchestratorStore } from '../stores/chat'
 import { useChatSessionStore } from '../stores/chat/session-store'
 import { useDisplayModelsStore } from '../stores/display-models'
+import { useLumiMemoryStore } from '../stores/lumi-memory'
+import { useLumiUserProfileStore } from '../stores/lumi-user-profile'
 import { useMcpStore } from '../stores/mcp'
 import { useAiriCardStore } from '../stores/modules/airi-card'
 import { useConsciousnessStore } from '../stores/modules/consciousness'
@@ -40,6 +42,8 @@ export function useDataMaintenance() {
   const mcpStore = useMcpStore()
   const onboardingStore = useOnboardingStore()
   const airiCardStore = useAiriCardStore()
+  const lumiMemoryStore = useLumiMemoryStore()
+  const lumiUserProfileStore = useLumiUserProfileStore()
 
   async function deleteAllModels() {
     await displayModelsStore.resetDisplayModels()
@@ -59,6 +63,8 @@ export function useDataMaintenance() {
     discordStore.resetState()
     factorioStore.resetState()
     minecraftStore.resetState()
+    lumiMemoryStore.resetState()
+    lumiUserProfileStore.resetState()
   }
 
   function deleteAllChatSessions() {

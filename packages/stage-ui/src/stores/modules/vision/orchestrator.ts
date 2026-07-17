@@ -3,6 +3,7 @@ import type { CommonContentPart } from '@xsai/shared-chat'
 import type { VisionWorkloadId } from '../../../composables/vision/use-vision-workloads'
 
 import { errorMessageFrom } from '@moeru/std'
+import { createLumiImageUnderstandingResult } from '../../../../../lumi-runtime/src'
 import { ContextUpdateStrategy } from '@proj-airi/server-sdk'
 import { defineStore, storeToRefs } from 'pinia'
 import { ref } from 'vue'
@@ -98,6 +99,12 @@ export const useVisionOrchestratorStore = defineStore('vision-orchestrator', () 
             module: 'vision',
             workload: workload.id,
             workloadLabel: workload.label,
+            lumiImageUnderstanding: createLumiImageUnderstandingResult({
+              text,
+              workloadId: workload.id,
+              workloadLabel: workload.label,
+              model: activeModel.value,
+            }),
             sourceId: payload.sourceId,
             capturedAt: payload.capturedAt,
             provider: activeProvider.value,

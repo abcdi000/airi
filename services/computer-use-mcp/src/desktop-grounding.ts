@@ -93,25 +93,6 @@ export async function captureDesktopGrounding(params: {
     }
   }
 
-  // If Chrome is foreground, ask the executor for a Chrome-filtered window list.
-  // The generic top-N window snapshot is often dominated by system UI and can
-  // miss Chrome entirely, which would prevent chrome_dom candidates from being
-  // mapped to screen coordinates.
-  let chromeWindowBounds = findChromeWindowBounds(windowObs, foregroundApp)
-  if (isChromeInFront && !chromeWindowBounds) {
-    try {
-      const chromeWindows = await executor.observeWindows({
-        app: foregroundApp,
-        limit: 12,
-      })
-      chromeWindowBounds = findChromeWindowBounds(chromeWindows, foregroundApp)
-    }
-    catch {
-      // Best-effort only. Fall back to AX-only candidates if filtered window
-      // enumeration fails.
-    }
-  }
-
   // Phase 2: Chrome semantic data (only if Chrome is foreground and allowed)
   let chromeSemanticSnapshot: ChromeSemanticSnapshot | null = null
   if (shouldCaptureChrome) {
@@ -230,7 +211,9 @@ export function buildTargetCandidates(params: {
  */
 export function formatGroundingForAgent(
   snapshot: DesktopGroundingSnapshot,
+  options: { maxCandidates?: number } = {},
 ): string {
+  const maxCandidates = Math.min(Math.max(options.maxCandidates ?? 16, 1), 40)
   const lines: string[] = []
 
   // Header
@@ -263,14 +246,14 @@ export function formatGroundingForAgent(
   }
   else {
     lines.push(`  Targets (${snapshot.targetCandidates.length}):`)
-    for (const c of snapshot.targetCandidates.slice(0, 40)) {
+    for (const c of snapshot.targetCandidates.slice(0, maxCandidates)) {
       const b = c.bounds
       const focused = c.focused ? ' [focused]' : ''
       const disabled = c.enabled === false ? ' [disabled]' : ''
       lines.push(`    [${c.id}] ${c.source} ${c.role} "${c.label}"${focused}${disabled} @(${b.x},${b.y} ${b.width}x${b.height}) conf=${c.confidence.toFixed(2)}`)
     }
-    if (snapshot.targetCandidates.length > 40) {
-      lines.push(`    ... and ${snapshot.targetCandidates.length - 40} more`)
+    if (snapshot.targetCandidates.length > maxCandidates) {
+      lines.push(`    ... and ${snapshot.targetCandidates.length - maxCandidates} more`)
     }
   }
 

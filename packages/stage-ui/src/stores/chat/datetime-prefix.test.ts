@@ -3,14 +3,14 @@ import { describe, expect, it } from 'vitest'
 import { formatTimePrefix } from './datetime-prefix'
 
 describe('formatTimePrefix', () => {
-  it('wraps `[YYYY-MM-DD HH:MM]` with trailing space', () => {
-    const ts = new Date(2026, 3, 25, 18, 47, 0).getTime()
-    expect(formatTimePrefix(ts)).toBe('[2026-04-25 18:47] ')
+  it('wraps `[本地时间 YYYY-MM-DD HH:MM:SS]` with trailing newline', () => {
+    const ts = new Date(2026, 3, 25, 18, 47, 12).getTime()
+    expect(formatTimePrefix(ts)).toBe('[本地时间 2026-04-25 18:47:12]\n')
   })
 
-  it('zero-pads month, day, hour, minute', () => {
-    const ts = new Date(2026, 0, 5, 3, 7, 0).getTime() // 5 January 2026, 03:07 local
-    expect(formatTimePrefix(ts)).toBe('[2026-01-05 03:07] ')
+  it('zero-pads month, day, hour, minute, second', () => {
+    const ts = new Date(2026, 0, 5, 3, 7, 9).getTime() // 5 January 2026, 03:07:09 local
+    expect(formatTimePrefix(ts)).toBe('[本地时间 2026-01-05 03:07:09]\n')
   })
 
   it('produces stable output for the same input (cache-friendly)', () => {
@@ -26,9 +26,9 @@ describe('formatTimePrefix', () => {
     expect(formatTimePrefix(day2)).toContain('2026-04-26')
   })
 
-  it('shares the same prefix across timestamps in the same minute (KV-cache stable)', () => {
+  it('keeps second-level precision like Lumi', () => {
     const a = new Date(2026, 3, 25, 18, 47, 12).getTime()
     const b = new Date(2026, 3, 25, 18, 47, 58).getTime()
-    expect(formatTimePrefix(a)).toBe(formatTimePrefix(b))
+    expect(formatTimePrefix(a)).not.toBe(formatTimePrefix(b))
   })
 })

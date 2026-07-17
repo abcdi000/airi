@@ -65,6 +65,14 @@ describe('vision orchestrator', () => {
     expect(sendContextUpdate).toHaveBeenCalledTimes(2)
     expect(sendContextUpdate.mock.calls[0]?.[0]).toMatchObject({
       contextId: 'vision:screen:interpret:screen:0:0',
+      metadata: {
+        lumiImageUnderstanding: {
+          imageType: 'screenshot',
+          imageRole: 'context',
+          description: 'Frame summary',
+          model: 'mock-model',
+        },
+      },
     })
     expect(sendContextUpdate.mock.calls[1]?.[0]).toMatchObject({
       contextId: 'vision:screen:interpret:screen:0:0',

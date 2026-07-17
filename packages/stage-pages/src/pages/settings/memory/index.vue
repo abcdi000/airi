@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { WIP } from '@proj-airi/stage-ui/components'
+import LumiMemoryManager from '../modules/memory-long-term.vue'
 </script>
 
 <template>
-  <WIP />
+  <LumiMemoryManager />
 </template>
 
 <route lang="yaml">

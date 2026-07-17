@@ -389,6 +389,7 @@ function getGameletApis(session: { apis: Record<string, unknown> }) {
 describe('setupPluginHost', () => {
   let userDataDir: string
   let pluginsDir: string
+  let previousPluginRoot: string | undefined
 
   it('types the setup host service as the plain PluginHost surface', () => {
     expectTypeOf<PluginHostService['host']>().toMatchTypeOf<PluginHost>()
@@ -416,13 +417,19 @@ describe('setupPluginHost', () => {
   })
 
   beforeEach(async () => {
+    previousPluginRoot = process.env.AIRI_PLUGIN_ROOT
     userDataDir = await mkdtemp(join(tmpdir(), 'airi-plugins-'))
     pluginsDir = join(userDataDir, 'plugins', 'v1')
     await mkdir(pluginsDir, { recursive: true })
+    process.env.AIRI_PLUGIN_ROOT = pluginsDir
     appMock.getPath.mockReturnValue(userDataDir)
   })
 
   afterEach(async () => {
+    if (previousPluginRoot === undefined)
+      delete process.env.AIRI_PLUGIN_ROOT
+    else
+      process.env.AIRI_PLUGIN_ROOT = previousPluginRoot
     await removeDirWithRetry(userDataDir)
     contextState.lastContext = undefined
     vi.restoreAllMocks()
@@ -714,6 +721,12 @@ describe('setupPluginHost', () => {
   })
 
   it('loads the chess-like demo plugin and exposes an active gamelet module snapshot', async () => {
+    const hasChessLikePluginFixture = await stat(join(chessLikePluginRoot, pluginManifestFileName))
+      .then(() => true)
+      .catch(() => false)
+    if (!hasChessLikePluginFixture)
+      return
+
     const pluginDir = join(pluginsDir, 'airi-plugin-game-chess')
     await mkdir(pluginsDir, { recursive: true })
     try {

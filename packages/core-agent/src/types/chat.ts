@@ -4,6 +4,7 @@ import type { AssistantMessage, CommonContentPart, CompletionToolCall, Message, 
 export interface ChatSlicesText {
   type: 'text'
   text: string
+  source?: 'assistant' | 'tool-progress'
 }
 
 export interface ChatSlicesToolCall {

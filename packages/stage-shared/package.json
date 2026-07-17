@@ -29,6 +29,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@moeru/eventa": "catalog:",
     "@moeru/std": "catalog:",
     "@vueuse/core": "catalog:",
     "gpuu": "^1.0.7",
@@ -38,7 +39,6 @@
   },
   "devDependencies": {
     "@electron-toolkit/preload": "^3.0.2",
-    "@moeru/eventa": "catalog:",
     "@nekopaw/tempora": "catalog:",
     "@proj-airi/electron-screen-capture": "workspace:^",
     "@types/audioworklet": "catalog:"

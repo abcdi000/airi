@@ -5,6 +5,14 @@ export interface ChatSessionMeta {
   userId: string
   characterId: string
   title?: string
+  /**
+   * Lumi treats conversations as one continuous relationship timeline.
+   * Other characters can keep the previous multi-session behavior.
+   */
+  timelineType?: 'main' | 'branch' | 'legacy'
+  parentTimelineId?: string
+  syncedToMain?: boolean
+  visibleFromMessageId?: string
   createdAt: number
   updatedAt: number
   /**

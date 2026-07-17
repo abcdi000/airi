@@ -28,6 +28,7 @@
     "./constants": "./src/constants/index.ts",
     "./libs/inference/adapters/*": "./src/libs/inference/adapters/*.ts",
     "./libs/inference": "./src/libs/inference/index.ts",
+    "./libs/lumi-agent": "./src/libs/lumi-agent/index.ts",
     "./libs/*": "./src/libs/*.ts",
     "./libs": "./src/libs/index.ts",
     "./tools/mcp": "./src/tools/mcp.ts",

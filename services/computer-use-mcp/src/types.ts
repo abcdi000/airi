@@ -1,5 +1,5 @@
 export type ApprovalMode = 'never' | 'actions' | 'all'
-export type ExecutorKind = 'dry-run' | 'macos-local' | 'linux-x11'
+export type ExecutorKind = 'dry-run' | 'macos-local' | 'windows-local' | 'linux-x11'
 export type ExecutionMode = 'dry-run' | 'local-windowed' | 'remote'
 export type ExecutionTransport = 'local' | 'ssh-stdio'
 export type RiskLevel = 'low' | 'medium' | 'high'
@@ -134,6 +134,8 @@ export interface ForegroundContext {
  * `RunState.chromeSession` for the lifetime of the agent session.
  */
 export interface ChromeSessionInfo {
+  /** How the current dedicated Chrome session was obtained for this run. */
+  ensureOutcome?: 'launched' | 'reused' | 'recreated_after_missing_window' | 'recreated_after_process_exit'
   /** Whether Chrome was already running before the agent launched it. */
   wasAlreadyRunning: boolean
   /** Window identity string from observe-windows (ownerPid:layer:title). */
@@ -202,6 +204,11 @@ export interface ClickActionInput {
 
 export interface TypeTextActionInput {
   text: string
+  /**
+   * On Windows, atomically bring this app to the foreground and verify it
+   * before input injection. This prevents text from landing in a stale window.
+   */
+  targetApp?: string
   /** Optional global logical screen coordinate to focus before typing. */
   x?: number
   /** Optional global logical screen coordinate to focus before typing. */
@@ -212,6 +219,8 @@ export interface TypeTextActionInput {
 
 export interface PressKeysActionInput {
   keys: string[]
+  /** See TypeTextActionInput.targetApp. */
+  targetApp?: string
   captureAfter?: boolean
 }
 
@@ -233,6 +242,24 @@ export interface WaitActionInput {
 export interface ObserveWindowsRequest {
   limit?: number
   app?: string
+}
+
+export interface ProcessObservationRequest {
+  limit?: number
+  app?: string
+}
+
+export interface ProcessObservationEntry {
+  pid: number
+  appName: string
+  windowTitle?: string
+  hasMainWindow: boolean
+  responding?: boolean
+}
+
+export interface ProcessObservation {
+  processes: ProcessObservationEntry[]
+  observedAt: string
 }
 
 export interface OpenAppActionInput {
@@ -642,6 +669,7 @@ export interface DesktopExecutor {
   getDisplayInfo: () => Promise<DisplayInfo>
   getPermissionInfo: () => Promise<PermissionInfo>
   observeWindows: (request: ObserveWindowsRequest) => Promise<WindowObservation>
+  listProcesses?: (request: ProcessObservationRequest) => Promise<ProcessObservation>
   takeScreenshot: (request: ScreenshotRequest) => Promise<ScreenshotArtifact>
   openApp: (input: OpenAppActionInput) => Promise<ExecutorActionResult>
   focusApp: (input: FocusAppActionInput) => Promise<ExecutorActionResult>

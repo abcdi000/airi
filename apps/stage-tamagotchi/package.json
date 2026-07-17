@@ -137,6 +137,7 @@
     "vue-sonner": "catalog:",
     "web-haptics": "catalog:",
     "whatwg-mimetype": "catalog:",
+    "ws": "catalog:",
     "xsschema": "catalog:",
     "zod": "^4.3.6"
   },

@@ -7,6 +7,8 @@ import type { ServerChannel } from '../../services/airi/channel-server'
 import type { GodotStageManager } from '../../services/airi/godot-stage'
 import type { McpStdioManager } from '../../services/airi/mcp-servers'
 import type { AutoUpdater } from '../../services/electron/auto-updater'
+import type { MinecraftMcpMonitorWindowManager } from '../minecraft-mcp-monitor'
+import type { MiniChatWindowManager } from '../mini-chat'
 import type { NoticeWindowManager } from '../notice'
 import type { OnboardingWindowManager } from '../onboarding'
 import type { SettingsWindowManager } from '../settings'
@@ -52,6 +54,8 @@ type AppConfig = InferOutput<typeof appConfigSchema>
 export async function setupMainWindow(params: {
   settingsWindow: SettingsWindowManager
   chatWindow: () => Promise<BrowserWindow>
+  miniChatWindow: MiniChatWindowManager
+  minecraftMcpMonitorWindow: MinecraftMcpMonitorWindowManager
   widgetsManager: WidgetsWindowManager
   noticeWindow: NoticeWindowManager
   autoUpdater: AutoUpdater
@@ -180,6 +184,8 @@ export async function setupMainWindow(params: {
     window,
     settingsWindow: params.settingsWindow,
     chatWindow: params.chatWindow,
+    miniChatWindow: params.miniChatWindow,
+    minecraftMcpMonitorWindow: params.minecraftMcpMonitorWindow,
     widgetsManager: params.widgetsManager,
     noticeWindow: params.noticeWindow,
     autoUpdater: params.autoUpdater,
@@ -201,7 +207,10 @@ export async function setupMainWindow(params: {
    * Workaround: https://github.com/noobfromph/electron-click-drag-plugin
    */
   if (!isLinux) {
-    function handleStartDraggingWindow() {
+    function handleStartDraggingWindow(_: unknown, options?: any) {
+      if (options?.raw?.ipcMainEvent?.sender?.id !== window.webContents.id)
+        return
+
       try {
         const windowId = window.getNativeWindowHandle()
         clickDragPlugin.startDrag(windowId)

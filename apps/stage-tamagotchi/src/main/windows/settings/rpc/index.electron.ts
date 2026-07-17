@@ -8,13 +8,14 @@ import type { McpStdioManager } from '../../../services/airi/mcp-servers'
 import type { AutoUpdater } from '../../../services/electron/auto-updater'
 import type { GlobalShortcutService } from '../../../services/electron/global-shortcut'
 import type { DevtoolsWindowManager } from '../../devtools'
+import type { MiniChatWindowManager } from '../../mini-chat'
 import type { WidgetsWindowManager } from '../../widgets'
 
 import { defineInvokeHandler } from '@moeru/eventa'
 import { createContext } from '@moeru/eventa/adapters/electron/main'
 import { ipcMain } from 'electron'
 
-import { electronOpenDevtoolsWindow, electronOpenSettingsDevtools } from '../../../../shared/eventa'
+import { electronOpenDevtoolsWindow, electronOpenMiniChat, electronOpenSettingsDevtools } from '../../../../shared/eventa'
 import { createAuthService } from '../../../services/airi/auth'
 import { createGodotStageService } from '../../../services/airi/godot-stage'
 import { createMcpServersService } from '../../../services/airi/mcp-servers'
@@ -25,6 +26,7 @@ import { setupBaseWindowElectronInvokes } from '../../shared/window'
 export async function setupSettingsWindowInvokes(params: {
   settingsWindow: BrowserWindow
   widgetsManager: WidgetsWindowManager
+  miniChatWindow: MiniChatWindowManager
   autoUpdater: AutoUpdater
   devtoolsWindow: DevtoolsWindowManager
   serverChannel: ServerChannel
@@ -53,6 +55,7 @@ export async function setupSettingsWindowInvokes(params: {
   params.globalShortcut.registerWindow({ context, window: params.settingsWindow })
 
   defineInvokeHandler(context, electronOpenSettingsDevtools, async () => params.settingsWindow.webContents.openDevTools({ mode: 'detach' }))
+  defineInvokeHandler(context, electronOpenMiniChat, async () => params.miniChatWindow.openWindow())
   defineInvokeHandler(context, electronOpenDevtoolsWindow, async (payload) => {
     await params.devtoolsWindow.openWindow(payload)
   })

@@ -53,9 +53,9 @@ export function explainActionIntent(action: ActionInvocation, runState: RunState
     case 'click':
       return `Clicking at (${action.input.x}, ${action.input.y}) to interact with the UI element at that position${taskContext}.`
     case 'type_text':
-      return `Typing text into the focused input field${action.input.x !== undefined ? ` at (${action.input.x}, ${action.input.y})` : ''}${taskContext}.`
+      return `Typing text into the verified input target${action.input.targetApp ? ` in "${action.input.targetApp}"` : ''}${action.input.x !== undefined ? ` at (${action.input.x}, ${action.input.y})` : ''}${taskContext}.`
     case 'press_keys':
-      return `Pressing keyboard shortcut [${action.input.keys.join('+')}]${taskContext}.`
+      return `Pressing keyboard shortcut [${action.input.keys.join('+')}]${action.input.targetApp ? ` in "${action.input.targetApp}"` : ''}${taskContext}.`
     case 'scroll':
       return `Scrolling ${action.input.deltaY > 0 ? 'down' : 'up'} to navigate the content${taskContext}.`
     case 'wait':
@@ -158,9 +158,9 @@ export function explainActionOutcome(params: {
     case 'click':
       return `Clicked at (${action.input.x}, ${action.input.y}).${context.appName ? ` Target app: "${context.appName}".` : ''}`
     case 'type_text':
-      return `Text typed successfully (${action.input.text.length} characters).${action.input.pressEnter ? ' Enter key pressed.' : ''}`
+      return `Text input was injected into the verified target (${action.input.text.length} characters).${action.input.pressEnter ? ' Enter was injected, but message delivery has not been independently verified.' : ''}`
     case 'press_keys':
-      return `Keyboard shortcut [${action.input.keys.join('+')}] executed.`
+      return `Keyboard shortcut [${action.input.keys.join('+')}] was injected into the verified target; its UI effect has not been independently verified.`
     case 'scroll':
       return `Scrolled ${action.input.deltaY > 0 ? 'down' : 'up'} by ${Math.abs(action.input.deltaY)}px.`
     case 'wait':

@@ -12,11 +12,13 @@ import type {
   SetupPluginHostOptions,
 } from '../types'
 
-import { dirname, join } from 'node:path'
+import { cp, lstat, mkdir, readdir, readFile, rm, symlink } from 'node:fs/promises'
+import { dirname, join, normalize, relative } from 'node:path'
+import process from 'node:process'
 
 import { useLogg } from '@guiiai/logg'
 import { PluginHost } from '@proj-airi/plugin-sdk/plugin-host'
-import { app, session as electronSession } from 'electron'
+import { app, dialog, session as electronSession, shell } from 'electron'
 
 import { createPluginAutoReloadFeature } from '../features/auto-reload'
 import { createPluginAssetService } from '../features/static-assets'
@@ -27,6 +29,7 @@ import {
   buildPluginRegistrySnapshot,
   createManifestForLoad,
   createPluginHostRegistry,
+  pluginManifestFileName,
   resolvePluginRuntimeEntrypointPath,
 } from './registry'
 
@@ -49,6 +52,78 @@ function createElectronPluginAssetCookieAdapter() {
     async removeCookie(cookie: PluginAssetCookie) {
       await electronSession.defaultSession.cookies.remove(cookie.url, cookie.name)
     },
+  }
+}
+
+function isPathInside(parent: string, child: string) {
+  const delta = relative(parent, child)
+  return delta === '' || (!!delta && !delta.startsWith('..') && !normalize(delta).startsWith('..'))
+}
+
+function sanitizePluginDirectoryName(name: string) {
+  return name
+    .replace(/^@/, '')
+    .replace(/[\\/:"*?<>|]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'plugin'
+}
+
+function resolveDefaultPluginsRoot() {
+  const override = process.env.AIRI_PLUGIN_ROOT?.trim()
+  if (override)
+    return override
+
+  if (!app.isPackaged)
+    return join(process.cwd(), 'external-plugins')
+
+  return join(dirname(app.getPath('exe')), 'plugins', 'v1')
+}
+
+async function migrateLegacyPluginsRoot(options: {
+  legacyRoot: string
+  pluginsRoot: string
+  log: ReturnType<typeof useLogg>
+}) {
+  const legacyRoot = normalize(options.legacyRoot)
+  const pluginsRoot = normalize(options.pluginsRoot)
+  if (legacyRoot === pluginsRoot)
+    return
+
+  let entries
+  try {
+    entries = await readdir(legacyRoot, { withFileTypes: true })
+  }
+  catch {
+    return
+  }
+
+  await mkdir(pluginsRoot, { recursive: true })
+  for (const entry of entries) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink())
+      continue
+
+    const source = join(legacyRoot, entry.name)
+    const target = join(pluginsRoot, entry.name)
+    try {
+      await lstat(target)
+      continue
+    }
+    catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined
+      if (code !== 'ENOENT')
+        throw error
+    }
+
+    try {
+      await cp(source, target, { recursive: true, force: false, errorOnExist: true })
+      options.log.withFields({ source, target }).log('legacy plugin copied to install plugin root')
+    }
+    catch (error) {
+      options.log.withError(error).withFields({ source, target }).warn('failed to copy legacy plugin into install plugin root')
+    }
   }
 }
 
@@ -112,6 +187,23 @@ export interface PluginHostHostService extends PluginHostService {
    * - The updated plugin registry snapshot after persistence
    */
   setAutoReload: (payload: { name: string, enabled: boolean }) => Promise<PluginRegistrySnapshot>
+
+  /**
+   * Opens the plugin manifest root in the host operating system file manager.
+   */
+  openRoot: () => Promise<{ path: string }>
+
+  /**
+   * Lets the user choose a local plugin directory and links it into the
+   * plugin manifest root for discovery.
+   */
+  addFromDirectory: () => Promise<PluginRegistrySnapshot>
+
+  /**
+   * Removes one discovered plugin from the plugin root and unloads it first
+   * when needed.
+   */
+  remove: (payload: { name: string }) => Promise<PluginRegistrySnapshot>
 
   /**
    * Loads every plugin currently marked as enabled.
@@ -212,8 +304,8 @@ export interface PluginHostHostService extends PluginHostService {
  * - Tests need direct access to the internal host bootstrap helper
  *
  * Expects:
- * - Electron `app.getPath('userData')` is available
- * - Plugin manifests live under `<userData>/plugins/v1`
+ * - Electron app paths are available
+ * - Plugin manifests live under the install/project plugin root
  *
  * Returns:
  * - The internal bootstrap service that powers the public plugin-host IPC facade
@@ -222,7 +314,9 @@ export async function setupPluginHostHostService(
   options: SetupPluginHostOptions,
 ): Promise<PluginHostHostService> {
   const log = useLogg('main/plugin-host').useGlobalConfig()
-  const pluginsRoot = join(app.getPath('userData'), 'plugins', 'v1')
+  const pluginsRoot = resolveDefaultPluginsRoot()
+  const legacyPluginsRoot = join(app.getPath('userData'), 'plugins', 'v1')
+  await migrateLegacyPluginsRoot({ legacyRoot: legacyPluginsRoot, pluginsRoot, log })
 
   // Config
   const pluginConfig = createPluginHostConfigStore()
@@ -405,6 +499,75 @@ export async function setupPluginHostHostService(
     await stopLoadedPluginByName(name)
   }
 
+  const addPluginFromDirectory = async () => {
+    const result = await dialog.showOpenDialog({
+      title: 'Select AIRI plugin directory',
+      properties: ['openDirectory'],
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return listSnapshot()
+    }
+
+    const selectedDir = result.filePaths[0]
+    const manifestPath = join(selectedDir, pluginManifestFileName)
+    const raw = await readFile(manifestPath, 'utf-8').catch(() => {
+      throw new Error(`Plugin manifest not found: ${manifestPath}`)
+    })
+    const manifest = JSON.parse(raw) as { name?: unknown }
+    if (typeof manifest.name !== 'string' || !manifest.name.trim())
+      throw new Error('Plugin manifest must include a non-empty `name`.')
+
+    const linkName = sanitizePluginDirectoryName(manifest.name)
+    const targetDir = join(pluginsRoot, linkName)
+    try {
+      await lstat(targetDir)
+      throw new Error(`Plugin directory already exists: ${targetDir}`)
+    }
+    catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined
+      if (code !== 'ENOENT')
+        throw error
+    }
+
+    await symlink(selectedDir, targetDir, process.platform === 'win32' ? 'junction' : 'dir')
+    await refreshManifests()
+    return listSnapshot()
+  }
+
+  const removePluginByName = async (name: string) => {
+    await refreshManifests()
+    const entry = pluginRegistry.findManifestEntry(name)
+    if (!entry)
+      throw new Error(`Plugin manifest not found: ${name}`)
+
+    await unloadPluginByName(name)
+    clearModuleAssetSessionCacheByPluginId(name)
+    await pluginAssetService.revokeByPluginId(name)
+
+    const pluginDir = dirname(entry.path)
+    if (!isPathInside(pluginsRoot, pluginDir))
+      throw new Error(`Refusing to remove plugin outside plugin root: ${pluginDir}`)
+
+    const stats = await lstat(pluginDir)
+    if (stats.isSymbolicLink())
+      await rm(pluginDir, { force: true })
+    else
+      await rm(pluginDir, { recursive: true, force: true })
+
+    const config = getConfig()
+    pluginConfig.update({
+      enabled: config.enabled.filter(pluginName => pluginName !== name),
+      autoReload: config.autoReload.filter(pluginName => pluginName !== name),
+      known: Object.fromEntries(Object.entries(config.known).filter(([pluginName]) => pluginName !== name)),
+    })
+
+    await refreshManifests()
+    autoReloadFeature.sync()
+    return listSnapshot()
+  }
+
   const loadEnabledPlugins = async () => {
     const config = getConfig()
     for (const entry of pluginRegistry.listEntries()) {
@@ -486,6 +649,19 @@ export async function setupPluginHostHostService(
 
       autoReloadFeature.sync()
       return listSnapshot()
+    },
+    async openRoot() {
+      await refreshManifests()
+      const openResult = await shell.openPath(pluginsRoot)
+      if (openResult)
+        throw new Error(openResult)
+      return { path: pluginsRoot }
+    },
+    async addFromDirectory() {
+      return await addPluginFromDirectory()
+    },
+    async remove(payload) {
+      return await removePluginByName(payload.name)
     },
     async loadEnabled() {
       await refreshManifests()

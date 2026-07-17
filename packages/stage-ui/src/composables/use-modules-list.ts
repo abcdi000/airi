@@ -7,14 +7,17 @@ import { useI18n } from 'vue-i18n'
 import factorioIcon from '../assets/factorio-simple.png'
 
 import { useArtistryStore } from '../stores/modules/artistry'
+import { useLumiAgentStore } from '../stores/lumi-agent'
 import { useConsciousnessStore } from '../stores/modules/consciousness'
 import { useDiscordStore } from '../stores/modules/discord'
 import { useFactorioStore } from '../stores/modules/gaming-factorio'
 import { useMinecraftStore } from '../stores/modules/gaming-minecraft'
+import { useMcpStore } from '../stores/mcp'
 import { useHearingStore } from '../stores/modules/hearing'
 import { useSpeechStore } from '../stores/modules/speech'
 import { useTwitterStore } from '../stores/modules/twitter'
 import { useVisionStore } from '../stores/modules/vision'
+import { useLumiMemoryStore } from '../stores/lumi-memory'
 
 export interface Module {
   id: string
@@ -41,9 +44,13 @@ export function useModulesList() {
   const minecraftStore = useMinecraftStore()
   const factorioStore = useFactorioStore()
   const artistryStore = useArtistryStore()
+  const mcpStore = useMcpStore()
+  const lumiMemoryStore = useLumiMemoryStore()
+  const lumiAgentStore = useLumiAgentStore()
   const beatSyncState = ref<BeatSyncDetectorState>()
 
   minecraftStore.initialize()
+  lumiMemoryStore.initialize()
 
   const modulesList = computed<Module[]>(() => [
     {
@@ -92,6 +99,15 @@ export function useModulesList() {
       category: 'essential',
     },
     {
+      id: 'actions',
+      name: t('settings.pages.modules.actions.title'),
+      description: t('settings.pages.modules.actions.description'),
+      icon: 'i-solar:command-bold-duotone',
+      to: '/settings/modules/actions',
+      configured: lumiAgentStore.configured,
+      category: 'essential',
+    },
+    {
       id: 'memory-short-term',
       name: t('settings.pages.modules.memory-short-term.title'),
       description: t('settings.pages.modules.memory-short-term.description'),
@@ -106,7 +122,7 @@ export function useModulesList() {
       description: t('settings.pages.modules.memory-long-term.description'),
       icon: 'i-solar:book-bookmark-bold-duotone',
       to: '/settings/modules/memory-long-term',
-      configured: false,
+      configured: lumiMemoryStore.activeMemories.length > 0,
       category: 'essential',
     },
     {
@@ -151,7 +167,7 @@ export function useModulesList() {
       description: t('settings.pages.modules.mcp-server.description'),
       icon: 'i-solar:server-bold-duotone',
       to: '/settings/modules/mcp',
-      configured: false,
+      configured: mcpStore.connected,
       category: 'essential',
     },
     {

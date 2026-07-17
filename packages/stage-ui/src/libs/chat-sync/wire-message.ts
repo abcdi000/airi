@@ -71,6 +71,8 @@ export function isCloudSyncableMessage(message: ChatHistoryItem): boolean {
     return false
   if (message.role === 'error')
     return false
+  if (message.role === 'assistant' && /^\[(?:memory_search|memory_write)\]/.test(extractMessageText(message).trim()))
+    return false
   return true
 }
 

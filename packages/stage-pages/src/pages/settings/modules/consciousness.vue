@@ -6,7 +6,7 @@ import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
 import { storeToRefs } from 'pinia'
 import { watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 
 const providersStore = useProvidersStore()
 const consciousnessStore = useConsciousnessStore()
@@ -24,6 +24,7 @@ const {
 
 const { t } = useI18n()
 const { trackProviderClick } = useAnalytics()
+const router = useRouter()
 
 watch(activeProvider, async (provider, oldProvider) => {
   if (!provider)
@@ -47,6 +48,10 @@ function handleDeleteProvider(providerId: string) {
     activeModel.value = ''
   }
   providersStore.deleteProvider(providerId)
+}
+
+function goToProviderSettings(providerId: string) {
+  router.push(`/settings/providers/chat/${providerId}`)
 }
 </script>
 
@@ -86,13 +91,24 @@ function handleDeleteProvider(providerId: string) {
               @click="trackProviderClick(metadata.id, 'consciousness')"
             >
               <template v-if="!metadata.id.startsWith('official-provider')" #topRight>
-                <button
-                  type="button"
-                  class="rounded bg-neutral-100 p-1 text-neutral-600 transition-colors dark:bg-neutral-800/60 hover:bg-neutral-200 dark:text-neutral-300 dark:hover:bg-neutral-700/60"
-                  @click.stop.prevent="handleDeleteProvider(metadata.id)"
-                >
-                  <div i-solar:trash-bin-trash-bold-duotone class="text-base" />
-                </button>
+                <div class="flex gap-1">
+                  <button
+                    type="button"
+                    class="rounded bg-neutral-100 p-1 text-neutral-600 transition-colors dark:bg-neutral-800/60 hover:bg-neutral-200 dark:text-neutral-300 dark:hover:bg-neutral-700/60"
+                    title="修改配置"
+                    @click.stop.prevent="goToProviderSettings(metadata.id)"
+                  >
+                    <div i-solar:settings-bold-duotone class="text-base" />
+                  </button>
+                  <button
+                    type="button"
+                    class="rounded bg-neutral-100 p-1 text-neutral-600 transition-colors dark:bg-neutral-800/60 hover:bg-neutral-200 dark:text-neutral-300 dark:hover:bg-neutral-700/60"
+                    title="删除配置"
+                    @click.stop.prevent="handleDeleteProvider(metadata.id)"
+                  >
+                    <div i-solar:trash-bin-trash-bold-duotone class="text-base" />
+                  </button>
+                </div>
               </template>
 
               <template v-if="configuredProviders[metadata.id] === false" #bottomRight>

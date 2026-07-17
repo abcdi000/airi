@@ -15,11 +15,11 @@ import ChatContainer from '../Widgets/ChatContainer.vue'
 
 const { isReady } = useDeferredMount()
 const { sending } = storeToRefs(useChatOrchestratorStore())
-const { messages } = storeToRefs(useChatSessionStore())
+const { messages, visibleMessages, visibleMessageStartIndex } = storeToRefs(useChatSessionStore())
 const { streamingMessage } = storeToRefs(useChatStreamStore())
 
 const isLoading = ref(true)
-const historyMessages = computed(() => messages.value as unknown as ChatHistoryItem[])
+const historyMessages = computed(() => visibleMessages.value as unknown as ChatHistoryItem[])
 
 function handleDeleteMessage(index: number) {
   messages.value = messages.value.filter((_, messageIndex) => messageIndex !== index)
@@ -41,6 +41,7 @@ function handleDeleteMessage(index: number) {
           <ChatHistory
             v-if="isReady"
             :messages="historyMessages"
+            :base-index="visibleMessageStartIndex"
             :sending="sending"
             :streaming-message="streamingMessage"
             h-full

@@ -60,7 +60,7 @@ export async function runProcess(command: string, args: string[], options: RunPr
       cleanup()
 
       if (code !== 0) {
-        reject(new Error(stderr.trim() || `process exited with code ${code}: ${command}`))
+        reject(new Error(stderr.trim() || stdout.trim() || `process exited with code ${code}: ${command}`))
         return
       }
 

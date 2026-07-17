@@ -16,7 +16,7 @@ export function describeExecutionTarget(target: ExecutionTarget) {
   if (target.mode === 'dry-run')
     return `local dry-run on ${target.hostName}`
   if (target.mode === 'local-windowed')
-    return `local macOS windowed execution on ${target.hostName}`
+    return `local windowed execution on ${target.hostName}`
 
   return `${target.hostName}${target.displayId ? ` ${target.displayId}` : ''}${target.sessionTag ? ` (${target.sessionTag})` : ''}`
 }

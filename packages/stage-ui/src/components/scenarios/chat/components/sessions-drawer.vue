@@ -10,6 +10,7 @@ import { useI18n } from 'vue-i18n'
 
 import { useAnalytics } from '../../../../composables/use-analytics'
 import { useBreakpoints } from '../../../../composables/use-breakpoints'
+import { LUMI_AIRI_CARD_ID } from '../../../../constants/lumi-card'
 import { extractMessageText } from '../../../../libs/chat-sync'
 import { useAuthStore } from '../../../../stores/auth'
 import { useChatSessionStore } from '../../../../stores/chat/session-store'
@@ -48,6 +49,7 @@ const { activeCardId } = storeToRefs(useAiriCardStore())
 const { userId } = storeToRefs(useAuthStore())
 const { activeModel } = storeToRefs(useConsciousnessStore())
 const { trackChatSessionStarted } = useAnalytics()
+const isLumiCard = computed(() => activeCardId.value === LUMI_AIRI_CARD_ID)
 
 // Re-entry guard for the "new session" button. Without this, a rapid
 // double-click would call `createSession` twice (creating two orphan
@@ -141,6 +143,7 @@ function formatUpdatedAt(ts: number): string {
 
 const rows = computed<SessionRow[]>(() => {
   const list = ownedSessions.value
+    .filter(meta => !isLumiCard.value || meta.characterId !== LUMI_AIRI_CARD_ID || meta.timelineType === 'main')
     .map<SessionRow>(meta => ({
       meta,
       preview: previewFor(meta),
@@ -237,6 +240,7 @@ watch(showDialog, async (open) => {
               {{ t('stage.chat.sessions.title') }}
             </DialogTitle>
             <button
+              v-if="!isLumiCard"
               :class="[
                 'rounded-lg px-3 py-1.5 text-xs font-medium',
                 'bg-primary-100/60 text-primary-700 dark:bg-primary-900/40 dark:text-primary-200',
@@ -322,6 +326,7 @@ watch(showDialog, async (open) => {
             {{ t('stage.chat.sessions.title') }}
           </DrawerTitle>
           <button
+            v-if="!isLumiCard"
             :class="[
               'rounded-lg px-3 py-1.5 text-xs font-medium',
               'bg-primary-100/60 text-primary-700 dark:bg-primary-900/40 dark:text-primary-200',

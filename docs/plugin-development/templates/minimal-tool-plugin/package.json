@@ -1,0 +1,9 @@
+{
+  "name": "minimal-tool-plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Minimal zero-build AIRI external tool plugin template.",
+  "author": "AIRI Plugin Author",
+  "license": "MIT"
+}

@@ -1,4 +1,4 @@
-export type VisionWorkloadId = 'screen:interpret' | 'screen:understand' | 'screen:ocr' | 'screen:ui-automation'
+export type VisionWorkloadId = 'screen:interpret' | 'screen:understand' | 'screen:ocr' | 'screen:ui-automation' | 'lumi:chat-image'
 
 export interface VisionWorkloadConfig {
   id: VisionWorkloadId

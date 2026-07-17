@@ -1,0 +1,972 @@
+import type { createContext } from '@moeru/eventa/adapters/electron/main'
+
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { createInterface } from 'node:readline'
+import { fileURLToPath } from 'node:url'
+
+import { defineInvokeHandler } from '@moeru/eventa'
+import { app } from 'electron'
+
+import {
+  electronLumiMemoryBackfillVectors,
+  electronLumiMemoryClear,
+  electronLumiMemoryDeleteMemory,
+  electronLumiMemoryDeleteVector,
+  electronLumiMemoryGetVectors,
+  electronLumiMemoryGetSnapshot,
+  electronLumiMemoryReplaceSnapshot,
+  electronLumiMemorySaveEvent,
+  electronLumiMemorySearchVectors,
+  electronLumiMemorySetSeedId,
+  electronLumiMemorySyncVector,
+  electronLumiMemoryUpsertMemory,
+  electronLumiMemoryUpsertVector,
+  electronLumiMemoryVectorStatus,
+  type ElectronLumiMemorySnapshot,
+  type ElectronLumiMemoryVectorRecord,
+  type ElectronLumiMemoryVectorSearchResult,
+  type ElectronLumiMemoryVectorStatus,
+} from '../../../../shared/eventa'
+
+type SqliteValue = string | number | null
+const LUMI_MEMORY_EMBEDDING_MODEL = 'BAAI/bge-small-zh-v1.5'
+const LUMI_MEMORY_EMBEDDING_BATCH_SIZE = 32
+const LUMI_MEMORY_VECTOR_SEARCH_LIMIT = 800
+const LUMI_MEMORY_VECTOR_BACKFILL_LIMIT = 2000
+const LUMI_MEMORY_VECTOR_REQUEST_TIMEOUT_MS = 1_800_000
+const MAIN_MODULE_DIR = dirname(fileURLToPath(import.meta.url))
+const LUMI_MEMORY_VECTOR_DEVICE = process.env.LUMI_MEMORY_VECTOR_DEVICE || 'auto'
+
+interface SqliteStatement {
+  all: (...values: SqliteValue[]) => Record<string, any>[]
+  get: (...values: SqliteValue[]) => Record<string, any> | undefined
+  run: (...values: SqliteValue[]) => void
+}
+
+interface SqliteDatabase {
+  exec: (sql: string) => void
+  prepare: (sql: string) => SqliteStatement
+}
+
+interface SqliteModule {
+  DatabaseSync: new (path: string) => SqliteDatabase
+}
+
+interface LumiVectorWorkerResponse<T = any> {
+  id?: string
+  ok: boolean
+  result?: T
+  error?: string
+}
+
+interface LumiVectorWorkerEmbedResult {
+  model: string
+  device: string
+  dimensions: number
+  vectors: number[][]
+}
+
+let dbInstance: SqliteDatabase | null = null
+let dbPathInstance = ''
+let vectorWorker: ChildProcessWithoutNullStreams | null = null
+let vectorWorkerRequestId = 0
+let vectorWorkerStarting = false
+let vectorWorkerLastError = ''
+let vectorWorkerProgress = ''
+let vectorWorkerDevice = 'unknown'
+let vectorWorkerPhase = ''
+let vectorWorkerDownloadPercent: number | undefined
+let vectorWorkerDownloadedBytes: number | undefined
+let vectorWorkerDownloadTotalBytes: number | undefined
+let vectorWorkerDownloadSpeedBytesPerSecond: number | undefined
+const vectorWorkerPending = new Map<string, {
+  resolve: (value: any) => void
+  reject: (error: Error) => void
+  timer: NodeJS.Timeout
+}>()
+
+async function loadSqlite(): Promise<SqliteModule> {
+  const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<SqliteModule>
+  return await dynamicImport('node:sqlite')
+}
+
+async function getDatabase(): Promise<{ db: SqliteDatabase, path: string }> {
+  if (dbInstance) {
+    return { db: dbInstance, path: dbPathInstance }
+  }
+
+  const sqlite = await loadSqlite()
+  dbPathInstance = join(app.getPath('userData'), 'lumi-memory.sqlite3')
+  mkdirSync(dirname(dbPathInstance), { recursive: true })
+  dbInstance = new sqlite.DatabaseSync(dbPathInstance)
+  migrate(dbInstance)
+  return { db: dbInstance, path: dbPathInstance }
+}
+
+function migrate(db: SqliteDatabase) {
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA foreign_keys = ON;
+
+    CREATE TABLE IF NOT EXISTS lumi_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS lumi_memories (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      persona_id TEXT NOT NULL,
+      conversation_id TEXT,
+      type TEXT NOT NULL,
+      content TEXT NOT NULL,
+      source_message_id TEXT,
+      confidence REAL NOT NULL,
+      importance REAL NOT NULL,
+      emotional_intensity REAL NOT NULL,
+      relationship_relevance REAL NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_used_at TEXT,
+      decay REAL NOT NULL,
+      tags_json TEXT NOT NULL,
+      status TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lumi_memories_status ON lumi_memories(status);
+    CREATE INDEX IF NOT EXISTS idx_lumi_memories_type ON lumi_memories(type);
+    CREATE INDEX IF NOT EXISTS idx_lumi_memories_user_persona ON lumi_memories(user_id, persona_id);
+    CREATE INDEX IF NOT EXISTS idx_lumi_memories_updated_at ON lumi_memories(updated_at);
+
+    CREATE TABLE IF NOT EXISTS lumi_memory_vectors (
+      memory_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      signature TEXT NOT NULL,
+      vector_json TEXT NOT NULL,
+      device TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(memory_id, model),
+      FOREIGN KEY(memory_id) REFERENCES lumi_memories(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lumi_memory_vectors_model ON lumi_memory_vectors(model);
+    CREATE INDEX IF NOT EXISTS idx_lumi_memory_vectors_updated_at ON lumi_memory_vectors(updated_at);
+
+    CREATE TABLE IF NOT EXISTS lumi_memory_events (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      memory_id TEXT,
+      related_memory_ids_json TEXT,
+      query TEXT,
+      route TEXT,
+      result_count INTEGER,
+      before_status TEXT,
+      after_status TEXT,
+      preview TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lumi_memory_events_created_at ON lumi_memory_events(created_at);
+  `)
+}
+
+export function createLumiMemoryService(params: {
+  context: ReturnType<typeof createContext>['context']
+}) {
+  defineInvokeHandler(params.context, electronLumiMemoryGetSnapshot, async () => getSnapshot())
+  defineInvokeHandler(params.context, electronLumiMemoryReplaceSnapshot, async snapshot => replaceSnapshot(snapshot))
+  defineInvokeHandler(params.context, electronLumiMemoryUpsertMemory, async memory => upsertMemory(memory))
+  defineInvokeHandler(params.context, electronLumiMemoryDeleteMemory, async ({ id }) => deleteMemory(id))
+  defineInvokeHandler(params.context, electronLumiMemoryGetVectors, async payload => getVectors(payload.model))
+  defineInvokeHandler(params.context, electronLumiMemoryUpsertVector, async record => upsertVector(record))
+  defineInvokeHandler(params.context, electronLumiMemoryDeleteVector, async payload => deleteVector(payload.memoryId, payload.model))
+  defineInvokeHandler(params.context, electronLumiMemoryVectorStatus, async () => getVectorStatus())
+  defineInvokeHandler(params.context, electronLumiMemoryBackfillVectors, async payload => backfillVectors(payload?.limit))
+  defineInvokeHandler(params.context, electronLumiMemorySearchVectors, async payload => searchVectors(payload.query, payload.limit))
+  defineInvokeHandler(params.context, electronLumiMemorySyncVector, async memory => syncVectorForMemory(memory))
+  defineInvokeHandler(params.context, electronLumiMemorySaveEvent, async event => saveEvent(event))
+  defineInvokeHandler(params.context, electronLumiMemorySetSeedId, async ({ seedId }) => setMeta('seed_id', seedId))
+  defineInvokeHandler(params.context, electronLumiMemoryClear, async () => clearDatabase())
+}
+
+async function getSnapshot(): Promise<ElectronLumiMemorySnapshot> {
+  const { db, path } = await getDatabase()
+  const fragments = db.prepare(`
+    SELECT * FROM lumi_memories
+    ORDER BY updated_at DESC, created_at DESC
+  `).all().map(rowToMemory)
+  const events = db.prepare(`
+    SELECT * FROM lumi_memory_events
+    ORDER BY created_at DESC
+    LIMIT 200
+  `).all().map(rowToEvent)
+  const seedId = getMeta(db, 'seed_id') ?? ''
+
+  return {
+    fragments,
+    events,
+    seedId,
+    dbPath: path,
+  } satisfies ElectronLumiMemorySnapshot
+}
+
+async function replaceSnapshot(snapshot: ElectronLumiMemorySnapshot): Promise<ElectronLumiMemorySnapshot> {
+  const { db } = await getDatabase()
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.exec('DELETE FROM lumi_memory_events; DELETE FROM lumi_memory_vectors; DELETE FROM lumi_memories;')
+    for (const memory of snapshot.fragments)
+      upsertMemoryWithDb(db, memory)
+    for (const event of snapshot.events)
+      saveEventWithDb(db, event)
+    setMetaWithDb(db, 'seed_id', snapshot.seedId ?? '')
+    db.exec('COMMIT')
+  }
+  catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+  return await getSnapshot()
+}
+
+async function upsertMemory(memory: Record<string, any>) {
+  const { db } = await getDatabase()
+  upsertMemoryWithDb(db, memory)
+  void syncVectorForMemory(memory).catch(error => console.warn('[lumi-memory] failed to sync vector after memory upsert', error))
+}
+
+function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
+  db.prepare(`
+    INSERT INTO lumi_memories (
+      id,
+      user_id,
+      persona_id,
+      conversation_id,
+      type,
+      content,
+      source_message_id,
+      confidence,
+      importance,
+      emotional_intensity,
+      relationship_relevance,
+      created_at,
+      updated_at,
+      last_used_at,
+      decay,
+      tags_json,
+      status
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      user_id = excluded.user_id,
+      persona_id = excluded.persona_id,
+      conversation_id = excluded.conversation_id,
+      type = excluded.type,
+      content = excluded.content,
+      source_message_id = excluded.source_message_id,
+      confidence = excluded.confidence,
+      importance = excluded.importance,
+      emotional_intensity = excluded.emotional_intensity,
+      relationship_relevance = excluded.relationship_relevance,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at,
+      last_used_at = excluded.last_used_at,
+      decay = excluded.decay,
+      tags_json = excluded.tags_json,
+      status = excluded.status
+  `).run(
+    stringField(memory.id),
+    stringField(memory.userId, 'local'),
+    stringField(memory.personaId, 'lumi'),
+    nullableString(memory.conversationId),
+    stringField(memory.type, 'user_fact'),
+    stringField(memory.content),
+    nullableString(memory.sourceMessageId),
+    numberField(memory.confidence),
+    numberField(memory.importance),
+    numberField(memory.emotionalIntensity),
+    numberField(memory.relationshipRelevance),
+    stringField(memory.createdAt, new Date().toISOString()),
+    stringField(memory.updatedAt, new Date().toISOString()),
+    nullableString(memory.lastUsedAt),
+    numberField(memory.decay),
+    JSON.stringify(Array.isArray(memory.tags) ? memory.tags : []),
+    stringField(memory.status, 'candidate'),
+  )
+}
+
+async function deleteMemory(id: string) {
+  const { db } = await getDatabase()
+  db.prepare('DELETE FROM lumi_memory_vectors WHERE memory_id = ?').run(id)
+  db.prepare('DELETE FROM lumi_memories WHERE id = ?').run(id)
+}
+
+async function getVectors(model: string): Promise<ElectronLumiMemoryVectorRecord[]> {
+  const { db } = await getDatabase()
+  return db.prepare(`
+    SELECT memory_id, model, signature, vector_json, device, updated_at
+    FROM lumi_memory_vectors
+    WHERE model = ?
+    ORDER BY updated_at DESC
+  `).all(stringField(model)).map(rowToVectorRecord)
+}
+
+async function upsertVector(record: ElectronLumiMemoryVectorRecord) {
+  const { db } = await getDatabase()
+  const vector = Array.isArray(record.vector)
+    ? record.vector.filter(value => typeof value === 'number' && Number.isFinite(value))
+    : []
+  if (!record.memoryId || !record.model || !record.signature || vector.length === 0)
+    return
+
+  db.prepare(`
+    INSERT INTO lumi_memory_vectors (
+      memory_id,
+      model,
+      signature,
+      vector_json,
+      device,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(memory_id, model) DO UPDATE SET
+      signature = excluded.signature,
+      vector_json = excluded.vector_json,
+      device = excluded.device,
+      updated_at = excluded.updated_at
+  `).run(
+    stringField(record.memoryId),
+    stringField(record.model),
+    stringField(record.signature),
+    JSON.stringify(vector),
+    nullableString(record.device),
+    stringField(record.updatedAt, new Date().toISOString()),
+  )
+}
+
+async function deleteVector(memoryId: string, model?: string) {
+  const { db } = await getDatabase()
+  if (model)
+    db.prepare('DELETE FROM lumi_memory_vectors WHERE memory_id = ? AND model = ?').run(memoryId, model)
+  else
+    db.prepare('DELETE FROM lumi_memory_vectors WHERE memory_id = ?').run(memoryId)
+}
+
+async function getVectorStatus(): Promise<ElectronLumiMemoryVectorStatus> {
+  const { db } = await getDatabase()
+  return vectorStatusWithDb(db)
+}
+
+async function syncVectorForMemory(memory: Record<string, any>): Promise<ElectronLumiMemoryVectorStatus> {
+  const { db } = await getDatabase()
+  const normalized = rowLikeMemory(memory)
+  if (!normalized.id)
+    return vectorStatusWithDb(db)
+
+  if (normalized.status === 'rejected') {
+    db.prepare('DELETE FROM lumi_memory_vectors WHERE memory_id = ? AND model = ?').run(normalized.id, LUMI_MEMORY_EMBEDDING_MODEL)
+    return vectorStatusWithDb(db)
+  }
+
+  try {
+    vectorWorkerProgress = `正在更新向量: ${previewText(normalized.content, 40)}`
+    const [vector] = await embedTexts([memoryVectorText(normalized)])
+    upsertVectorWithDb(db, {
+      memoryId: normalized.id,
+      model: LUMI_MEMORY_EMBEDDING_MODEL,
+      signature: memoryVectorSignature(normalized),
+      vector,
+      device: vectorWorkerDevice,
+      updatedAt: new Date().toISOString(),
+    })
+  }
+  catch (error) {
+    vectorWorkerLastError = error instanceof Error ? error.message : String(error)
+    console.warn('[lumi-memory] failed to sync memory vector', error)
+  }
+  return vectorStatusWithDb(db)
+}
+
+async function backfillVectors(limit = LUMI_MEMORY_VECTOR_BACKFILL_LIMIT): Promise<ElectronLumiMemoryVectorStatus> {
+  const { db } = await getDatabase()
+  const memories = vectorBackfillCandidates(db, limit)
+  if (memories.length === 0) {
+    vectorWorkerProgress = '向量已经补齐'
+    return vectorStatusWithDb(db)
+  }
+
+  let completed = 0
+  for (let index = 0; index < memories.length; index += LUMI_MEMORY_EMBEDDING_BATCH_SIZE) {
+    const batch = memories.slice(index, index + LUMI_MEMORY_EMBEDDING_BATCH_SIZE)
+    vectorWorkerProgress = `正在补向量 ${Math.min(index + batch.length, memories.length)}/${memories.length}: ${previewText(batch[0]?.content ?? '', 36)}`
+    try {
+      const vectors = await embedTexts(batch.map(memoryVectorText))
+      const now = new Date().toISOString()
+      for (let batchIndex = 0; batchIndex < batch.length; batchIndex += 1) {
+        const memory = batch[batchIndex]
+        const vector = vectors[batchIndex]
+        if (!isFiniteVector(vector))
+          continue
+        upsertVectorWithDb(db, {
+          memoryId: memory.id,
+          model: LUMI_MEMORY_EMBEDDING_MODEL,
+          signature: memoryVectorSignature(memory),
+          vector,
+          device: vectorWorkerDevice,
+          updatedAt: now,
+        })
+        completed += 1
+      }
+    }
+    catch (error) {
+      vectorWorkerLastError = error instanceof Error ? error.message : String(error)
+      vectorWorkerProgress = `补向量失败: ${vectorWorkerLastError}`
+      console.warn('[lumi-memory] vector backfill failed', error)
+      break
+    }
+  }
+
+  vectorWorkerProgress = `补向量完成 ${completed}/${memories.length}`
+  return vectorStatusWithDb(db)
+}
+
+async function searchVectors(query: string, limit = LUMI_MEMORY_VECTOR_SEARCH_LIMIT): Promise<ElectronLumiMemoryVectorSearchResult> {
+  const { db } = await getDatabase()
+  const safeQuery = stringField(query).trim()
+  if (!safeQuery)
+    return { scores: {}, status: vectorStatusWithDb(db) }
+
+  let status = vectorStatusWithDb(db)
+  if (status.indexedCount === 0 && status.missingCount > 0)
+    status = await backfillVectors(Math.min(160, status.missingCount))
+
+  try {
+    vectorWorkerProgress = `正在检索向量: ${previewText(safeQuery, 40)}`
+    const [queryVector] = await embedTexts([safeQuery])
+    const rows = db.prepare(`
+      SELECT memory_id, vector_json
+      FROM lumi_memory_vectors
+      WHERE model = ?
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `).all(LUMI_MEMORY_EMBEDDING_MODEL, Math.max(1, limit))
+
+    const scores: Record<string, number> = {}
+    for (const row of rows) {
+      const vector = parseJsonNumberArray(row.vector_json)
+      if (!isFiniteVector(vector))
+        continue
+      scores[stringField(row.memory_id)] = cosineSimilarity(queryVector, vector)
+    }
+    vectorWorkerProgress = `检索完成: ${Object.keys(scores).length} 条向量`
+    return { scores, status: vectorStatusWithDb(db) }
+  }
+  catch (error) {
+    vectorWorkerLastError = error instanceof Error ? error.message : String(error)
+    vectorWorkerProgress = `检索失败: ${vectorWorkerLastError}`
+    console.warn('[lumi-memory] vector search failed', error)
+    return { scores: {}, status: vectorStatusWithDb(db) }
+  }
+}
+function vectorStatusWithDb(db: SqliteDatabase): ElectronLumiMemoryVectorStatus {
+  const rows = db.prepare(`
+    SELECT m.id, m.updated_at, m.type, m.status, m.tags_json, m.content, v.signature
+    FROM lumi_memories m
+    LEFT JOIN lumi_memory_vectors v ON v.memory_id = m.id AND v.model = ?
+    WHERE m.status != 'rejected'
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL)
+  let indexedCount = 0
+  for (const row of rows) {
+    if (row.signature === memoryVectorSignature(rowToMemory(row)))
+      indexedCount += 1
+  }
+  const running = Boolean(vectorWorker && !vectorWorker.killed)
+  return {
+    available: running && !vectorWorkerLastError,
+    running,
+    model: LUMI_MEMORY_EMBEDDING_MODEL,
+    device: vectorWorkerDevice,
+    phase: vectorWorkerPhase || undefined,
+    indexedCount,
+    totalCount: rows.length,
+    missingCount: Math.max(0, rows.length - indexedCount),
+    downloadPercent: vectorWorkerDownloadPercent,
+    downloadedBytes: vectorWorkerDownloadedBytes,
+    downloadTotalBytes: vectorWorkerDownloadTotalBytes,
+    downloadSpeedBytesPerSecond: vectorWorkerDownloadSpeedBytesPerSecond,
+    progress: vectorWorkerProgress,
+    lastError: vectorWorkerLastError || undefined,
+  }
+}
+
+function vectorBackfillCandidates(db: SqliteDatabase, limit: number) {
+  return db.prepare(`
+    SELECT m.*
+    FROM lumi_memories m
+    LEFT JOIN lumi_memory_vectors v ON v.memory_id = m.id AND v.model = ?
+    WHERE m.status != 'rejected'
+    ORDER BY m.updated_at DESC, m.created_at DESC
+    LIMIT ?
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL, Math.max(1, limit))
+    .map(rowToMemory)
+    .filter(memory => {
+      const row = db.prepare(`
+        SELECT signature
+        FROM lumi_memory_vectors
+        WHERE memory_id = ? AND model = ?
+      `).get(memory.id, LUMI_MEMORY_EMBEDDING_MODEL)
+      return row?.signature !== memoryVectorSignature(memory)
+    })
+}
+
+function upsertVectorWithDb(db: SqliteDatabase, record: ElectronLumiMemoryVectorRecord) {
+  const vector = Array.isArray(record.vector)
+    ? record.vector.filter(value => typeof value === 'number' && Number.isFinite(value))
+    : []
+  if (!record.memoryId || !record.model || !record.signature || vector.length === 0)
+    return
+
+  db.prepare(`
+    INSERT INTO lumi_memory_vectors (
+      memory_id,
+      model,
+      signature,
+      vector_json,
+      device,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(memory_id, model) DO UPDATE SET
+      signature = excluded.signature,
+      vector_json = excluded.vector_json,
+      device = excluded.device,
+      updated_at = excluded.updated_at
+  `).run(
+    stringField(record.memoryId),
+    stringField(record.model),
+    stringField(record.signature),
+    JSON.stringify(vector),
+    nullableString(record.device),
+    stringField(record.updatedAt, new Date().toISOString()),
+  )
+}
+
+async function embedTexts(texts: string[]): Promise<number[][]> {
+  const result = await requestVectorWorker<LumiVectorWorkerEmbedResult>('embed', {
+    model: LUMI_MEMORY_EMBEDDING_MODEL,
+    texts,
+    batchSize: LUMI_MEMORY_EMBEDDING_BATCH_SIZE,
+    device: LUMI_MEMORY_VECTOR_DEVICE,
+    localFilesOnly: false,
+  })
+  vectorWorkerDevice = result.device || vectorWorkerDevice
+  return result.vectors
+}
+
+async function requestVectorWorker<T>(method: string, params: Record<string, any>): Promise<T> {
+  const child = await ensureVectorWorker()
+  const id = `vec_${Date.now().toString(36)}_${(vectorWorkerRequestId += 1).toString(36)}`
+  const request = JSON.stringify({ id, method, params })
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      vectorWorkerPending.delete(id)
+      reject(new Error(`Lumi memory vector worker request timed out after ${LUMI_MEMORY_VECTOR_REQUEST_TIMEOUT_MS}ms`))
+    }, LUMI_MEMORY_VECTOR_REQUEST_TIMEOUT_MS)
+    vectorWorkerPending.set(id, { resolve, reject, timer })
+    child.stdin.write(`${request}\n`, (error) => {
+      if (error) {
+        clearTimeout(timer)
+        vectorWorkerPending.delete(id)
+        reject(error)
+      }
+    })
+  })
+}
+
+async function ensureVectorWorker(): Promise<ChildProcessWithoutNullStreams> {
+  if (vectorWorker && !vectorWorker.killed)
+    return vectorWorker
+  if (vectorWorkerStarting) {
+    while (vectorWorkerStarting)
+      await new Promise(resolve => setTimeout(resolve, 50))
+    if (vectorWorker && !vectorWorker.killed)
+      return vectorWorker
+  }
+
+  vectorWorkerStarting = true
+  try {
+    const script = resolveVectorWorkerScript()
+    const command = resolveVectorPythonCommand()
+    vectorWorkerLastError = ''
+    vectorWorkerPhase = 'starting'
+    vectorWorkerDownloadPercent = undefined
+    vectorWorkerDownloadedBytes = undefined
+    vectorWorkerDownloadTotalBytes = undefined
+    vectorWorkerDownloadSpeedBytesPerSecond = undefined
+    vectorWorkerProgress = `正在启动向量服务: ${command.command} ${command.args.join(' ')}`
+    vectorWorker = spawn(command.command, [...command.args, script], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+        HF_HUB_DISABLE_PROGRESS_BARS: '1',
+        TQDM_DISABLE: '1',
+        LUMI_MEMORY_VECTOR_DEVICE,
+      },
+      windowsHide: true,
+    })
+    const stdout = createInterface({ input: vectorWorker.stdout })
+    stdout.on('line', (line) => handleVectorWorkerLine(line))
+    vectorWorker.stderr.on('data', (chunk) => {
+      handleVectorWorkerStderr(String(chunk))
+    })
+    vectorWorker.on('error', (error) => {
+      vectorWorkerLastError = error.message
+      rejectAllVectorRequests(error)
+    })
+    vectorWorker.on('exit', (code, signal) => {
+      vectorWorkerLastError = `向量服务已退出 code=${code ?? 'null'} signal=${signal ?? 'null'}`
+      vectorWorker = null
+      rejectAllVectorRequests(new Error(vectorWorkerLastError))
+    })
+    await requestVectorWorker('health', { model: LUMI_MEMORY_EMBEDDING_MODEL }).catch(() => undefined)
+    vectorWorkerProgress = '向量服务已启动'
+    return vectorWorker
+  }
+  finally {
+    vectorWorkerStarting = false
+  }
+}
+
+function handleVectorWorkerLine(line: string) {
+  let response: LumiVectorWorkerResponse
+  try {
+    response = JSON.parse(line)
+  }
+  catch {
+    return
+  }
+  if (!response.id)
+    return
+  const pending = vectorWorkerPending.get(response.id)
+  if (!pending)
+    return
+  clearTimeout(pending.timer)
+  vectorWorkerPending.delete(response.id)
+  if (response.ok) {
+    pending.resolve(response.result)
+  }
+  else {
+    const error = new Error(response.error || 'Lumi memory vector worker failed')
+    vectorWorkerLastError = error.message
+    pending.reject(error)
+  }
+}
+
+function rejectAllVectorRequests(error: Error) {
+  for (const [id, pending] of vectorWorkerPending.entries()) {
+    clearTimeout(pending.timer)
+    pending.reject(error)
+    vectorWorkerPending.delete(id)
+  }
+}
+
+function resolveVectorWorkerScript() {
+  const candidates = uniquePaths([
+    ...candidateServicePaths(process.cwd()),
+    ...candidateServicePaths(app.getAppPath()),
+    ...candidateServicePaths(dirname(app.getAppPath())),
+    ...candidateServicePaths(MAIN_MODULE_DIR),
+    join(process.resourcesPath ?? '', 'services', 'lumi-memory-vector', 'server.py'),
+  ])
+  const found = candidates.find(candidate => existsSync(candidate))
+  if (!found)
+    throw new Error(`Lumi memory vector worker not found: ${candidates.join('; ')}`)
+  return found
+}
+
+function candidateServicePaths(start: string) {
+  const candidates: string[] = []
+  let current = resolve(start)
+  for (let depth = 0; depth < 8; depth += 1) {
+    candidates.push(join(current, 'services', 'lumi-memory-vector', 'server.py'))
+    candidates.push(join(current, 'airi', 'services', 'lumi-memory-vector', 'server.py'))
+    const parent = dirname(current)
+    if (parent === current)
+      break
+    current = parent
+  }
+  return candidates
+}
+
+function uniquePaths(paths: string[]) {
+  return [...new Set(paths.filter(Boolean).map(path => resolve(path)))]
+}
+
+function resolveVectorPythonCommand() {
+  const configured = process.env.LUMI_MEMORY_VECTOR_PYTHON
+  if (configured && existsSync(configured))
+    return { command: configured, args: [] as string[] }
+
+  const candidates = [
+    'D:\\anaconda3\\envs\\airi\\python.exe',
+    'C:\\ProgramData\\anaconda3\\envs\\airi\\python.exe',
+    'C:\\Users\\abcdi000\\anaconda3\\envs\\airi\\python.exe',
+  ]
+  const found = candidates.find(candidate => existsSync(candidate))
+  if (found)
+    return { command: found, args: [] as string[] }
+
+  return { command: 'conda', args: ['run', '-n', 'airi', 'python'] }
+}
+
+function handleVectorWorkerStderr(chunk: string) {
+  const lines = chunk.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  for (const line of lines) {
+    const prefix = '[lumi-memory-vector-progress] '
+    if (line.startsWith(prefix)) {
+      try {
+        const payload = JSON.parse(line.slice(prefix.length)) as Record<string, any>
+        vectorWorkerPhase = typeof payload.phase === 'string' ? payload.phase : vectorWorkerPhase
+        vectorWorkerProgress = typeof payload.message === 'string' ? payload.message : vectorWorkerProgress
+        vectorWorkerDownloadPercent = numberOrUndefined(payload.percent)
+        vectorWorkerDownloadedBytes = numberOrUndefined(payload.downloadedBytes)
+        vectorWorkerDownloadTotalBytes = numberOrUndefined(payload.totalBytes)
+        vectorWorkerDownloadSpeedBytesPerSecond = numberOrUndefined(payload.speedBytesPerSecond)
+        if (typeof payload.device === 'string')
+          vectorWorkerDevice = payload.device
+        continue
+      }
+      catch (error) {
+        vectorWorkerLastError = error instanceof Error ? error.message : String(error)
+      }
+    }
+    vectorWorkerProgress = line
+    console.warn(line)
+  }
+}
+
+function numberOrUndefined(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+async function saveEvent(event: Record<string, any>) {
+  const { db } = await getDatabase()
+  saveEventWithDb(db, event)
+  pruneEvents(db)
+}
+
+function saveEventWithDb(db: SqliteDatabase, event: Record<string, any>) {
+  db.prepare(`
+    INSERT OR REPLACE INTO lumi_memory_events (
+      id,
+      kind,
+      memory_id,
+      related_memory_ids_json,
+      query,
+      route,
+      result_count,
+      before_status,
+      after_status,
+      preview,
+      created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    stringField(event.id),
+    stringField(event.kind, 'search'),
+    nullableString(event.memoryId),
+    JSON.stringify(Array.isArray(event.relatedMemoryIds) ? event.relatedMemoryIds : []),
+    nullableString(event.query),
+    nullableString(event.route),
+    event.resultCount == null ? null : numberField(event.resultCount),
+    nullableString(event.beforeStatus),
+    nullableString(event.afterStatus),
+    nullableString(event.preview),
+    stringField(event.createdAt, new Date().toISOString()),
+  )
+}
+
+async function setMeta(key: string, value: string) {
+  const { db } = await getDatabase()
+  setMetaWithDb(db, key, value)
+}
+
+function setMetaWithDb(db: SqliteDatabase, key: string, value: string) {
+  db.prepare(`
+    INSERT INTO lumi_meta(key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, value)
+}
+
+function getMeta(db: SqliteDatabase, key: string) {
+  const row = db.prepare('SELECT value FROM lumi_meta WHERE key = ?').get(key)
+  return typeof row?.value === 'string' ? row.value : undefined
+}
+
+async function clearDatabase() {
+  const { db } = await getDatabase()
+  db.exec('DELETE FROM lumi_memory_events; DELETE FROM lumi_memory_vectors; DELETE FROM lumi_memories; DELETE FROM lumi_meta;')
+}
+
+function pruneEvents(db: SqliteDatabase) {
+  db.exec(`
+    DELETE FROM lumi_memory_events
+    WHERE id NOT IN (
+      SELECT id FROM lumi_memory_events
+      ORDER BY created_at DESC
+      LIMIT 200
+    );
+  `)
+}
+
+function rowLikeMemory(value: Record<string, any>) {
+  return {
+    id: stringField(value.id),
+    userId: stringField(value.userId ?? value.user_id, 'local'),
+    personaId: stringField(value.personaId ?? value.persona_id, 'lumi'),
+    conversationId: value.conversationId ?? value.conversation_id ?? undefined,
+    type: stringField(value.type, 'user_fact'),
+    content: stringField(value.content),
+    sourceMessageId: value.sourceMessageId ?? value.source_message_id ?? undefined,
+    confidence: numberField(value.confidence),
+    importance: numberField(value.importance),
+    emotionalIntensity: numberField(value.emotionalIntensity ?? value.emotional_intensity),
+    relationshipRelevance: numberField(value.relationshipRelevance ?? value.relationship_relevance),
+    createdAt: stringField(value.createdAt ?? value.created_at),
+    updatedAt: stringField(value.updatedAt ?? value.updated_at),
+    lastUsedAt: value.lastUsedAt ?? value.last_used_at ?? undefined,
+    decay: numberField(value.decay),
+    tags: Array.isArray(value.tags) ? value.tags.filter(item => typeof item === 'string') : parseJsonArray(value.tags_json),
+    status: stringField(value.status, 'candidate'),
+  }
+}
+
+function rowToMemory(row: Record<string, any>) {
+  return toPlainIpcObject(rowLikeMemory(row))
+}
+
+function rowToEvent(row: Record<string, any>) {
+  return toPlainIpcObject({
+    id: stringField(row.id),
+    kind: stringField(row.kind),
+    memoryId: row.memory_id ?? undefined,
+    relatedMemoryIds: parseJsonArray(row.related_memory_ids_json),
+    query: row.query ?? undefined,
+    route: row.route ?? undefined,
+    resultCount: row.result_count == null ? undefined : numberField(row.result_count),
+    beforeStatus: row.before_status ?? undefined,
+    afterStatus: row.after_status ?? undefined,
+    preview: row.preview ?? undefined,
+    createdAt: stringField(row.created_at),
+  })
+}
+
+function rowToVectorRecord(row: Record<string, any>): ElectronLumiMemoryVectorRecord {
+  return toPlainIpcObject({
+    memoryId: stringField(row.memory_id),
+    model: stringField(row.model),
+    signature: stringField(row.signature),
+    vector: parseJsonNumberArray(row.vector_json),
+    device: row.device ?? undefined,
+    updatedAt: stringField(row.updated_at),
+  })
+}
+
+function toPlainIpcObject<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function stringField(value: unknown, fallback = '') {
+  return typeof value === 'string' ? value : fallback
+}
+
+function nullableString(value: unknown) {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function numberField(value: unknown, fallback = 0) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function parseJsonArray(value: unknown) {
+  if (typeof value !== 'string')
+    return []
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : []
+  }
+  catch {
+    return []
+  }
+}
+
+function parseJsonNumberArray(value: unknown) {
+  if (typeof value !== 'string')
+    return []
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed)
+      ? parsed.filter(item => typeof item === 'number' && Number.isFinite(item))
+      : []
+  }
+  catch {
+    return []
+  }
+}
+
+function memoryVectorSignature(memory: Record<string, any>) {
+  const normalized = rowLikeMemory(memory)
+  return [
+    normalized.updatedAt,
+    normalized.type,
+    normalized.status,
+    normalized.tags.join('\u001F'),
+    normalized.content,
+  ].join('\u001E')
+}
+
+function memoryVectorText(memory: Record<string, any>) {
+  const normalized = rowLikeMemory(memory)
+  return normalizeEmbeddingText([
+    `type: ${normalized.type}`,
+    normalized.tags.length ? `tags: ${normalized.tags.join(', ')}` : '',
+    `content: ${normalized.content}`,
+  ].filter(Boolean).join('\n'))
+}
+
+function normalizeEmbeddingText(text: string) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function normalizeVector(vector: number[]) {
+  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1
+  return vector.map(value => value / norm)
+}
+
+function isFiniteVector(vector: unknown): vector is number[] {
+  return Array.isArray(vector) && vector.length > 0 && vector.every(value => typeof value === 'number' && Number.isFinite(value))
+}
+
+function cosineSimilarity(leftInput: number[], rightInput: number[]) {
+  const left = normalizeVector(leftInput)
+  const right = normalizeVector(rightInput)
+  let dot = 0
+  const length = Math.min(left.length, right.length)
+  for (let index = 0; index < length; index += 1)
+    dot += left[index] * right[index]
+  return Math.max(0, Math.min(1, dot))
+}
+
+function previewText(text: string, maxLength: number) {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength - 3)}...`
+    : normalized
+}

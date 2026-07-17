@@ -16,7 +16,7 @@ function resolveChatSyncWindowRole(routePath: string): ChatSyncWindowRole | null
   const path = normalizeRoutePath(routePath)
   if (path === '/')
     return 'authority'
-  if (path === '/chat')
+  if (path === '/chat' || path === '/chat-mini')
     return 'follower'
   return null
 }

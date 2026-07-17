@@ -14,26 +14,50 @@ function stringifyError(error: unknown) {
 }
 
 /**
- * Shared runtime-safe schema for one MCP stdio server definition.
+ * Shared runtime-safe schema for one MCP server definition.
  *
  * Use when:
  * - Validating `mcp.json` in the main process
  * - Validating JSON drafts before the renderer loads them into the form
  *
  * Expects:
- * - `command` is a non-empty string
+ * - `command` is a non-empty string for stdio servers, or `url` is a valid URL
+ *   for Streamable HTTP servers
  * - Optional fields must already conform to the persisted wire format
  *
  * Returns:
  * - A strict Zod schema matching the persisted MCP server shape
  */
 export const electronMcpStdioServerConfigSchema = z.object({
-  command: z.string().min(1),
+  command: z.string().min(1).optional(),
+  url: z.string().url().optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
   cwd: z.string().optional(),
   enabled: z.boolean().optional(),
-}).strict() satisfies z.ZodType<ElectronMcpStdioServerConfig>
+  startupMode: z.enum(['on_startup', 'on_first_use', 'manual']).optional(),
+  longRunning: z.boolean().optional(),
+  persistent: z.boolean().optional(),
+  requestTimeoutMs: z.number().int().min(1000).max(600_000).optional(),
+  maxTotalTimeoutMs: z.number().int().min(1000).max(900_000).optional(),
+}).strict().superRefine((config, ctx) => {
+  if (!config.command && !config.url) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'MCP server must define either command or url',
+      path: ['command'],
+    })
+  }
+
+  if (config.requestTimeoutMs && config.maxTotalTimeoutMs && config.maxTotalTimeoutMs < config.requestTimeoutMs) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'maxTotalTimeoutMs must be greater than or equal to requestTimeoutMs',
+      path: ['maxTotalTimeoutMs'],
+    })
+  }
+}) satisfies z.ZodType<ElectronMcpStdioServerConfig>
 
 /**
  * Shared runtime-safe schema for the persisted MCP config file.

@@ -23,9 +23,12 @@ import {
 } from '../../../../shared/eventa/plugin/capabilities'
 import {
   electronPluginInspect,
+  electronPluginAddFromDirectory,
   electronPluginList,
   electronPluginLoad,
   electronPluginLoadEnabled,
+  electronPluginOpenRoot,
+  electronPluginRemove,
   electronPluginSetAutoReload,
   electronPluginSetEnabled,
   electronPluginUnload,
@@ -42,13 +45,13 @@ import { setupPluginHostHostService } from './host'
  * Call once during app startup; it loads manifests, returns the host instance,
  * and registers Eventa handlers for listing, enabling, and loading plugins.
  *
- * Loads plugin manifests from the app config directory under `plugins/v1`.
+ * Loads plugin manifests from the install/project plugin root.
  *
- * - Windows: %APPDATA%\${appId}\plugins\v1
- * - Linux: $XDG_CONFIG_HOME/${appId}/plugins/v1 or ~/.config/${appId}/plugins/v1
- * - macOS: ~/Library/Application Support/${appId}/plugins/v1
+ * - Development: <repo>/external-plugins
+ * - Packaged: <AIRI executable directory>/plugins/v1
+ * - Override: AIRI_PLUGIN_ROOT
  *
- * Persists enablement/known state to `plugins-v1.json` alongside config data.
+ * Persists enablement/known state to the small `plugins-v1.json` config file.
  *
  * - Windows: %APPDATA%\${appId}/plugins-v1.json
  * - Linux: $XDG_CONFIG_HOME/${appId}/plugins-v1.json or ~/.config/${appId}/plugins-v1.json
@@ -69,6 +72,18 @@ export async function setupPluginHost(options: SetupPluginHostOptions): Promise<
 
   defineInvokeHandler(context, electronPluginSetAutoReload, async (payload) => {
     return await hostService.setAutoReload(payload)
+  })
+
+  defineInvokeHandler(context, electronPluginOpenRoot, async () => {
+    return await hostService.openRoot()
+  })
+
+  defineInvokeHandler(context, electronPluginAddFromDirectory, async () => {
+    return await hostService.addFromDirectory()
+  })
+
+  defineInvokeHandler(context, electronPluginRemove, async (payload) => {
+    return await hostService.remove(payload)
   })
 
   defineInvokeHandler(context, electronPluginLoadEnabled, async () => {

@@ -3,8 +3,11 @@
 import type { Ref } from 'vue'
 
 import { createPinia, setActivePinia } from 'pinia'
+import { useLlmToolsStore } from '@proj-airi/stage-ui/stores/llm-tools'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, ref } from 'vue'
+
+const analyzeAttachmentsForChatMock = vi.hoisted(() => vi.fn())
 
 interface MockBroadcastMessageEvent<T> {
   data: T
@@ -114,6 +117,28 @@ vi.mock('@proj-airi/stage-ui/stores/chat/maintenance', () => ({
 vi.mock('@proj-airi/stage-ui/stores/providers', () => ({
   useProvidersStore: () => ({
     getProviderInstance: vi.fn(async () => ({ id: 'provider' })),
+    getProviderConfig: vi.fn(() => ({})),
+  }),
+}))
+
+vi.mock('@proj-airi/stage-ui/stores/lumi-eyes', () => ({
+  useLumiEyesStore: () => ({
+    analyzeAttachmentsForChat: analyzeAttachmentsForChatMock,
+  }),
+}))
+
+vi.mock('@proj-airi/stage-ui/stores/lumi-emotion', () => ({
+  useLumiEmotionStore: () => ({
+    initialize: vi.fn(),
+    currentState: undefined,
+    setPendingRelationshipAssessment: vi.fn(),
+  }),
+}))
+
+vi.mock('@proj-airi/stage-ui/stores/modules/airi-card', () => ({
+  useAiriCardStore: () => ({
+    initialize: vi.fn(),
+    activeCardId: 'lumi',
   }),
 }))
 
@@ -145,6 +170,12 @@ describe('useChatSyncStore authority ingest failures', async () => {
     setActivePinia(createPinia())
     MockBroadcastChannel.reset()
     vi.restoreAllMocks()
+    analyzeAttachmentsForChatMock.mockReset()
+    analyzeAttachmentsForChatMock.mockResolvedValue({
+      results: [],
+      errors: [],
+      contextText: '',
+    })
 
     const activeSessionId = ref('session-1')
     const sessionMessages = ref<Record<string, Array<{ role: string, content: string }>>>({
@@ -233,6 +264,258 @@ describe('useChatSyncStore authority ingest failures', async () => {
     }))
 
     peer.close()
+    store.dispose()
+  })
+
+  it('routes image attachments through Lumi Eyes before text-only chat ingest', async () => {
+    mockState.ingest.mockReset()
+    mockState.ingest.mockResolvedValue(undefined)
+    analyzeAttachmentsForChatMock.mockResolvedValue({
+      results: [{ description: 'a UI screenshot' }],
+      errors: [],
+      contextText: '[Current-turn image context]\nImage 1: description=a UI screenshot',
+    })
+
+    const store = useChatSyncStore()
+    store.initialize('authority')
+
+    await store.requestIngest({
+      text: 'look at this',
+      attachments: [
+        {
+          type: 'image',
+          data: 'aW1hZ2U=',
+          mimeType: 'image/png',
+        },
+      ],
+      sessionId: 'session-1',
+    })
+
+    expect(analyzeAttachmentsForChatMock).toHaveBeenCalledWith({
+      attachments: [
+        {
+          type: 'image',
+          data: 'aW1hZ2U=',
+          mimeType: 'image/png',
+        },
+      ],
+      userMessage: 'look at this',
+      sessionId: 'session-1',
+    })
+    expect(mockState.ingest).toHaveBeenCalledWith('look at this', expect.objectContaining({
+      attachments: [
+        {
+          type: 'image',
+          data: 'aW1hZ2U=',
+          mimeType: 'image/png',
+        },
+      ],
+      providerUserContext: expect.stringContaining('[Current-turn image context]\nImage 1: description=a UI screenshot'),
+      sendAttachmentsToProvider: false,
+    }), 'session-1')
+
+    const sendOptions = mockState.ingest.mock.calls[0]?.[1]
+    expect(sendOptions?.providerUserContext).toContain('[Lumi response autonomy]')
+    expect(sendOptions?.suppressAssistantTexts).toContain('lumi\u62d2\u7edd\u56de\u590d')
+
+    store.dispose()
+  })
+
+  it('turns Lumi intentional silence into a system notice without another model request', async () => {
+    mockState.ingest.mockReset()
+    mockState.ingest.mockImplementation(async (_text, options) => {
+      options.onAssistantSuppressed?.('lumi\u62d2\u7edd\u56de\u590d')
+    })
+
+    const store = useChatSyncStore()
+    store.initialize('authority')
+
+    await store.requestIngest({
+      text: '\u91cd\u590d\u8bd5\u63a2',
+      sessionId: 'session-1',
+    })
+
+    expect(mockState.ingest).toHaveBeenCalledOnce()
+    const sendOptions = mockState.ingest.mock.calls[0]?.[1]
+    expect(sendOptions?.providerUserContext).toContain('[Lumi response autonomy]')
+    expect(sendOptions?.suppressAssistantTexts).toContain('lumi\u62d2\u7edd\u56de\u590d')
+    expect(mockState.sessionMessages.value['session-1']).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'assistant',
+        content: expect.stringContaining('[system_notice]\ntitle: Lumi \u62d2\u7edd\u56de\u590d'),
+      }),
+    ]))
+
+    store.dispose()
+  })
+
+  it('splits Lumi multi-bubble replies and posts captions in message order', async () => {
+    mockState.ingest.mockReset()
+    mockState.ingest.mockImplementation(async (_text, options, sessionId = 'session-1') => {
+      const rawReply = [
+        'Doggy说我怎么还是只有一个气泡——这是模型吐出来的自我分析。',
+        '我想回应：',
+        'AIRI',
+        '第一句短回复。',
+        '第二句补充。',
+      ].join('\n')
+      const split = options.assistantMessageTransform?.({
+        role: 'assistant',
+        id: 'assistant-1',
+        createdAt: 100,
+        content: rawReply,
+        slices: [{ type: 'text', text: rawReply }],
+        tool_results: [],
+      }, rawReply)
+
+      mockState.sessionMessages.value[sessionId] = [
+        ...(mockState.sessionMessages.value[sessionId] ?? []),
+        ...(split ?? []),
+      ] as any
+    })
+
+    const captions: unknown[] = []
+    const captionPeer = new MockBroadcastChannel('airi-caption-overlay')
+    captionPeer.addEventListener('message', ((event: MockBroadcastMessageEvent<unknown>) => {
+      captions.push(event.data)
+    }) as unknown as EventListener)
+
+    const store = useChatSyncStore()
+    store.initialize('authority')
+
+    await store.requestIngest({
+      text: '继续',
+      sessionId: 'session-1',
+    })
+
+    const sendOptions = mockState.ingest.mock.calls[0]?.[1]
+    expect(sendOptions?.assistantSpeechTransform('第一句。<<<LUMI_NEXT_REPLY>>>\n第二句。')).toBe('第一句。\n\n第二句。')
+    expect(sendOptions?.assistantMessageTransform).toEqual(expect.any(Function))
+    expect(sendOptions?.toolResultTextTransform?.({
+      toolName: 'mcp_computer_use_desktop_focus_app',
+      result: { status: 'executed' },
+      isError: false,
+    })).toBe('已完成：聚焦目标应用。')
+    expect(mockState.sessionMessages.value['session-1']).toEqual([
+      expect.objectContaining({ role: 'system' }),
+      expect.objectContaining({ role: 'assistant', content: '第一句短回复。' }),
+      expect.objectContaining({ role: 'assistant', content: '第二句补充。' }),
+    ])
+    expect(captions).toEqual([
+      { type: 'caption-assistant', text: '第一句短回复。' },
+      { type: 'caption-assistant', text: '第二句补充。' },
+    ])
+
+    captionPeer.close()
+    store.dispose()
+  })
+
+  it('passes runtime MCP tools into normal chat ingest', async () => {
+    mockState.ingest.mockReset()
+    mockState.ingest.mockResolvedValue(undefined)
+    const llmToolsStore = useLlmToolsStore()
+    const runtimeTool = {
+      function: {
+        name: 'mcp_playwright_browser_snapshot',
+        description: 'Snapshot browser state.',
+        parameters: {
+          type: 'object',
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+      execute: vi.fn(),
+    }
+    await llmToolsStore.registerTools('mcp', [runtimeTool as any])
+
+    const store = useChatSyncStore()
+    store.initialize('authority')
+
+    await store.requestIngest({
+      text: 'hello',
+      sessionId: 'session-1',
+    })
+
+    const ingestOptions = mockState.ingest.mock.calls[0]?.[1]
+    expect(ingestOptions?.tools).toEqual(expect.any(Function))
+    await expect(ingestOptions.tools()).resolves.toEqual([
+      expect.objectContaining({
+        function: expect.objectContaining({ name: 'mcp_playwright_browser_snapshot' }),
+      }),
+    ])
+
+    store.dispose()
+  })
+
+  it('keeps a completed Computer Use task out of the next Lumi prompt history', async () => {
+    mockState.ingest.mockReset()
+    mockState.ingest.mockResolvedValue(undefined)
+
+    const store = useChatSyncStore()
+    store.initialize('authority')
+
+    await store.requestIngest({
+      text: 'start a new task',
+      sessionId: 'session-1',
+    })
+
+    const ingestOptions = mockState.ingest.mock.calls[0]?.[1]
+    expect(ingestOptions?.providerHistoryTransform).toEqual(expect.any(Function))
+
+    const history = [
+      { role: 'system', content: 'system prompt' },
+      { role: 'user', content: 'send the previous message' },
+      {
+        role: 'assistant',
+        content: 'the old desktop task failed',
+        slices: [{
+          type: 'tool-call',
+          toolCall: {
+            toolCallId: 'computer-use-1',
+            toolCallType: 'function',
+            toolName: 'mcp_computer_use_desktop_screenshot',
+            args: {},
+          },
+        }],
+        tool_results: [],
+      },
+      { role: 'user', content: 'start a new task' },
+    ] as any
+
+    expect(ingestOptions?.providerHistoryTransform(history)).toEqual([
+      { role: 'system', content: 'system prompt' },
+      { role: 'user', content: 'start a new task' },
+    ])
+
+    store.dispose()
+  })
+
+  it('does not call text chat when image understanding fails for all attachments', async () => {
+    mockState.ingest.mockReset()
+    mockState.ingest.mockResolvedValue(undefined)
+    analyzeAttachmentsForChatMock.mockResolvedValue({
+      results: [],
+      errors: ['Vision provider/model not configured'],
+      contextText: '[Current-turn image context]\nImage 1 failed',
+    })
+
+    const store = useChatSyncStore()
+    store.initialize('authority')
+
+    await expect(store.requestIngest({
+      text: 'look at this',
+      attachments: [
+        {
+          type: 'image',
+          data: 'aW1hZ2U=',
+          mimeType: 'image/png',
+        },
+      ],
+      sessionId: 'session-1',
+    })).rejects.toThrow('Lumi Eyes failed to understand the attached image')
+
+    expect(mockState.ingest).not.toHaveBeenCalled()
+
     store.dispose()
   })
 

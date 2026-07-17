@@ -16,6 +16,7 @@ export function useElectronScreenCapture(ipcRenderer: IpcRenderer, sourcesOption
   const invokeGetSources = defineInvoke(context, screenCapture.getSources)
   const setSource = defineInvoke(context, screenCapture.setSource)
   const resetSource = defineInvoke(context, screenCapture.resetSource)
+  const captureSource = defineInvoke(context, screenCapture.captureSource)
 
   const checkMacOSPermission = defineInvoke(context, screenCapture.checkMacOSPermission)
   const requestMacOSPermission = defineInvoke(context, screenCapture.requestMacOSPermission)
@@ -52,6 +53,7 @@ export function useElectronScreenCapture(ipcRenderer: IpcRenderer, sourcesOption
     getSources,
     setSource,
     resetSource,
+    captureSource,
     selectWithSource,
     checkMacOSPermission,
     requestMacOSPermission,

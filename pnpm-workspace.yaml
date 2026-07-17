@@ -124,8 +124,10 @@ catalog:
   ofetch: ^1.5.1
   oxc-minify: ^0.126.0
   pinia: ^3.0.4
+  playwright-extra: ^4.3.6
   posthog-js: 1.306.1
   posthog-node: ^5.34.1
+  puppeteer-extra-plugin-stealth: ^2.11.2
   reka-ui: ^2.9.2
   replicate: ^1.4.0
   splitpanes: ^4.0.4

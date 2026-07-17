@@ -115,22 +115,12 @@ export function registerDesktopGroundingTools(params: {
           })
         }
 
-        const text = formatGroundingForAgent(snapshot)
-
-        // Include screenshot as image content if available
-        const content: Array<{ type: 'text', text: string } | { type: 'image', data: string, mimeType: 'image/png' }> = [
-          { type: 'text', text },
-        ]
-
-        if (snapshot.screenshot.dataBase64 && !snapshot.screenshot.placeholder) {
-          content.push({
-            type: 'image',
-            data: snapshot.screenshot.dataBase64,
-            mimeType: 'image/png',
-          })
-        }
-
-        return { content }
+        // The screenshot remains in the server session for audit and state
+        // continuity. Returning the raw base64 to every model turn can exceed
+        // a provider context window, so the model receives only the compact,
+        // actionable semantic grounding summary.
+        const text = formatGroundingForAgent(snapshot, { maxCandidates: 16 })
+        return { content: [{ type: 'text', text }] }
       }
       catch (error) {
         const message = error instanceof Error ? error.message : String(error)

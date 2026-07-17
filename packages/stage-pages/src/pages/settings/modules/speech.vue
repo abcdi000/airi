@@ -22,7 +22,7 @@ import {
 } from '@proj-airi/ui'
 import { generateSpeech } from '@xsai/generate-speech'
 import { storeToRefs } from 'pinia'
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 
@@ -36,6 +36,7 @@ const {
   activeSpeechVoice,
   activeSpeechVoiceId,
   pitch,
+  playbackVolume,
   isLoadingSpeechProviderVoices,
   supportsModelListing,
   providerModels,
@@ -57,6 +58,29 @@ const isGenerating = ref(false)
 const audioUrl = ref('')
 const audioPlayer = ref<HTMLAudioElement | null>(null)
 const errorMessage = ref('')
+const activeSpeechUsesProviderConfiguredVoice = computed(() => {
+  if (activeSpeechProvider.value === 'mimo-audio-speech')
+    return activeSpeechModel.value === 'mimo-v2.5-tts-voiceclone' || activeSpeechModel.value === 'mimo-v2.5-tts-voicedesign'
+
+  if (activeSpeechProvider.value === 'alibaba-cloud-model-studio') {
+    const providerConfig = providersStore.getProviderConfig(activeSpeechProvider.value)
+    const model = activeSpeechModel.value || providerConfig?.model as string | undefined
+    return (model === 'cosyvoice-v3.5-flash' || model === 'cosyvoice-v3.5-plus')
+      && typeof providerConfig?.customVoiceId === 'string'
+      && providerConfig.customVoiceId.trim().length > 0
+  }
+
+  return false
+})
+
+function applyTestAudioVolume() {
+  if (!audioPlayer.value)
+    return
+
+  audioPlayer.value.volume = Math.min(1, Math.max(0, Number(playbackVolume.value) || 0))
+}
+
+watch(playbackVolume, applyTestAudioVolume)
 
 // Sync OpenAI Compatible model and voice from provider config
 function syncOpenAICompatibleSettings() {
@@ -107,7 +131,7 @@ watch(activeSpeechProvider, async (newProvider, oldProvider) => {
 
 watch(activeSpeechModel, async () => {
   if (activeSpeechProvider.value) {
-    await speechStore.loadVoicesForProvider(activeSpeechProvider.value)
+    await speechStore.loadVoicesForProvider(activeSpeechProvider.value, activeSpeechModel.value)
   }
 })
 
@@ -153,7 +177,7 @@ async function generateTestSpeech() {
     return
   }
 
-  if (!voice) {
+  if (!voice && !activeSpeechUsesProviderConfiguredVoice.value) {
     console.error('No voice selected')
     return
   }
@@ -169,14 +193,18 @@ async function generateTestSpeech() {
 
     const input = useSSML.value
       ? ssmlText.value
-      : ssmlEnabled.value && speechStore.supportsSSML
+      : ssmlEnabled.value && speechStore.supportsSSML && voice
         ? speechStore.generateSSML(testText.value, voice, { ...providerConfig, pitch: pitch.value })
         : testText.value
+
+    const configuredVoiceId = activeSpeechProvider.value === 'alibaba-cloud-model-studio'
+      ? providersStore.getProviderConfig(activeSpeechProvider.value)?.customVoiceId as string | undefined
+      : ''
 
     const response = await generateSpeech({
       ...provider.speech(model, providerConfig),
       input,
-      voice: voice.id,
+      voice: activeSpeechUsesProviderConfiguredVoice.value ? configuredVoiceId || '' : voice!.id,
     })
 
     // Convert the response to a blob and create an object URL
@@ -185,6 +213,7 @@ async function generateTestSpeech() {
     // Play the audio
     setTimeout(() => {
       if (audioPlayer.value) {
+        applyTestAudioVolume()
         audioPlayer.value.play()
       }
     }, 100)
@@ -285,14 +314,28 @@ function handleDeleteProvider(providerId: string) {
               @click="trackProviderClick(metadata.id, 'speech')"
             >
               <template #topRight>
-                <button
+                <div
                   v-if="metadata.id !== 'speech-noop' && !metadata.id.startsWith('official-provider')"
-                  type="button"
-                  class="rounded bg-neutral-100 p-1 text-neutral-600 transition-colors dark:bg-neutral-800/60 hover:bg-neutral-200 dark:text-neutral-300 dark:hover:bg-neutral-700/60"
-                  @click.stop.prevent="handleDeleteProvider(metadata.id)"
+                  class="flex items-center gap-1"
                 >
-                  <div i-solar:trash-bin-trash-bold-duotone class="text-base" />
-                </button>
+                  <RouterLink
+                    :to="`/settings/providers/speech/${metadata.id}`"
+                    title="编辑配置"
+                    type="button"
+                    class="rounded bg-neutral-100 p-1 text-neutral-600 transition-colors dark:bg-neutral-800/60 hover:bg-neutral-200 dark:text-neutral-300 dark:hover:bg-neutral-700/60"
+                    @click.stop
+                  >
+                    <div i-solar:settings-bold-duotone class="text-base" />
+                  </RouterLink>
+                  <button
+                    title="删除配置"
+                    type="button"
+                    class="rounded bg-neutral-100 p-1 text-neutral-600 transition-colors dark:bg-neutral-800/60 hover:bg-neutral-200 dark:text-neutral-300 dark:hover:bg-neutral-700/60"
+                    @click.stop.prevent="handleDeleteProvider(metadata.id)"
+                  >
+                    <div i-solar:trash-bin-trash-bold-duotone class="text-base" />
+                  </button>
+                </div>
               </template>
             </RadioCardSimple>
             <RouterLink
@@ -420,8 +463,28 @@ function handleDeleteProvider(providerId: string) {
         </div>
       </div>
 
+      <div v-if="activeSpeechProvider && activeSpeechProvider !== 'speech-noop'" flex="~ col gap-4">
+        <div>
+          <h2 class="text-lg text-neutral-500 md:text-2xl dark:text-neutral-400">
+            播放输出
+          </h2>
+          <div text="neutral-400 dark:neutral-500">
+            <span>调节 Lumi 生成语音在本机播放时的音量，不会修改语音服务端的声线参数。</span>
+          </div>
+        </div>
+        <FieldRange
+          v-model="playbackVolume"
+          label="播放音量"
+          description="控制最终播放到扬声器的音量。100% 为默认音量。"
+          :min="0"
+          :max="1.5"
+          :step="0.01"
+          :format-value="value => `${Math.round(Number(value) * 100)}%`"
+        />
+      </div>
+
       <!-- Voice Configuration Section -->
-      <div v-if="activeSpeechProvider && activeSpeechProvider !== 'speech-noop'">
+      <div v-if="activeSpeechProvider && activeSpeechProvider !== 'speech-noop' && !activeSpeechUsesProviderConfiguredVoice">
         <div flex="~ col gap-4">
           <div>
             <h2 class="text-lg text-neutral-500 md:text-2xl dark:text-neutral-400">
@@ -613,8 +676,8 @@ function handleDeleteProvider(providerId: string) {
             <button
               border="neutral-800 dark:neutral-200 solid 2" transition="border duration-250 ease-in-out"
               rounded-lg px-4 text="neutral-100 dark:neutral-900" py-2 text-sm
-              :disabled="isGenerating || (!testText.trim() && !useSSML) || (useSSML && !ssmlText.trim()) || !activeSpeechVoice"
-              :class="{ 'opacity-50 cursor-not-allowed': isGenerating || (!testText.trim() && !useSSML) || (useSSML && !ssmlText.trim()) || !activeSpeechVoice }"
+              :disabled="isGenerating || (!testText.trim() && !useSSML) || (useSSML && !ssmlText.trim()) || (!activeSpeechUsesProviderConfiguredVoice && !activeSpeechVoice)"
+              :class="{ 'opacity-50 cursor-not-allowed': isGenerating || (!testText.trim() && !useSSML) || (useSSML && !ssmlText.trim()) || (!activeSpeechUsesProviderConfiguredVoice && !activeSpeechVoice) }"
               bg="neutral-700 dark:neutral-300" @click="generateTestSpeech"
             >
               <div flex="~ row" items-center gap-2>

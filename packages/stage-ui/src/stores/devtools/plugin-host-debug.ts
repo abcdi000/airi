@@ -71,6 +71,9 @@ interface PluginHostDebugBridge {
   list: () => Promise<PluginRegistrySnapshot>
   setEnabled: (payload: { name: string, enabled: boolean, path?: string }) => Promise<PluginRegistrySnapshot>
   setAutoReload: (payload: { name: string, enabled: boolean }) => Promise<PluginRegistrySnapshot>
+  openRoot: () => Promise<{ path: string }>
+  addFromDirectory: () => Promise<PluginRegistrySnapshot>
+  remove: (payload: { name: string }) => Promise<PluginRegistrySnapshot>
   loadEnabled: () => Promise<PluginRegistrySnapshot>
   load: (payload: { name: string }) => Promise<PluginRegistrySnapshot>
   unload: (payload: { name: string }) => Promise<PluginRegistrySnapshot>
@@ -184,6 +187,24 @@ export const usePluginHostInspectorStore = defineStore('devtools:plugin-host-deb
     return nextRegistry
   }
 
+  async function openRoot() {
+    return await withBridge(activeBridge => activeBridge.openRoot())
+  }
+
+  async function addFromDirectory() {
+    const nextRegistry = await withBridge(activeBridge => activeBridge.addFromDirectory())
+    assignRegistry(nextRegistry)
+    await refreshInspection()
+    return nextRegistry
+  }
+
+  async function remove(payload: { name: string }) {
+    const nextRegistry = await withBridge(activeBridge => activeBridge.remove(payload))
+    assignRegistry(nextRegistry)
+    await refreshInspection()
+    return nextRegistry
+  }
+
   async function loadEnabled() {
     const nextRegistry = await withBridge(activeBridge => activeBridge.loadEnabled())
     assignRegistry(nextRegistry)
@@ -225,6 +246,9 @@ export const usePluginHostInspectorStore = defineStore('devtools:plugin-host-deb
     refreshAll,
     setEnabled,
     setAutoReload,
+    openRoot,
+    addFromDirectory,
+    remove,
     loadEnabled,
     load,
     unload,

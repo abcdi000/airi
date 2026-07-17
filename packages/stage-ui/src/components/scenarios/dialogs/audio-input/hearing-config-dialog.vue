@@ -46,7 +46,7 @@ onMounted(() => screenSafeArea.update())
       />
       <DialogContent class="fixed left-1/2 top-1/2 z-[9999] max-h-full max-w-5xl w-[92dvw] transform overflow-y-scroll rounded-2xl bg-white p-6 shadow-xl outline-none backdrop-blur-md scrollbar-none -translate-x-1/2 -translate-y-1/2 data-[state=closed]:animate-contentHide data-[state=open]:animate-contentShow dark:bg-neutral-900">
         <VisuallyHidden>
-          <DialogTitle>Hearing Input</DialogTitle>
+          <DialogTitle>听觉输入</DialogTitle>
         </VisuallyHidden>
         <HearingConfig
           :granted="props.granted" :transcription="props.transcription"

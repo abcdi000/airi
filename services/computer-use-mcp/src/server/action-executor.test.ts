@@ -1004,4 +1004,26 @@ describe('createExecuteAction', () => {
       backingPixel: { x: 122, y: 580 },
     })
   })
+
+  it('passes a target app through to the native text action without a loose preparatory click', async () => {
+    const { runtime, executor } = createRuntimeForActionTest()
+    executor.typeText.mockResolvedValue({
+      performed: true,
+      backend: 'dry-run' as const,
+      notes: [],
+    })
+
+    const executeAction = createExecuteAction(runtime)
+    const input = {
+      text: '你好',
+      targetApp: 'QQ',
+      pressEnter: true,
+      captureAfter: false,
+    }
+    const result = await executeAction({ kind: 'type_text', input }, 'desktop_type_text')
+
+    expect(result.isError).not.toBe(true)
+    expect(executor.click).not.toHaveBeenCalled()
+    expect(executor.typeText).toHaveBeenCalledWith(input)
+  })
 })

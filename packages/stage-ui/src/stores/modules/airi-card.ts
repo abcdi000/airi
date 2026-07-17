@@ -9,6 +9,7 @@ import { useI18n } from 'vue-i18n'
 
 import SystemPromptV2 from '../../constants/prompts/system-v2'
 
+import { createLumiAiriCard, LUMI_AIRI_CARD_ID } from '../../constants/lumi-card'
 import { DEFAULT_ARTISTRY_WIDGET_SPAWNING_PROMPT } from '../../constants/prompts/character-defaults'
 import { capturePosthogEvent } from '../analytics/posthog'
 import { useSettingsStageModel } from '../settings/stage-model'
@@ -54,6 +55,8 @@ export interface AiriExtension {
       enabled?: boolean
       provider?: string
       model?: string
+      directorProvider?: string
+      directorModel?: string
       promptPrefix?: string
       workflowId?: string
       widgetInstruction?: string
@@ -132,6 +135,10 @@ export const useAiriCardStore = defineStore('airi-card', () => {
     return cards.value.get(id)
   }
 
+  function hasUsableSpeechModule(speech: Partial<AiriExtension['modules']['speech']> | undefined): boolean {
+    return !!speech?.provider && speech.provider !== 'speech-noop'
+  }
+
   function updateActiveCardDisplayModel(displayModelId: string | undefined) {
     const cardId = activeCardId.value
     const card = cards.value.get(cardId)
@@ -180,6 +187,8 @@ export const useAiriCardStore = defineStore('airi-card', () => {
         enabled: false,
         provider: artistryStore.globalProvider,
         model: artistryStore.globalModel,
+        directorProvider: activeConsciousnessProvider.value,
+        directorModel: activeConsciousnessModel.value,
         promptPrefix: artistryStore.globalPromptPrefix,
         widgetInstruction: DEFAULT_ARTISTRY_WIDGET_SPAWNING_PROMPT,
         spawnMode: 'bg_widget' as const,
@@ -198,6 +207,19 @@ export const useAiriCardStore = defineStore('airi-card', () => {
       }
     }
 
+    const existingSpeech = existingExtension.modules?.speech
+    const speech = hasUsableSpeechModule(existingSpeech) || !hasUsableSpeechModule(defaultModules.speech)
+      ? {
+          provider: existingSpeech?.provider ?? defaultModules.speech.provider,
+          model: existingSpeech?.model ?? defaultModules.speech.model,
+          voice_id: existingSpeech?.voice_id ?? defaultModules.speech.voice_id,
+          pitch: existingSpeech?.pitch,
+          rate: existingSpeech?.rate,
+          ssml: existingSpeech?.ssml,
+          language: existingSpeech?.language,
+        }
+      : defaultModules.speech
+
     // Merge existing extension with defaults
     return {
       modules: {
@@ -205,15 +227,7 @@ export const useAiriCardStore = defineStore('airi-card', () => {
           provider: existingExtension.modules?.consciousness?.provider ?? defaultModules.consciousness.provider,
           model: existingExtension.modules?.consciousness?.model ?? defaultModules.consciousness.model,
         },
-        speech: {
-          provider: existingExtension.modules?.speech?.provider ?? defaultModules.speech.provider,
-          model: existingExtension.modules?.speech?.model ?? defaultModules.speech.model,
-          voice_id: existingExtension.modules?.speech?.voice_id ?? defaultModules.speech.voice_id,
-          pitch: existingExtension.modules?.speech?.pitch,
-          rate: existingExtension.modules?.speech?.rate,
-          ssml: existingExtension.modules?.speech?.ssml,
-          language: existingExtension.modules?.speech?.language,
-        },
+        speech,
         vrm: existingExtension.modules?.vrm,
         live2d: existingExtension.modules?.live2d,
         displayModelId: existingExtension.modules?.displayModelId ?? defaultModules.displayModelId,
@@ -222,6 +236,8 @@ export const useAiriCardStore = defineStore('airi-card', () => {
           enabled: existingExtension.modules?.artistry?.enabled ?? (existingExtension as any).artistry?.enabled ?? defaultModules.artistry.enabled,
           provider: existingExtension.modules?.artistry?.provider ?? (existingExtension as any).artistry?.provider ?? defaultModules.artistry.provider,
           model: existingExtension.modules?.artistry?.model ?? (existingExtension as any).artistry?.model ?? defaultModules.artistry.model,
+          directorProvider: existingExtension.modules?.artistry?.directorProvider ?? (existingExtension as any).artistry?.directorProvider ?? defaultModules.artistry.directorProvider,
+          directorModel: existingExtension.modules?.artistry?.directorModel ?? (existingExtension as any).artistry?.directorModel ?? defaultModules.artistry.directorModel,
           promptPrefix: existingExtension.modules?.artistry?.promptPrefix ?? (existingExtension as any).artistry?.promptPrefix ?? (existingExtension as any).artistry?.prompt_prefix ?? defaultModules.artistry.promptPrefix,
           workflowId: existingExtension.modules?.artistry?.workflowId ?? (existingExtension as any).artistry?.workflowId ?? (existingExtension as any).artistry?.remixId,
           widgetInstruction: existingExtension.modules?.artistry?.widgetInstruction ?? (existingExtension as any).artistry?.widgetInstruction ?? defaultModules.artistry.widgetInstruction,
@@ -284,17 +300,53 @@ export const useAiriCardStore = defineStore('airi-card', () => {
     }
   }
 
-  function initialize() {
-    if (cards.value.has('default'))
+  function refreshBuiltInLumiCardIfNeeded() {
+    const latest = newAiriCard(createLumiAiriCard())
+    const existing = cards.value.get(LUMI_AIRI_CARD_ID)
+
+    if (!existing) {
+      cards.value.set(LUMI_AIRI_CARD_ID, latest)
       return
-    cards.value.set('default', newAiriCard({
-      name: 'ReLU',
-      version: '1.0.0',
-      description: SystemPromptV2(
-        t('base.prompt.prefix'),
-        t('base.prompt.suffix'),
-      ).content,
-    }))
+    }
+
+    if (existing.version === latest.version)
+      return
+
+    const existingExtension = resolveAiriExtension(existing)
+    cards.value.set(LUMI_AIRI_CARD_ID, {
+      ...existing,
+      name: latest.name,
+      version: latest.version,
+      description: latest.description,
+      creator: latest.creator,
+      notes: latest.notes,
+      personality: latest.personality,
+      scenario: latest.scenario,
+      greetings: latest.greetings,
+      greetingsGroupOnly: latest.greetingsGroupOnly,
+      systemPrompt: latest.systemPrompt,
+      postHistoryInstructions: latest.postHistoryInstructions,
+      messageExample: latest.messageExample,
+      tags: latest.tags,
+      extensions: {
+        ...existing.extensions,
+        airi: existingExtension,
+      },
+    })
+  }
+
+  function initialize() {
+    if (!cards.value.has('default')) {
+      cards.value.set('default', newAiriCard({
+        name: 'ReLU',
+        version: '1.0.0',
+        description: SystemPromptV2(
+          t('base.prompt.prefix'),
+          t('base.prompt.suffix'),
+        ).content,
+      }))
+    }
+    refreshBuiltInLumiCardIfNeeded()
     if (!activeCardId.value)
       activeCardId.value = 'default'
   }
@@ -313,9 +365,15 @@ export const useAiriCardStore = defineStore('airi-card', () => {
     activeConsciousnessProvider.value = extension?.modules?.consciousness?.provider
     activeConsciousnessModel.value = extension?.modules?.consciousness?.model
 
-    activeSpeechProvider.value = extension?.modules?.speech?.provider
-    activeSpeechModel.value = extension?.modules?.speech?.model
-    activeSpeechVoiceId.value = extension?.modules?.speech?.voice_id
+    if (hasUsableSpeechModule(extension?.modules?.speech) || !hasUsableSpeechModule({
+      provider: activeSpeechProvider.value,
+      model: activeSpeechModel.value,
+      voice_id: activeSpeechVoiceId.value,
+    })) {
+      activeSpeechProvider.value = extension?.modules?.speech?.provider
+      activeSpeechModel.value = extension?.modules?.speech?.model
+      activeSpeechVoiceId.value = extension?.modules?.speech?.voice_id
+    }
 
     // Apply body model if the card has a display model configured.
     // NOTICE: must set via store property directly (not storeToRefs .value) so Pinia's

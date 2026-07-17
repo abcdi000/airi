@@ -5,7 +5,7 @@ import { defineInvokeHandler } from '@moeru/eventa'
 import { app, shell } from 'electron'
 import { isLinux, isMacOS, isWindows } from 'std-env'
 
-import { electron, electronAppOpenUserDataFolder, electronAppQuit } from '../../../shared/eventa'
+import { electron, electronAppOpenPath, electronAppOpenUserDataFolder, electronAppQuit } from '../../../shared/eventa'
 
 export function createAppService(params: { context: ReturnType<typeof createContext>['context'], window: BrowserWindow }) {
   defineInvokeHandler(params.context, electron.app.isMacOS, () => isMacOS)
@@ -17,6 +17,13 @@ export function createAppService(params: { context: ReturnType<typeof createCont
     if (openResult) {
       throw new Error(openResult)
     }
+    return { path }
+  })
+  defineInvokeHandler(params.context, electronAppOpenPath, async (payload) => {
+    const path = payload.path
+    const openResult = await shell.openPath(path)
+    if (openResult)
+      throw new Error(openResult)
     return { path }
   })
   defineInvokeHandler(params.context, electronAppQuit, () => app.quit())

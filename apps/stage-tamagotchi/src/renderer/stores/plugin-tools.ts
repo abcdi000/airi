@@ -72,6 +72,7 @@ export const useTamagotchiPluginToolsStore = defineStore('tamagotchi-plugin-tool
 
   return {
     dispose,
+    invokeTool: invokePluginTool,
     refresh,
   }
 })

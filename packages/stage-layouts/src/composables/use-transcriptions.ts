@@ -57,15 +57,17 @@ export function useTranscriptions(options: TranscriptionOptions) {
     }, autoSendDelay.value)
   }
 
-  const stopStreaming = async () => {
+  const stopStreaming = async (abort = true) => {
     if (!isListening.value)
       return
 
     try {
       console.info('Stopping transcription...', { source: 'useTranscriptions' })
       clearPendingAutoSend()
-      await stopStreamingTranscription(true)
+      await stopStreamingTranscription(abort)
       isListening.value = false
+      if (!abort)
+        await debouncedAutoSend()
       console.info('Transcription stopped', { source: 'useTranscriptions' })
     }
     catch (err) {
@@ -182,7 +184,6 @@ export function useTranscriptions(options: TranscriptionOptions) {
             // Append transcribed text to message input
             const currentText = messageInput.value.trim()
             messageInput.value = currentText ? `${currentText} ${delta}` : delta
-            debouncedAutoSend()
           }
         },
         // Omit onSpeechEnd to avoid re-adding user-deleted text; use sentence deltas only.

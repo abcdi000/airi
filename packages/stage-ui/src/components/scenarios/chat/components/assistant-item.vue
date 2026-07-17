@@ -18,10 +18,12 @@ const props = withDefaults(defineProps<{
   label: string
   showPlaceholder?: boolean
   variant?: 'desktop' | 'mobile'
+  splitTextBubbles?: boolean
   toolCallRenderers?: ChatToolCallRendererRegistry
 }>(), {
   showPlaceholder: false,
   variant: 'desktop',
+  splitTextBubbles: false,
   toolCallRenderers: () => ({}),
 })
 
@@ -78,10 +80,90 @@ const boxClasses = computed(() => [
   props.variant === 'mobile' ? 'px-2 py-2 text-sm bg-primary-50/90 dark:bg-primary-950/90' : 'px-3 py-3 bg-primary-50/80 dark:bg-primary-950/80',
 ])
 const copyText = computed(() => getChatHistoryItemCopyText(props.message as ChatHistoryItem))
+const plainText = computed(() => resolvedSlices.value
+  .filter((slice): slice is ChatSlicesText => slice.type === 'text')
+  .map(slice => slice.text)
+  .join('\n')
+  .trim())
+const debugBubble = computed(() => parseDebugText(plainText.value))
+const splitBubbleTexts = computed(() => {
+  if (!props.splitTextBubbles)
+    return []
+
+  if (resolvedSlices.value.some(slice => slice.type !== 'text'))
+    return []
+
+  const text = stripVisibleAssistantPreamble(plainText.value)
+  if (!text || text.includes('```'))
+    return []
+
+  const lineParts = text
+    .split(/\r?\n+/)
+    .map(part => part.trim())
+    .filter(Boolean)
+
+  const looksLikeShortChatLines = lineParts.length > 1
+    && lineParts.length <= 4
+    && lineParts.every(part => part.length <= 180)
+    && lineParts.every(part => !/^\s*(?:[-*+]|\d+[.)]|#{1,6}\s|>\s|\|)/.test(part))
+
+  return looksLikeShortChatLines ? lineParts : []
+})
+
+function stripVisibleAssistantPreamble(text: string) {
+  const normalized = text.trim()
+  const lines = normalized.split(/\r?\n/)
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    if (/^\s*(?:AIRI|Lumi|{{char}}|assistant)\s*[:：]?\s*$/i.test(lines[index] ?? '')) {
+      const afterLabel = lines.slice(index + 1).join('\n').trim()
+      if (afterLabel)
+        return afterLabel
+    }
+  }
+
+  const responseIntentMatch = normalized.match(/(?:我想回应|我会回应|我应该回应|可以回应|想回应)\s*[:：]\s*([\s\S]+)$/)
+  if (responseIntentMatch?.[1]?.trim())
+    return responseIntentMatch[1].trim()
+
+  return normalized
+}
+
+function parseDebugText(text: string) {
+  const lines = text.trim().split(/\r?\n/)
+  const match = lines[0]?.match(/^\[(memory_search|memory_write|system_notice)\]$/)
+  if (!match)
+    return null
+
+  const kind = match[1] as 'memory_search' | 'memory_write' | 'system_notice'
+  const body = lines.slice(1).join('\n').trim()
+  const status = lines.slice(1).find(line => /^status:/.test(line))?.replace(/^status:\s*/, '')
+  const found = lines.slice(1).find(line => /^found:/.test(line))?.replace(/^found:\s*/, '')
+  const stored = lines.slice(1).find(line => /^stored:/.test(line))?.replace(/^stored:\s*/, '')
+  const activity = lines.slice(1).find(line => /^activity:/.test(line))?.replace(/^activity:\s*/, '')
+  const decision = lines.slice(1).find(line => /^decision:/.test(line))?.replace(/^decision:\s*/, '')
+
+  return {
+    title: kind === 'memory_search'
+      ? '记忆检索'
+      : kind === 'memory_write'
+        ? '记忆写入'
+        : '系统提示',
+    summary: [
+      status ? `状态 ${status}` : undefined,
+      found ? `命中 ${found}` : undefined,
+      stored ? `写入 ${stored}` : undefined,
+      activity ? `活动 ${activity}` : undefined,
+      decision ? `决策 ${decision}` : undefined,
+    ]
+      .filter(Boolean)
+      .join(' · '),
+    body,
+  }
+}
 </script>
 
 <template>
-  <div flex :class="containerClass" class="ph-no-capture">
+  <div v-if="debugBubble" flex justify-center class="ph-no-capture px-4">
     <ChatActionMenu
       :copy-text="copyText"
       :can-delete="!showPlaceholder"
@@ -91,38 +173,89 @@ const copyText = computed(() => getChatHistoryItemCopyText(props.message as Chat
       <template #default="{ setMeasuredElement }">
         <div
           :ref="setMeasuredElement"
-          flex="~ col" shadow="sm primary-200/50 dark:none"
-          min-w-20 gap-2 rounded-xl h="unset <sm:fit"
-          :class="[
-            boxClasses,
-            (isStageWeb() || isStageCapacitor()) && props.variant === 'mobile' ? 'select-none sm:select-auto' : '',
-          ]"
+          class="w-full max-w-176 border border-emerald-200/80 rounded-lg bg-emerald-50/90 px-3 py-2 text-emerald-900 shadow-sm dark:border-emerald-700/50 dark:bg-emerald-950/70 dark:text-emerald-100"
         >
-          <ChatResponsePart
-            v-if="message.categorization"
-            :message="message"
-            :variant="variant"
-          />
-          <div class="<sm:hidden">
-            <span text-sm text="black/60 dark:white/65" font-normal>{{ label }}</span>
-          </div>
-          <div v-if="resolvedSlices.length > 0" class="flex flex-col gap-2 break-words" text="primary-700 dark:primary-100">
-            <template v-for="(slice, sliceIndex) in resolvedSlices" :key="sliceIndex">
-              <component
-                :is="getToolCallRenderer(slice)"
-                v-if="slice.type === 'tool-call'"
-                :tool-name="slice.toolCall.toolName"
-                :args="slice.toolCall.args"
-                :state="getToolCallState(slice)"
-                :result="getToolCallResult(slice)?.result"
-              />
-              <template v-else-if="slice.type === 'tool-call-result'" />
-              <template v-else-if="slice.type === 'text'">
-                <MarkdownRenderer :content="slice.text" />
+          <details>
+            <summary class="cursor-pointer select-none text-sm font-medium outline-none">
+              <span>{{ debugBubble.title }}</span>
+              <span v-if="debugBubble.summary" class="ml-2 text-emerald-700/75 dark:text-emerald-200/75">{{ debugBubble.summary }}</span>
+            </summary>
+            <pre class="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed font-mono">{{ debugBubble.body }}</pre>
+          </details>
+        </div>
+      </template>
+    </ChatActionMenu>
+  </div>
+  <div v-else flex :class="containerClass" class="ph-no-capture">
+    <ChatActionMenu
+      :copy-text="copyText"
+      :can-delete="!showPlaceholder"
+      @copy="emit('copy')"
+      @delete="emit('delete')"
+    >
+      <template #default="{ setMeasuredElement }">
+        <div
+          :ref="setMeasuredElement"
+          flex="~ col"
+          gap-2
+        >
+          <template v-if="splitBubbleTexts.length > 1">
+            <div
+              v-for="(bubbleText, bubbleIndex) in splitBubbleTexts"
+              :key="bubbleIndex"
+              data-chat-assistant-bubble="split"
+              flex="~ col" shadow="sm primary-200/50 dark:none"
+              min-w-20 gap-2 rounded-xl h="unset <sm:fit"
+              :class="[
+                boxClasses,
+                (isStageWeb() || isStageCapacitor()) && props.variant === 'mobile' ? 'select-none sm:select-auto' : '',
+              ]"
+            >
+              <div v-if="bubbleIndex === 0" class="<sm:hidden">
+                <span text-sm text="black/60 dark:white/65" font-normal>{{ label }}</span>
+              </div>
+              <div class="break-words" text="primary-700 dark:primary-100">
+                <MarkdownRenderer :content="bubbleText" />
+              </div>
+            </div>
+          </template>
+
+          <div
+            v-else
+            data-chat-assistant-bubble="single"
+            flex="~ col" shadow="sm primary-200/50 dark:none"
+            min-w-20 gap-2 rounded-xl h="unset <sm:fit"
+            :class="[
+              boxClasses,
+              (isStageWeb() || isStageCapacitor()) && props.variant === 'mobile' ? 'select-none sm:select-auto' : '',
+            ]"
+          >
+            <ChatResponsePart
+              v-if="message.categorization && !splitTextBubbles"
+              :message="message"
+              :variant="variant"
+            />
+            <div class="<sm:hidden">
+              <span text-sm text="black/60 dark:white/65" font-normal>{{ label }}</span>
+            </div>
+            <div v-if="resolvedSlices.length > 0" class="flex flex-col gap-2 break-words" text="primary-700 dark:primary-100">
+              <template v-for="(slice, sliceIndex) in resolvedSlices" :key="sliceIndex">
+                <component
+                  :is="getToolCallRenderer(slice)"
+                  v-if="slice.type === 'tool-call'"
+                  :tool-name="slice.toolCall.toolName"
+                  :args="slice.toolCall.args"
+                  :state="getToolCallState(slice)"
+                  :result="getToolCallResult(slice)?.result"
+                />
+                <template v-else-if="slice.type === 'tool-call-result'" />
+                <template v-else-if="slice.type === 'text'">
+                  <MarkdownRenderer :content="stripVisibleAssistantPreamble(slice.text)" />
+                </template>
               </template>
-            </template>
+            </div>
+            <div v-else-if="showLoader" i-eos-icons:three-dots-loading />
           </div>
-          <div v-else-if="showLoader" i-eos-icons:three-dots-loading />
         </div>
       </template>
     </ChatActionMenu>

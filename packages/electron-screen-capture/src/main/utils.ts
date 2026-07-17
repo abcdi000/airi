@@ -5,6 +5,10 @@ import type { SerializableDesktopCapturerSource } from '..'
 import { shell, systemPreferences } from 'electron'
 import { isMacOS } from 'std-env'
 
+function toOwnedBytes(buffer: Buffer) {
+  return new Uint8Array(buffer)
+}
+
 /**
  * Serializes a DesktopCapturerSource to a format that can be sent over IPC.
  *
@@ -23,8 +27,8 @@ export function toSerializableDesktopCapturerSource(source: DesktopCapturerSourc
     id: source.id,
     name: source.name,
     display_id: source.display_id,
-    appIcon: source.appIcon != null && !source.appIcon.isEmpty() ? new Uint8Array(source.appIcon.toPNG().buffer) : undefined,
-    thumbnail: source.thumbnail != null ? new Uint8Array(source.thumbnail.toJPEG(90).buffer) : undefined,
+    appIcon: source.appIcon != null && !source.appIcon.isEmpty() ? toOwnedBytes(source.appIcon.toPNG()) : undefined,
+    thumbnail: source.thumbnail != null && !source.thumbnail.isEmpty() ? toOwnedBytes(source.thumbnail.toJPEG(90)) : undefined,
   }
 }
 

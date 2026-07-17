@@ -7,6 +7,12 @@ import { errorMessageFrom } from '@moeru/std'
 import { stepCountAtLeast } from '@xsai/shared-chat'
 import { streamText } from '@xsai/stream-text'
 
+const DEFAULT_MAX_STREAM_STEPS = 64
+const MIN_STREAM_STEPS = 1
+const MAX_STREAM_STEPS = 200
+
+let lumiStreamDebugSequence = 0
+
 /**
  * Normalize chat messages so they match the wire format the active provider
  * actually accepts, flattening content-part arrays back to plain strings when
@@ -102,6 +108,37 @@ async function resolveTools(options?: StreamOptions) {
   return tools ?? []
 }
 
+function toolNameFrom(tool: Tool): string | undefined {
+  const candidate = tool as Tool & { name?: string, function?: { name?: string } }
+  return candidate.function?.name ?? candidate.name
+}
+
+export function dedupeToolsByName(tools: Tool[]): Tool[] {
+  const anonymous: Tool[] = []
+  const named = new Map<string, Tool>()
+
+  for (const tool of tools) {
+    const name = toolNameFrom(tool)
+    if (!name) {
+      anonymous.push(tool)
+      continue
+    }
+
+    // Later entries win so caller-provided runtime tools can override the
+    // built-in fallback tools without producing duplicate provider payloads.
+    named.set(name, tool)
+  }
+
+  return [...anonymous, ...named.values()]
+}
+
+function resolveMaxStreamSteps(options?: StreamOptions): number {
+  const candidate = Math.round(Number(options?.maxSteps ?? DEFAULT_MAX_STREAM_STEPS))
+  if (!Number.isFinite(candidate))
+    return DEFAULT_MAX_STREAM_STEPS
+  return Math.max(MIN_STREAM_STEPS, Math.min(MAX_STREAM_STEPS, candidate))
+}
+
 function isAbortError(error: unknown): boolean {
   return typeof error === 'object'
     && error !== null
@@ -161,6 +198,69 @@ function resolveCapturedToolErrorEvent(
   }
 }
 
+function previewStreamDebugValue(value: unknown, maxLength = 1200): unknown {
+  if (typeof value === 'string')
+    return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value
+  if (Array.isArray(value))
+    return value.map(item => previewStreamDebugValue(item, Math.floor(maxLength / Math.max(1, value.length))))
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value as Record<string, unknown>))
+      out[key] = previewStreamDebugValue(child, maxLength)
+    return out
+  }
+  return value
+}
+
+function summarizeLumiStreamEventForDebug(event: unknown) {
+  if (!event || typeof event !== 'object')
+    return { type: typeof event }
+
+  const record = event as Record<string, unknown>
+  const type = record.type
+  if (type === 'text-delta' || type === 'reasoning-delta') {
+    return {
+      type,
+      textLength: typeof record.text === 'string' ? record.text.length : undefined,
+    }
+  }
+
+  if (type === 'tool-call') {
+    return {
+      type,
+      toolCallId: record.toolCallId,
+      toolName: record.toolName ?? record.name,
+      args: previewStreamDebugValue(record.args ?? record.arguments, 1200),
+    }
+  }
+
+  if (type === 'tool-result' || type === 'tool-error') {
+    return {
+      type,
+      toolCallId: record.toolCallId,
+      isError: record.isError,
+      result: previewStreamDebugValue(record.result, 1200),
+    }
+  }
+
+  if (type === 'finish') {
+    return {
+      type,
+      finishReason: record.finishReason,
+      usage: previewStreamDebugValue(record.usage, 500),
+    }
+  }
+
+  if (type === 'error') {
+    return {
+      type,
+      error: errorMessageFrom(record.error) ?? String(record.error),
+    }
+  }
+
+  return previewStreamDebugValue(record, 1200)
+}
+
 export async function streamFrom({
   model,
   chatProvider,
@@ -177,12 +277,27 @@ export async function streamFrom({
     ? await (builtinToolsResolver?.(model, chatProvider) ?? Promise.resolve([]))
     : []
   const customTools = supportedTools ? await resolveTools(options) : []
-  const mergedTools = supportedTools ? [...builtinTools, ...customTools] : []
+  const mergedTools = supportedTools ? dedupeToolsByName([...builtinTools, ...customTools]) : []
   const tools = mergedTools.length > 0 ? mergedTools : undefined
   const capturedToolErrorByCallId = new Map<string, string>()
   const streamTools = options?.captureToolErrors && tools != null
     ? withCapturedToolErrors(tools, capturedToolErrorByCallId)
     : tools
+  const maxSteps = resolveMaxStreamSteps(options)
+  const streamTraceId = `lumi-stream-${Date.now().toString(36)}-${++lumiStreamDebugSequence}`
+  let streamEventSequence = 0
+
+  console.info('[LUMI_STREAM_DEBUG]', {
+    traceId: streamTraceId,
+    phase: 'stream_begin',
+    model,
+    baseURL: chatConfig.baseURL,
+    messageCount: sanitized.length,
+    toolCount: streamTools?.length ?? 0,
+    waitForTools: options?.waitForTools,
+    captureToolErrors: options?.captureToolErrors,
+    maxSteps,
+  })
 
   return new Promise<void>((resolve, reject) => {
     let settled = false
@@ -202,6 +317,18 @@ export async function streamFrom({
     const onEvent = async (event: unknown) => {
       try {
         const streamEvent = resolveCapturedToolErrorEvent(event, capturedToolErrorByCallId)
+        if (
+          streamEvent
+          && typeof streamEvent === 'object'
+          && ['tool-call', 'tool-result', 'tool-error', 'finish', 'error'].includes(String((streamEvent as { type?: unknown }).type))
+        ) {
+          console.info('[LUMI_STREAM_DEBUG]', {
+            traceId: streamTraceId,
+            seq: ++streamEventSequence,
+            phase: 'stream_event',
+            event: summarizeLumiStreamEventForDebug(streamEvent),
+          })
+        }
         await options?.onStreamEvent?.(streamEvent as any)
         if (event && (event as any).type === 'finish') {
           const finishReason = (event as any).finishReason
@@ -224,7 +351,7 @@ export async function streamFrom({
         abortSignal: options?.abortSignal,
         messages: sanitized,
         headers: options?.headers,
-        stopWhen: stepCountAtLeast(10),
+        stopWhen: stepCountAtLeast(maxSteps),
         // NOTICE:
         // Do not pass xsAI's `captureToolErrors` option here. In the installed
         // @xsai/stream-text version, stream options are spread into the provider
@@ -288,13 +415,17 @@ export function isToolRelatedError(error: unknown): boolean {
 // many strict OpenAI-compatible gateways (e.g. DeepSeek-style servers):
 //   "Failed to deserialize the JSON body into the target type:
 //    messages[7]: invalid type: sequence, expected a string at line 1 column …"
-// The second pattern covers Python/Pydantic-style errors like
+// The second Rust/serde pattern covers providers that accept content arrays
+// but only implement the text part variant, e.g.
+//   "messages[35]: unknown variant image_url, expected text ..."
+// The final pattern covers Python/Pydantic-style errors like
 //   "messages.0.content: Input should be a valid string"
 // and other variants that surface the same root cause.
 //
 // See: https://github.com/moeru-ai/airi/issues/1500
 const CONTENT_ARRAY_RELATED_ERROR_PATTERNS: RegExp[] = [
   /messages\[\d+\][^"]*invalid type:\s*sequence,\s*expected\s+a\s+string/i,
+  /messages\[\d+\][^"]*unknown variant\s+[`'"]?image_url[`'"]?,\s*expected\s+[`'"]?text[`'"]?/i,
   /messages\.\d+\.content[^"]*(?:expected|should be).*string/i,
 ]
 

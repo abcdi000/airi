@@ -13,9 +13,23 @@ const openAICompatibleConfigSchema = z.object({
     .string('Base URL')
     .optional()
     .default('https://api.openai.com/v1'),
+  maxToolSteps: z
+    .number()
+    .int()
+    .min(1)
+    .max(200)
+    .optional()
+    .default(64),
 })
 
 type OpenAICompatibleConfig = z.input<typeof openAICompatibleConfigSchema>
+
+function normalizeBaseUrl(baseUrl: string | undefined) {
+  if (!baseUrl)
+    return baseUrl
+
+  return baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+}
 
 export const providerOpenAICompatible = defineProvider<OpenAICompatibleConfig>({
   id: 'openai-compatible',
@@ -39,9 +53,14 @@ export const providerOpenAICompatible = defineProvider<OpenAICompatibleConfig>({
       descriptionLocalized: t('settings.pages.providers.catalog.edit.config.common.fields.field.base-url.description'),
       placeholderLocalized: t('settings.pages.providers.catalog.edit.config.common.fields.field.base-url.placeholder'),
     }),
+    maxToolSteps: openAICompatibleConfigSchema.shape.maxToolSteps.meta({
+      labelLocalized: '最大工具步数',
+      descriptionLocalized: '一次回复中允许意识模型连续调用工具的最大步数。浏览器、MCP、批量操作任务可适当调高；过高会让单次回复更久。',
+      placeholderLocalized: '64',
+    }),
   }),
   createProvider(config) {
-    return createOpenAI(config.apiKey as string, config.baseUrl)
+    return createOpenAI(config.apiKey as string, normalizeBaseUrl(config.baseUrl))
   },
 
   validationRequiredWhen(config) {

@@ -7,12 +7,13 @@ import { FieldCheckbox, FieldRange } from '@proj-airi/ui'
 import { storeToRefs } from 'pinia'
 import { computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 
 const providersStore = useProvidersStore()
 const visionStore = useVisionStore()
 const visionProcessingStore = useVisionProcessingStore()
-const { persistedChatProvidersMetadata, configuredProviders } = storeToRefs(providersStore)
+const router = useRouter()
+const { persistedVisionProvidersMetadata, configuredProviders } = storeToRefs(providersStore)
 const {
   activeProvider,
   activeModel,
@@ -59,6 +60,10 @@ function handleDeleteProvider(providerId: string) {
   providersStore.deleteProvider(providerId)
 }
 
+function goToProviderSettings(providerId: string) {
+  router.push(`/settings/providers/vision/${providerId}`)
+}
+
 const formattedLastCapture = computed(() => formatRelativeTime(lastCaptureAt.value))
 const formattedLastContextUpdate = computed(() => formatRelativeTime(lastContextUpdateAt.value))
 const isOllamaVisionProvider = computed(() => activeProvider.value === 'ollama')
@@ -93,12 +98,12 @@ function formatRelativeTime(timestamp: number | null) {
         </div>
         <div :class="['max-w-full']">
           <fieldset
-            v-if="persistedChatProvidersMetadata.length > 0"
+            v-if="persistedVisionProvidersMetadata.length > 0"
             :class="['flex', 'min-w-0', 'flex-row', 'gap-4', 'of-x-auto', 'scroll-smooth']"
             role="radiogroup"
           >
             <RadioCardSimple
-              v-for="metadata in persistedChatProvidersMetadata"
+              v-for="metadata in persistedVisionProvidersMetadata"
               :id="metadata.id"
               :key="metadata.id"
               v-model="activeProvider"
@@ -109,23 +114,44 @@ function formatRelativeTime(timestamp: number | null) {
               @click="trackProviderClick(metadata.id, 'vision')"
             >
               <template #topRight>
-                <button
-                  type="button"
-                  :class="[
-                    'rounded',
-                    'bg-neutral-100',
-                    'p-1',
-                    'text-neutral-600',
-                    'transition-colors',
-                    'hover:bg-neutral-200',
-                    'dark:bg-neutral-800/60',
-                    'dark:text-neutral-300',
-                    'dark:hover:bg-neutral-700/60',
-                  ]"
-                  @click.stop.prevent="handleDeleteProvider(metadata.id)"
-                >
-                  <div :class="['text-base', 'i-solar:trash-bin-trash-bold-duotone']" />
-                </button>
+                <div :class="['flex', 'gap-1']">
+                  <button
+                    type="button"
+                    title="Edit configuration"
+                    :class="[
+                      'rounded',
+                      'bg-neutral-100',
+                      'p-1',
+                      'text-neutral-600',
+                      'transition-colors',
+                      'hover:bg-neutral-200',
+                      'dark:bg-neutral-800/60',
+                      'dark:text-neutral-300',
+                      'dark:hover:bg-neutral-700/60',
+                    ]"
+                    @click.stop.prevent="goToProviderSettings(metadata.id)"
+                  >
+                    <div :class="['text-base', 'i-solar:settings-bold-duotone']" />
+                  </button>
+                  <button
+                    type="button"
+                    title="Delete configuration"
+                    :class="[
+                      'rounded',
+                      'bg-neutral-100',
+                      'p-1',
+                      'text-neutral-600',
+                      'transition-colors',
+                      'hover:bg-neutral-200',
+                      'dark:bg-neutral-800/60',
+                      'dark:text-neutral-300',
+                      'dark:hover:bg-neutral-700/60',
+                    ]"
+                    @click.stop.prevent="handleDeleteProvider(metadata.id)"
+                  >
+                    <div :class="['text-base', 'i-solar:trash-bin-trash-bold-duotone']" />
+                  </button>
+                </div>
               </template>
 
               <template v-if="configuredProviders[metadata.id] === false" #bottomRight>
@@ -147,7 +173,7 @@ function formatRelativeTime(timestamp: number | null) {
               </template>
             </RadioCardSimple>
             <RouterLink
-              to="/settings/providers"
+              to="/settings/providers#vision"
               :class="[
                 'relative',
                 'min-w-50',
@@ -178,7 +204,7 @@ function formatRelativeTime(timestamp: number | null) {
           </fieldset>
           <div v-else>
             <RouterLink
-              to="/settings/providers"
+              to="/settings/providers#vision"
               :class="[
                 'flex',
                 'items-center',

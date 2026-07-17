@@ -22,6 +22,13 @@ export function toSignedPercent(value: number): string {
   return '0%'
 }
 
+function clampPlaybackVolume(value: unknown) {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(parsed))
+    return 1
+  return Math.min(1.5, Math.max(0, parsed))
+}
+
 export const useSpeechStore = defineStore('speech', () => {
   const providersStore = useProvidersStore()
   const { allAudioSpeechProvidersMetadata } = storeToRefs(providersStore)
@@ -35,14 +42,39 @@ export const useSpeechStore = defineStore('speech', () => {
 
   const pitch = useLocalStorageManualReset<number>('settings/speech/pitch', 0)
   const rate = useLocalStorageManualReset<number>('settings/speech/rate', 1)
+  const playbackVolume = useLocalStorageManualReset<number>('settings/speech/playback-volume', 1)
   const ssmlEnabled = useLocalStorageManualReset<boolean>('settings/speech/ssml-enabled', false)
   const isLoadingSpeechProviderVoices = refManualReset<boolean>(false)
   const speechProviderError = refManualReset<string | null>(null)
   const availableVoices = refManualReset<Record<string, VoiceInfo[]>>(() => ({}))
   const modelSearchQuery = refManualReset<string>('')
 
+  function usesProviderConfiguredVoice(provider: string, model: string) {
+    return provider === 'mimo-audio-speech'
+      && (model === 'mimo-v2.5-tts-voiceclone' || model === 'mimo-v2.5-tts-voicedesign')
+      || provider === 'alibaba-cloud-model-studio'
+      && (model === 'cosyvoice-v3.5-flash' || model === 'cosyvoice-v3.5-plus')
+  }
+
+  function hasProviderConfiguredVoice(provider: string, model: string, providerConfig: Record<string, unknown> | undefined) {
+    if (!usesProviderConfiguredVoice(provider, model))
+      return false
+
+    if (model === 'mimo-v2.5-tts-voiceclone')
+      return typeof providerConfig?.voiceSample === 'string' && providerConfig.voiceSample.trim().length > 0
+
+    if (model === 'mimo-v2.5-tts-voicedesign')
+      return typeof providerConfig?.stylePrompt === 'string' && providerConfig.stylePrompt.trim().length > 0
+
+    if (provider === 'alibaba-cloud-model-studio')
+      return typeof providerConfig?.customVoiceId === 'string' && providerConfig.customVoiceId.trim().length > 0
+
+    return false
+  }
+
   // Computed properties
   const availableSpeechProvidersMetadata = computed(() => allAudioSpeechProvidersMetadata.value)
+  const normalizedPlaybackVolume = computed(() => clampPlaybackVolume(playbackVolume.value))
 
   // Computed properties
   const supportsModelListing = computed(() => {
@@ -279,15 +311,21 @@ export const useSpeechStore = defineStore('speech', () => {
     if (!activeSpeechProvider.value)
       return false
 
+    const providerConfig = providersStore.getProviderConfig(activeSpeechProvider.value)
     let hasModel = !!activeSpeechModel.value
     let hasVoice = !!activeSpeechVoiceId.value
 
+    if (activeSpeechProvider.value === 'mimo-audio-speech')
+      hasModel ||= !!providerConfig?.model
+
     // For OpenAI Compatible providers, check provider config as fallback
     if (activeSpeechProvider.value === 'openai-compatible-audio-speech') {
-      const providerConfig = providersStore.getProviderConfig(activeSpeechProvider.value)
       hasModel ||= !!providerConfig?.model
       hasVoice ||= !!providerConfig?.voice
     }
+
+    if (hasProviderConfiguredVoice(activeSpeechProvider.value, activeSpeechModel.value || String(providerConfig?.model || ''), providerConfig))
+      return hasModel
 
     return hasModel && hasVoice
   })
@@ -299,6 +337,7 @@ export const useSpeechStore = defineStore('speech', () => {
     activeSpeechVoice.reset()
     pitch.reset()
     rate.reset()
+    playbackVolume.reset()
     ssmlEnabled.reset()
     modelSearchQuery.reset()
     availableVoices.reset()
@@ -315,6 +354,7 @@ export const useSpeechStore = defineStore('speech', () => {
     activeSpeechVoiceId,
     pitch,
     rate,
+    playbackVolume,
     ssmlEnabled,
     isLoadingSpeechProviderVoices,
     speechProviderError,
@@ -323,6 +363,7 @@ export const useSpeechStore = defineStore('speech', () => {
 
     // Computed
     availableSpeechProvidersMetadata,
+    normalizedPlaybackVolume,
     supportsSSML,
     supportsModelListing,
     providerModels,
@@ -335,6 +376,7 @@ export const useSpeechStore = defineStore('speech', () => {
     loadVoicesForProvider,
     getVoicesForProvider,
     generateSSML,
+    usesProviderConfiguredVoice,
     resetState,
   }
 })

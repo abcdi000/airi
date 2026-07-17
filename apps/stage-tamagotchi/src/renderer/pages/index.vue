@@ -255,6 +255,9 @@ const { init: initVAD, dispose: disposeVAD, start: startVAD, loaded: vadLoaded }
 
 let stopOnStopRecord: (() => void) | undefined
 const audioInteractionStarting = ref(false)
+const streamTranscriptionStarting = ref(false)
+const streamTranscriptionStopRequested = ref(false)
+let streamUtteranceText = ''
 
 // Caption overlay broadcast channel
 type CaptionChannelEvent
@@ -269,11 +272,22 @@ function handleStreamingSentenceEnd(delta: string) {
     return
   }
 
+  streamUtteranceText = [streamUtteranceText.trim(), finalText.trim()].filter(Boolean).join(' ')
+  postCaption({ type: 'caption-speaker', text: streamUtteranceText })
+}
+
+function handleStreamingSpeechEnd(text: string) {
+  const finalText = (streamUtteranceText || text || '').trim()
+  console.info('[Main Page] Speech ended, final text:', finalText)
+  streamUtteranceText = ''
+  if (!finalText)
+    return
+
   postCaption({ type: 'caption-speaker', text: finalText })
 
   void (async () => {
     try {
-      console.info('[Main Page] Sending transcription to chat:', finalText)
+      console.info('[Main Page] Sending full utterance to chat:', finalText)
       await chatSyncStore.requestIngest({ text: finalText })
     }
     catch (err) {
@@ -282,14 +296,31 @@ function handleStreamingSentenceEnd(delta: string) {
   })()
 }
 
-function handleStreamingSpeechEnd(text: string) {
-  console.info('[Main Page] Speech ended, final text:', text)
-  postCaption({ type: 'caption-speaker', text })
-}
-
 async function handleSpeechStart() {
   if (shouldUseStreamInput.value) {
-    console.info('Speech detected - transcription session should already be active')
+    if (!stream.value || streamTranscriptionStarting.value)
+      return
+
+    streamTranscriptionStarting.value = true
+    streamTranscriptionStopRequested.value = false
+    streamUtteranceText = ''
+    try {
+      console.info('[Main Page] Speech detected, starting streaming transcription for this utterance')
+      await transcribeForMediaStream(stream.value, {
+        onSentenceEnd: handleStreamingSentenceEnd,
+        onSpeechEnd: handleStreamingSpeechEnd,
+      })
+    }
+    catch (err) {
+      console.error('[Main Page] Failed to start streaming transcription after speech detected:', err)
+    }
+    finally {
+      streamTranscriptionStarting.value = false
+      if (streamTranscriptionStopRequested.value) {
+        streamTranscriptionStopRequested.value = false
+        await stopStreamingTranscription(false)
+      }
+    }
     return
   }
 
@@ -298,7 +329,11 @@ async function handleSpeechStart() {
 
 async function handleSpeechEnd() {
   if (shouldUseStreamInput.value) {
-    // Keep streaming session alive; idle timer in pipeline will handle teardown.
+    if (streamTranscriptionStarting.value) {
+      streamTranscriptionStopRequested.value = true
+      return
+    }
+    await stopStreamingTranscription(false)
     return
   }
 
@@ -331,26 +366,7 @@ async function startAudioInteraction() {
       console.warn('[Main Page] VAD initialization failed (non-critical for Web Speech API):', err)
     })
 
-    if (shouldUseStreamInput.value) {
-      console.info('[Main Page] Starting streaming transcription...', {
-        supportsStreamInput: supportsStreamInput.value,
-        hasStream: !!stream.value,
-      })
-
-      if (!stream.value) {
-        console.warn('[Main Page] Stream not available despite shouldUseStreamInput being true')
-        return
-      }
-
-      // Use sentence deltas for live captions and speech end for final text.
-      await transcribeForMediaStream(stream.value, {
-        onSentenceEnd: handleStreamingSentenceEnd,
-        onSpeechEnd: handleStreamingSpeechEnd,
-      })
-
-      console.info('[Main Page] Streaming transcription started successfully')
-    }
-    else {
+    if (!shouldUseStreamInput.value) {
       console.warn('[Main Page] Not starting streaming transcription:', {
         shouldUseStreamInput: shouldUseStreamInput.value,
         hasStream: !!stream.value,
@@ -400,6 +416,8 @@ function stopAudioInteraction() {
     stopOnStopRecord?.()
     stopOnStopRecord = undefined
     audioInteractionStarting.value = false
+    streamTranscriptionStarting.value = false
+    streamTranscriptionStopRequested.value = false
     void stopStreamingTranscription(true)
     disposeVAD()
   })

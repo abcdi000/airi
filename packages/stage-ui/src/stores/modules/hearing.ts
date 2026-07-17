@@ -17,6 +17,7 @@ import { useAnalytics } from '../../composables/use-analytics'
 import { activeTurnSpan, startSpan } from '../../composables/use-io-tracer'
 import { useProvidersStore } from '../providers'
 import { streamAliyunTranscription } from '../providers/aliyun/stream-transcription'
+import { streamDashScopeTranscription } from '../providers/dashscope/stream-transcription'
 import { streamWebSpeechAPITranscription } from '../providers/web-speech-api'
 
 function errorMessage(err: unknown): string {
@@ -95,20 +96,22 @@ export function filterTranscriptionByConfidence(
 
 const STREAM_TRANSCRIPTION_EXECUTORS: Record<string, StreamTranscription> = {
   'aliyun-nls-transcription': streamAliyunTranscription,
+  'alibaba-cloud-model-studio-transcription': streamDashScopeTranscription,
   // Web Speech API is handled specially in transcribeForMediaStream since it works directly with MediaStream
 }
 
 export const useHearingStore = defineStore('hearing-store', () => {
   const providersStore = useProvidersStore()
   const { allAudioTranscriptionProvidersMetadata } = storeToRefs(providersStore)
+  const { trackSttStarted, trackSttSucceeded, trackSttFailed } = useAnalytics()
 
   // State
   const activeTranscriptionProvider = useLocalStorageManualReset('settings/hearing/active-provider', '')
   const activeTranscriptionModel = useLocalStorageManualReset('settings/hearing/active-model', '')
   const activeCustomModelName = useLocalStorageManualReset('settings/hearing/active-custom-model', '')
   const transcriptionModelSearchQuery = refManualReset<string>('')
-  const autoSendEnabled = useLocalStorageManualReset<boolean>('settings/hearing/auto-send-enabled', false)
-  const autoSendDelay = useLocalStorageManualReset<number>('settings/hearing/auto-send-delay', 2000) // Default 2 seconds
+  const autoSendEnabled = useLocalStorageManualReset<boolean>('settings/hearing/auto-send-enabled', true)
+  const autoSendDelay = useLocalStorageManualReset<number>('settings/hearing/auto-send-delay', 300)
   const confidenceThreshold = useLocalStorageManualReset<number>('settings/hearing/confidence-threshold', CONFIDENCE_THRESHOLD_DISABLED)
   const verboseJsonNotSupported = ref(false)
 
@@ -195,7 +198,6 @@ export const useHearingStore = defineStore('hearing-store', () => {
     const features = providersStore.getTranscriptionFeatures(providerId)
     const streamExecutor = STREAM_TRANSCRIPTION_EXECUTORS[providerId]
 
-    const { trackSttStarted, trackSttSucceeded, trackSttFailed } = useAnalytics()
     const sttStartedAt = performance.now()
     trackSttStarted(providerId)
 
@@ -480,15 +482,17 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
 
     try {
       const reason = new DOMException(abort ? 'Aborted' : 'Stopped', 'AbortError')
-      // Ensure provider transports (e.g., Aliyun NLS) are signaled to stop over websocket.
-      if (!session.abortController.signal.aborted) {
-        session.abortController.abort(reason)
-      }
 
-      if (abort)
+      if (abort) {
+        if (!session.abortController.signal.aborted)
+          session.abortController.abort(reason)
         session.audioStreamController?.error(reason)
-      else
+      }
+      else {
+        // Normal sentence end: close the PCM stream so provider transports can send
+        // a finish-task frame and return the final text instead of being interrupted.
         session.audioStreamController?.close()
+      }
     }
     catch {}
 

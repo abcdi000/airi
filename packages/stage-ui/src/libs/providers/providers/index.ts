@@ -33,6 +33,7 @@ import './mimo'
 import './cloudflare-workers-ai'
 import './azure-ai-foundry'
 import './official'
+import './qwen3-tts-local'
 
 export {
   getDefinedProvider,

@@ -9,6 +9,9 @@ import { CHAT_COMPLETIONS_VALIDATOR_ID, isModelProvider } from '../../libs/provi
 import { getValidatorsOfProvider, validateProvider } from '../../libs/providers/validators/run'
 
 function getCategoryFromTasks(tasks: string[]): ProviderMetadata['category'] {
+  if (tasks.some(task => ['vision', 'image-to-text', 'image-understanding', 'visual-question-answering', 'vqa'].includes(task.toLowerCase()))) {
+    return 'vision'
+  }
   if (tasks.some(task => ['speech-to-text', 'automatic-speech-recognition', 'asr', 'stt'].includes(task.toLowerCase()))) {
     return 'transcription'
   }
@@ -89,6 +92,13 @@ function appendUniqueReason(reasons: string[], next: string) {
     reasons.push(next)
 }
 
+function normalizeBaseUrl(value: unknown) {
+  let baseUrl = typeof value === 'string' ? value.trim() : ''
+  if (baseUrl && !baseUrl.endsWith('/'))
+    baseUrl += '/'
+  return baseUrl
+}
+
 export function convertProviderDefinitionToMetadata(
   definition: ProviderDefinition<any>,
   t: ComposerTranslation,
@@ -142,7 +152,7 @@ export function convertProviderDefinitionToMetadata(
               return mapModelsToMetadataModels(definition.id, models as any[])
             }
 
-            const baseUrl = typeof (config as any).baseUrl === 'string' ? (config as any).baseUrl.trim() : ''
+            const baseUrl = normalizeBaseUrl((config as any).baseUrl)
             const apiKey = typeof (config as any).apiKey === 'string' ? (config as any).apiKey.trim() : ''
             if (!baseUrl)
               return []

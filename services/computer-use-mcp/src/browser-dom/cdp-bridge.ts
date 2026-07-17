@@ -71,8 +71,19 @@ interface CdpResponse {
   error?: { code: number, message: string }
 }
 
+interface CdpEvent {
+  method: string
+  params?: Record<string, unknown>
+}
+
 interface PendingCdpRequest {
   resolve: (value: any) => void
+  reject: (error: Error) => void
+  timeoutId: NodeJS.Timeout
+}
+
+interface PendingCdpEvent {
+  resolve: (value: CdpEvent) => void
   reject: (error: Error) => void
   timeoutId: NodeJS.Timeout
 }
@@ -85,6 +96,13 @@ interface CdpTargetInfo {
   webSocketDebuggerUrl?: string
 }
 
+const NAVIGATION_ABORTED_RE = /ERR_ABORTED/i
+const ABORTED_NAVIGATION_SETTLE_MS = 500
+
+function delay(ms: number) {
+  return new Promise<void>(resolve => setTimeout(resolve, ms))
+}
+
 export class CdpBridge {
   private socket?: WebSocket
   private heartbeatTimer?: NodeJS.Timeout
@@ -92,6 +110,7 @@ export class CdpBridge {
   private consecutiveHeartbeatFailures = 0
   private nextId = 1
   private pending = new Map<number, PendingCdpRequest>()
+  private eventWaiters = new Map<string, Set<PendingCdpEvent>>()
   private status: CdpBridgeStatus
 
   constructor(private readonly config: CdpBridgeConfig) {
@@ -189,6 +208,7 @@ export class CdpBridge {
     })
 
     // Enable required CDP domains
+    await this.send('Page.enable', {})
     await this.send('Accessibility.enable', {})
     await this.send('DOM.enable', {})
     await this.send('Runtime.enable', {})
@@ -201,6 +221,7 @@ export class CdpBridge {
   async close(): Promise<void> {
     this.clearHeartbeat()
     this.rejectPendingRequests('CDP bridge closed')
+    this.rejectPendingEvents('CDP bridge closed')
     this.awaitingHeartbeatPong = false
     this.consecutiveHeartbeatFailures = 0
 
@@ -306,7 +327,38 @@ export class CdpBridge {
    * Navigate the current page to a URL.
    */
   async navigate(url: string): Promise<void> {
-    await this.send('Page.navigate', { url })
+    const loadWaiter = this.waitForEvent('Page.loadEventFired')
+    let loadError: unknown
+    const loadPromise = loadWaiter.promise.catch((error) => {
+      loadError = error
+    })
+    try {
+      const result = await this.send('Page.navigate', { url })
+      if (result.errorText) {
+        loadWaiter.cancel()
+        if (NAVIGATION_ABORTED_RE.test(String(result.errorText))) {
+          await delay(ABORTED_NAVIGATION_SETTLE_MS)
+          await this.refreshPageStatus()
+          return
+        }
+        throw new Error(`CDP navigation failed: ${result.errorText}`)
+      }
+
+      if (result.loaderId) {
+        await loadPromise
+        if (loadError)
+          throw loadError
+      }
+      else {
+        loadWaiter.cancel()
+      }
+
+      await this.refreshPageStatus()
+    }
+    catch (error) {
+      loadWaiter.cancel()
+      throw error
+    }
   }
 
   /**
@@ -397,13 +449,79 @@ export class CdpBridge {
     return lines.join('\n')
   }
 
+  private async refreshPageStatus() {
+    const pageInfo = await this.evaluate(`({ url: window.location.href, title: document.title })`)
+    if (pageInfo && typeof pageInfo === 'object') {
+      const record = pageInfo as { url?: unknown, title?: unknown }
+      this.status.pageUrl = typeof record.url === 'string' ? record.url : this.status.pageUrl
+      this.status.pageTitle = typeof record.title === 'string' ? record.title : this.status.pageTitle
+    }
+  }
+
+  private waitForEvent(method: string) {
+    const timeoutMs = this.config.requestTimeoutMs
+    let waiter: PendingCdpEvent | undefined
+    const promise = new Promise<CdpEvent>((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        if (waiter)
+          this.removeEventWaiter(method, waiter)
+        reject(new Error(`CDP event ${method} timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+
+      waiter = { resolve, reject, timeoutId }
+      const waiters = this.eventWaiters.get(method) ?? new Set<PendingCdpEvent>()
+      waiters.add(waiter)
+      this.eventWaiters.set(method, waiters)
+    })
+
+    return {
+      promise,
+      cancel: () => {
+        if (!waiter)
+          return
+        clearTimeout(waiter.timeoutId)
+        this.removeEventWaiter(method, waiter)
+        waiter = undefined
+      },
+    }
+  }
+
+  private removeEventWaiter(method: string, waiter: PendingCdpEvent) {
+    const waiters = this.eventWaiters.get(method)
+    if (!waiters)
+      return
+
+    waiters.delete(waiter)
+    if (waiters.size === 0)
+      this.eventWaiters.delete(method)
+  }
+
+  private resolveEventWaiters(event: CdpEvent) {
+    const waiters = this.eventWaiters.get(event.method)
+    if (!waiters)
+      return
+
+    this.eventWaiters.delete(event.method)
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timeoutId)
+      waiter.resolve(event)
+    }
+  }
+
   private handleMessage(raw: any) {
-    let data: CdpResponse | undefined
+    let data: (CdpResponse & Partial<CdpEvent>) | undefined
     try {
-      data = JSON.parse(String(raw)) as CdpResponse
+      data = JSON.parse(String(raw)) as CdpResponse & Partial<CdpEvent>
     }
     catch {
       return
+    }
+
+    if (data && typeof data.method === 'string') {
+      this.resolveEventWaiters({
+        method: data.method,
+        params: data.params,
+      })
     }
 
     if (!data || typeof data.id !== 'number')
@@ -477,6 +595,7 @@ export class CdpBridge {
     this.status.lastError = reason ?? `CDP heartbeat failed after ${failureLimit} consecutive missed pongs`
     this.clearHeartbeat()
     this.rejectPendingRequests(this.status.lastError)
+    this.rejectPendingEvents(this.status.lastError)
 
     const socket = this.socket
     this.socket = undefined
@@ -490,6 +609,7 @@ export class CdpBridge {
     this.status.lastError = reason
     this.clearHeartbeat()
     this.rejectPendingRequests(reason)
+    this.rejectPendingEvents(reason)
     this.socket = undefined
     this.status.connected = false
     this.awaitingHeartbeatPong = false
@@ -502,5 +622,15 @@ export class CdpBridge {
       pending.reject(new Error(`${reason} before completing request ${id}`))
     }
     this.pending.clear()
+  }
+
+  private rejectPendingEvents(reason: string) {
+    for (const waiters of this.eventWaiters.values()) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timeoutId)
+        waiter.reject(new Error(`${reason} before receiving CDP event`))
+      }
+    }
+    this.eventWaiters.clear()
   }
 }

@@ -5,8 +5,12 @@ import { cwd, env, platform } from 'node:process'
 
 const defaultDeniedApps = [
   '1password',
+  'bitwarden',
+  'keepass',
   'keychain',
   'system settings',
+  'settings',
+  'windows security',
   'activity monitor',
   'airi',
 ]
@@ -33,6 +37,10 @@ function resolveDefaultOpenableApps(executor: ExecutorKind, hostPlatform: NodeJS
 
   if (executor === 'macos-local') {
     return defaultOpenableApps
+  }
+
+  if (executor === 'windows-local') {
+    return ['Windows Terminal', 'Visual Studio Code', 'Google Chrome', 'QQ']
   }
 
   if (hostPlatform === 'darwin') {
@@ -106,7 +114,7 @@ function parseBounds(value: string | undefined): Bounds | undefined {
 }
 
 function parseExecutor(value: string | undefined): ExecutorKind {
-  if (value === 'linux-x11' || value === 'macos-local')
+  if (value === 'linux-x11' || value === 'macos-local' || value === 'windows-local')
     return value
   return 'dry-run'
 }
@@ -210,6 +218,8 @@ export function resolveComputerUseConfig(): ComputerUseConfig {
         ? `${launchHostProcess} -> ssh -> remote desktop-runner`
         : executor === 'macos-local'
           ? `${launchHostProcess} -> swift/quartz + open`
+          : executor === 'windows-local'
+            ? `${launchHostProcess} -> Windows UI Automation + SendInput`
           : `${launchHostProcess} -> local dry-run`),
     requireSessionTagForMutatingActions,
     requireAllowedBoundsForMutatingActions,

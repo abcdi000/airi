@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useChatMaintenanceStore } from '@proj-airi/stage-ui/stores/chat/maintenance'
+import { useLumiAgentStore } from '@proj-airi/stage-ui/stores/lumi-agent'
 import { useTheme } from '@proj-airi/ui'
 import { ref } from 'vue'
 
@@ -8,6 +9,7 @@ import ViewControls from '../Layouts/InteractiveArea/Actions/ViewControls.vue'
 import { BackgroundDialogPicker } from '../Backgrounds'
 
 const { cleanupMessages } = useChatMaintenanceStore()
+const lumiAgentStore = useLumiAgentStore()
 const { isDark, toggleDark } = useTheme()
 
 const backgroundDialogOpen = ref(false)
@@ -17,6 +19,17 @@ const backgroundDialogOpen = ref(false)
   <BackgroundDialogPicker v-model="backgroundDialogOpen" />
   <div absolute bottom--8 right-0 flex gap-2>
     <ViewControls />
+    <button
+      class="max-h-[10lh] min-h-[1lh]"
+      bg="neutral-100 dark:neutral-800"
+      text="lg neutral-500 dark:neutral-400"
+      flex items-center justify-center rounded-md p-2 outline-none
+      transition-colors transition-transform active:scale-95
+      title="Claude Code 任务"
+      @click="lumiAgentStore.openTaskWindow()"
+    >
+      <div class="i-solar:archive-bold-duotone" />
+    </button>
     <button
       class="max-h-[10lh] min-h-[1lh]"
       bg="neutral-100 dark:neutral-800"

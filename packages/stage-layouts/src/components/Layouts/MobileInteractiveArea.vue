@@ -5,17 +5,19 @@ import type { ChatProvider } from '@xsai-ext/providers/utils'
 import { isStageTamagotchi } from '@proj-airi/stage-shared'
 import { useThreeViewControl } from '@proj-airi/stage-ui-three'
 import { ChatHistory, HearingConfigDialog } from '@proj-airi/stage-ui/components'
-import { ChatSessionsDrawer } from '@proj-airi/stage-ui/components/scenarios/chat'
+import { ChatSessionsDrawer, ChatTtsDebugPanel } from '@proj-airi/stage-ui/components/scenarios/chat'
 import { useAudioAnalyzer } from '@proj-airi/stage-ui/composables'
 import { useAudioContext } from '@proj-airi/stage-ui/stores/audio'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatMaintenanceStore } from '@proj-airi/stage-ui/stores/chat/maintenance'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
 import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store'
+import { useLumiAgentStore } from '@proj-airi/stage-ui/stores/lumi-agent'
 import { useL2dViewControl } from '@proj-airi/stage-ui/stores/live2d'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
 import { useSettings, useSettingsAudioDevice } from '@proj-airi/stage-ui/stores/settings'
+import { useTtsDebugStore } from '@proj-airi/stage-ui/stores/tts-debug'
 import { BasicTextarea, useTheme } from '@proj-airi/ui'
 import { useResizeObserver, useScreenSafeArea } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
@@ -34,11 +36,13 @@ const { isDark, toggleDark } = useTheme()
 const chatOrchestrator = useChatOrchestratorStore()
 const chatSession = useChatSessionStore()
 const chatStream = useChatStreamStore()
+const lumiAgentStore = useLumiAgentStore()
+const ttsDebugStore = useTtsDebugStore()
 const { cleanupMessages } = useChatMaintenanceStore()
-const { messages } = storeToRefs(chatSession)
+const { messages, visibleMessages, visibleMessageStartIndex } = storeToRefs(chatSession)
 const { streamingMessage } = storeToRefs(chatStream)
 const { sending } = storeToRefs(chatOrchestrator)
-const historyMessages = computed(() => messages.value as unknown as ChatHistoryItem[])
+const historyMessages = computed(() => visibleMessages.value as unknown as ChatHistoryItem[])
 
 function handleDeleteMessage(index: number) {
   messages.value = messages.value.filter((_, messageIndex) => messageIndex !== index)
@@ -77,6 +81,7 @@ const { isListening, startStreamingTranscription, stopStreamingTranscription } =
   },
 )
 const toggleTranscription = () => isListening.value ? stopStreamingTranscription() : startStreamingTranscription()
+const toggleTtsDebugPanel = () => ttsDebugStore.togglePanel()
 
 async function handleSubmit() {
   if (!isMobileDevice()) {
@@ -158,6 +163,7 @@ onMounted(() => {
           v-if="!threeViewCtrlEnabled && !l2dViewCtrlEnabled"
           variant="mobile"
           :messages="historyMessages"
+          :base-index="visibleMessageStartIndex"
           :sending="sending"
           :streaming-message="streamingMessage"
           max-w="[calc(100%-3.5rem)]"
@@ -179,6 +185,15 @@ onMounted(() => {
       <div translate-y="[-100%]" absolute right-0 px-3 pb-3 font-sans>
         <div flex="~ col" gap-1>
           <ActionAbout />
+          <button
+            border="2 solid neutral-100/60 dark:neutral-800/30"
+            :class="ttsDebugStore.enabled ? 'bg-cyan-500/20 text-cyan-700 dark:text-cyan-200' : 'bg-neutral-50/70 dark:bg-neutral-800/70'"
+            w-fit flex items-center self-end justify-center rounded-xl p-2 backdrop-blur-md
+            title="TTS 调试"
+            @click="toggleTtsDebugPanel"
+          >
+            <div i-solar:soundwave-bold-duotone size-5 />
+          </button>
           <button
             border="2 solid neutral-100/60 dark:neutral-800/30"
             bg="neutral-50/70 dark:neutral-800/70"
@@ -222,6 +237,9 @@ onMounted(() => {
           <RouterLink to="/settings" border="2 solid neutral-100/60 dark:neutral-800/30" bg="neutral-50/70 dark:neutral-800/70" w-fit flex items-center self-end justify-center rounded-xl p-2 backdrop-blur-md title="Settings">
             <div i-solar:settings-outline size-5 text="neutral-500 dark:neutral-400" />
           </RouterLink>
+          <button border="2 solid neutral-100/60 dark:neutral-800/30" bg="neutral-50/70 dark:neutral-800/70" w-fit flex items-center self-end justify-center rounded-xl p-2 backdrop-blur-md title="Claude Code 任务" @click="lumiAgentStore.openTaskWindow()">
+            <div i-solar:archive-bold-duotone size-5 text="neutral-500 dark:neutral-400" />
+          </button>
           <!-- <button border="2 solid neutral-100/60 dark:neutral-800/30" bg="neutral-50/70 dark:neutral-800/70" w-fit flex items-center self-end justify-center rounded-xl p-2 backdrop-blur-md title="Model">
             <div i-solar:face-scan-circle-outline size-5 text="neutral-500 dark:neutral-400" />
           </button> -->
@@ -237,7 +255,8 @@ onMounted(() => {
           <ViewControls />
         </div>
       </div>
-      <div bg="white dark:neutral-800" max-h-100dvh max-w-100dvw w-full flex gap-1 overflow-auto px-3 pt-2 :style="{ paddingBottom: `${Math.max(Number.parseFloat(screenSafeArea.bottom.value.replace('px', '')), 12)}px` }">
+      <div relative bg="white dark:neutral-800" max-h-100dvh max-w-100dvw w-full flex gap-1 overflow-auto px-3 pt-2 :style="{ paddingBottom: `${Math.max(Number.parseFloat(screenSafeArea.bottom.value.replace('px', '')), 12)}px` }">
+        <ChatTtsDebugPanel />
         <BasicTextarea
           v-model="messageInput"
           :placeholder="t('stage.message')"

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Live2DLipSync, Live2DLipSyncOptions } from '@proj-airi/model-driver-lipsync'
 import type { Profile } from '@proj-airi/model-driver-lipsync/shared/wlipsync'
-import type { SpeechProviderWithExtraOptions } from '@xsai-ext/providers/utils'
+import type { ChatProvider, SpeechProviderWithExtraOptions } from '@xsai-ext/providers/utils'
 import type { UnElevenLabsOptions } from 'unspeech'
 
 import type { EmotionPayload } from '../../constants/emotions'
@@ -22,6 +22,7 @@ import { useBroadcastChannel } from '@vueuse/core'
 // import embedWorkerURL from '@xsai-transformers/embed/worker?worker&url'
 // import { embed } from '@xsai/embed'
 import { generateSpeech } from '@xsai/generate-speech'
+import { generateText } from '@xsai/generate-text'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
@@ -39,10 +40,12 @@ import { useBackgroundStore } from '../../stores/background'
 import { useChatOrchestratorStore } from '../../stores/chat'
 import { useLlmStreamingControlStore } from '../../stores/llm-streaming-control'
 import { useAiriCardStore } from '../../stores/modules'
+import { useConsciousnessStore } from '../../stores/modules/consciousness'
 import { useSpeechStore } from '../../stores/modules/speech'
 import { useProvidersStore } from '../../stores/providers'
 import { useSettings } from '../../stores/settings'
 import { useSpeechRuntimeStore } from '../../stores/speech-runtime'
+import { useTtsDebugStore } from '../../stores/tts-debug'
 
 const props = withDefaults(defineProps<{
   cursorPosition?: { x: number, y: number }
@@ -125,12 +128,18 @@ const lipSyncStarted = ref(false)
 const lipSyncLoopId = ref<number>()
 const live2dLipSync = ref<Live2DLipSync>()
 const live2dLipSyncOptions: Live2DLipSyncOptions = { mouthUpdateIntervalMs: 50, mouthLerpWindowMs: 50 }
+let lipSyncSetupPromise: Promise<void> | undefined
 
 const { activeCard } = storeToRefs(useAiriCardStore())
 const speechStore = useSpeechStore()
-const { ssmlEnabled, activeSpeechProvider, activeSpeechModel, activeSpeechVoice, pitch } = storeToRefs(speechStore)
+const { ssmlEnabled, activeSpeechProvider, activeSpeechModel, activeSpeechVoice, pitch, normalizedPlaybackVolume } = storeToRefs(speechStore)
+const {
+  activeProvider: activeConsciousnessProvider,
+  activeModel: activeConsciousnessModel,
+} = storeToRefs(useConsciousnessStore())
 const activeCardId = computed(() => activeCard.value?.name ?? 'default')
 const speechRuntimeStore = useSpeechRuntimeStore()
+const ttsDebugStore = useTtsDebugStore()
 const backgroundStore = useBackgroundStore()
 const { activeBackgroundUrl } = storeToRefs(backgroundStore)
 
@@ -226,6 +235,28 @@ async function playSpecialToken(
   })
 }
 const lipSyncNode = ref<AudioNode>()
+let speechOutputGainNode: GainNode | undefined
+
+function getSpeechOutputGainNode() {
+  if (!speechOutputGainNode) {
+    speechOutputGainNode = audioContext.createGain()
+    speechOutputGainNode.gain.value = normalizedPlaybackVolume.value
+    speechOutputGainNode.connect(audioContext.destination)
+  }
+  return speechOutputGainNode
+}
+
+watch(normalizedPlaybackVolume, (value) => {
+  if (!speechOutputGainNode)
+    return
+
+  try {
+    speechOutputGainNode.gain.setTargetAtTime(value, audioContext.currentTime, 0.02)
+  }
+  catch {
+    speechOutputGainNode.gain.value = value
+  }
+})
 
 async function playFunction(item: Parameters<Parameters<typeof createPlaybackManager<AudioBuffer>>[0]['play']>[0], signal: AbortSignal): Promise<void> {
   if (!audioContext || !item.audio)
@@ -252,7 +283,7 @@ async function playFunction(item: Parameters<Parameters<typeof createPlaybackMan
   currentAudioSource.value = source
   source.buffer = item.audio
 
-  source.connect(audioContext.destination)
+  source.connect(getSpeechOutputGainNode())
   if (audioAnalyser.value)
     source.connect(audioAnalyser.value)
   if (lipSyncNode.value)
@@ -305,6 +336,161 @@ const playbackManager = createPlaybackManager<AudioBuffer>({
   overflowPolicy: 'queue',
   ownerOverflowPolicy: 'steal-oldest',
 })
+
+let mimoSpeechBuffer = ''
+let mimoSpeechGeneration = 0
+
+function isMimoSpeechActive() {
+  return activeSpeechProvider.value === 'mimo-audio-speech'
+}
+
+function isQwen3LocalSpeechActive() {
+  return activeSpeechProvider.value === 'qwen3-tts-local'
+}
+
+function isMimoProviderConfiguredVoiceModel(model: string | undefined) {
+  return model === 'mimo-v2.5-tts-voiceclone' || model === 'mimo-v2.5-tts-voicedesign'
+}
+
+function stripMimoTtsControlTags(text: string) {
+  return text
+    .replace(/(^|\s)[[(（][A-Za-z\u4E00-\u9FFF][A-Za-z\u4E00-\u9FFF\s,，。.!！?？-]{0,30}[\])）]/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+function cleanupMimoTtsMarkupOutput(text: string) {
+  const trimmed = text.trim()
+  const fenceMatch = trimmed.match(/^```(?:text|txt|markdown)?\s*([\s\S]*?)\s*```$/i)
+  return (fenceMatch?.[1] ?? trimmed)
+    .replace(/^\s*(?:assistant|tts|语音文本|发声文本)\s*[:：]\s*/i, '')
+    .trim()
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+  })
+
+  try {
+    return await Promise.race([promise, timeout])
+  }
+  finally {
+    if (timeoutId)
+      clearTimeout(timeoutId)
+  }
+}
+
+async function prepareMimoSpeechTextForTts(text: string) {
+  const source = text.trim()
+  if (!source)
+    return source
+
+  // Keep MiMo low-latency: synthesize the final chat text directly without a second consciousness-model rewrite.
+  return source
+
+  const providerId = activeConsciousnessProvider.value
+  const modelId = activeConsciousnessModel.value
+  if (!providerId || !modelId)
+    return source
+
+  try {
+    const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
+    if (!chatProvider)
+      return source
+
+    const response = await withTimeout(generateText({
+      ...chatProvider.chat(modelId),
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'You are a private Xiaomi MiMo v2.5 TTS markup adapter.',
+            'Rewrite the assistant reply into the exact text that should be synthesized.',
+            'Preserve meaning, language, intimacy, boundaries, and factual content. Do not add new information.',
+            'Add MiMo audio/emotion tags only when they help the voice, such as (Calm), (Happy), (Sad), (Wronged), (Amazed), (Excited), (Sighing), (Breathing).',
+            'Use tags sparingly: usually 0-2 tags, never more than 3.',
+            'Do not output explanations, JSON, markdown fences, labels, hidden thoughts, or analysis.',
+            'The returned text is for TTS only and will not be shown in chat.',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: `Original assistant reply:\n${source}`,
+        },
+      ],
+      headers: { 'Accept-Encoding': 'identity' },
+    }), 12000, 'MiMo TTS markup')
+
+    const prepared = cleanupMimoTtsMarkupOutput(response.text || '')
+    if (!prepared)
+      return source
+
+    return prepared.slice(0, Math.max(source.length * 2, 8000))
+  }
+  catch (error) {
+    console.warn('[Speech Pipeline] MiMo TTS markup adapter failed; using original text', error)
+    return source
+  }
+}
+
+async function synthesizeMimoSpeechAsSingleUtterance(text: string, generation: number) {
+  const source = text.trim()
+  if (!source || generation !== mimoSpeechGeneration)
+    return
+
+  const providerId = activeSpeechProvider.value
+  const model = activeSpeechModel.value
+  if (providerId !== 'mimo-audio-speech' || !model)
+    return
+
+  try {
+    const provider = await providersStore.getProviderInstance(providerId) as SpeechProviderWithExtraOptions<string, UnElevenLabsOptions> | undefined
+    if (!provider)
+      return
+
+    const providerConfig = providersStore.getProviderConfig(providerId)
+    const voiceId = isMimoProviderConfiguredVoiceModel(model)
+      ? ''
+      : activeSpeechVoice.value?.id || (providerConfig?.voice as string | undefined) || 'mimo_default'
+
+    if (!isMimoProviderConfiguredVoiceModel(model) && !voiceId)
+      return
+
+    const res = await generateSpeech({
+      ...provider.speech(model, providerConfig),
+      input: source,
+      voice: voiceId,
+    })
+
+    if (generation !== mimoSpeechGeneration || !res || res.byteLength === 0)
+      return
+
+    const audioBuffer = await audioContext.decodeAudioData(res)
+    const intentId = `mimo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    playbackManager.schedule({
+      id: `${intentId}-0`,
+      streamId: intentId,
+      intentId,
+      segmentId: `${intentId}-0`,
+      sequence: 0,
+      ownerId: activeCardId.value,
+      priority: 0,
+      text: source,
+      special: null,
+      audio: audioBuffer,
+      createdAt: Date.now(),
+    })
+  }
+  catch (error) {
+    console.error('[Speech Pipeline] MiMo single-utterance synthesis failed', {
+      provider: providerId,
+      model,
+      error,
+    })
+  }
+}
 
 const speechPipeline = createSpeechPipeline<AudioBuffer>({
   tts: async (request, signal) => {
@@ -387,10 +573,15 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
       }
     }
 
-    if (!model || !voice)
+    const usesProviderConfiguredVoice = activeSpeechProvider.value === 'mimo-audio-speech' && isMimoProviderConfiguredVoiceModel(model)
+      || activeSpeechProvider.value === 'alibaba-cloud-model-studio'
+      && (model === 'cosyvoice-v3.5-flash' || model === 'cosyvoice-v3.5-plus')
+      && typeof providerConfig?.customVoiceId === 'string'
+      && providerConfig.customVoiceId.trim().length > 0
+    if (!model || (!voice && !usesProviderConfiguredVoice))
       return null
 
-    const input = ssmlEnabled.value
+    const input = ssmlEnabled.value && voice
       ? speechStore.generateSSML(request.text, voice, { ...providerConfig, pitch: pitch.value })
       : request.text
 
@@ -401,7 +592,11 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
       const res = await generateSpeech({
         ...provider.speech(model, providerConfig),
         input,
-        voice: voice.id,
+        voice: usesProviderConfiguredVoice
+          ? activeSpeechProvider.value === 'alibaba-cloud-model-studio'
+            ? providerConfig?.customVoiceId as string
+            : ''
+          : voice!.id,
       })
 
       if (signal.aborted || !res || res.byteLength === 0)
@@ -459,23 +654,39 @@ playbackManager.onEnd(() => {
 })
 
 playbackManager.onStart(({ item }) => {
+  ttsDebugStore.markPlaybackStart(item)
   nowSpeaking.value = true
+  const captionText = isMimoSpeechActive()
+    ? stripMimoTtsControlTags(item.text)
+    : item.text
   // NOTICE: postCaption and postPresent may throw errors if the BroadcastChannel is closed
   // (e.g., when navigating away from the page). We wrap these in try-catch to prevent
   // breaking playback when the channel is unavailable.
-  assistantCaption.value += ` ${item.text}`
+  assistantCaption.value += ` ${captionText}`
   try {
-    postCaption({ type: 'caption-assistant', text: item.text })
+    postCaption({ type: 'caption-assistant', text: captionText })
   }
   catch {
     // BroadcastChannel may be closed - don't break playback
   }
   try {
-    postPresent({ type: 'assistant-append', text: item.text })
+    postPresent({ type: 'assistant-append', text: captionText })
   }
   catch {
     // BroadcastChannel may be closed - don't break playback
   }
+})
+
+playbackManager.onEnd(({ item }) => {
+  ttsDebugStore.markPlaybackEnd(item)
+})
+
+playbackManager.onInterrupt(({ item, reason }) => {
+  ttsDebugStore.markPlaybackInterrupted(item, reason)
+})
+
+playbackManager.onReject(({ item, reason }) => {
+  ttsDebugStore.markPlaybackInterrupted(item, reason)
 })
 
 function startLipSyncLoop() {
@@ -536,7 +747,16 @@ async function setupLipSync() {
 
   if (lipSyncStarted.value)
     return
+  if (lipSyncSetupPromise)
+    return lipSyncSetupPromise
 
+  lipSyncSetupPromise = setupLipSyncInner().finally(() => {
+    lipSyncSetupPromise = undefined
+  })
+  return lipSyncSetupPromise
+}
+
+async function setupLipSyncInner() {
   try {
     const lipSync = await createLive2DLipSync(audioContext, wlipsyncProfile as Profile, live2dLipSyncOptions)
     live2dLipSync.value = lipSync
@@ -565,6 +785,39 @@ function setupAnalyser() {
 // decision point. See `packages/stage-ui/src/libs/speech/tts-session.ts`.
 let currentSession: StageTtsSession | null = null
 
+function buildQwen3HybridSnapshot(providerConfig: Record<string, unknown> | undefined): StreamingSessionSnapshot['hybrid'] | undefined {
+  if (providerConfig?.hybridEnabled !== true)
+    return undefined
+
+  const cloudProviderId = typeof providerConfig.hybridCloudProviderId === 'string'
+    ? providerConfig.hybridCloudProviderId
+    : 'mimo-audio-speech'
+  if (!cloudProviderId || cloudProviderId === 'qwen3-tts-local' || cloudProviderId === 'speech-noop')
+    return undefined
+
+  const cloudConfig = providersStore.getProviderConfig(cloudProviderId)
+  if (!cloudConfig)
+    return undefined
+
+  return {
+    enabled: true,
+    cloudProviderId,
+    cloudConfig: { ...cloudConfig },
+    firstSegmentMinChars: providerConfig.hybridFirstSegmentMinChars as number | undefined,
+    segmentMinChars: providerConfig.hybridSegmentMinChars as number | undefined,
+    localMaxChars: providerConfig.hybridLocalMaxChars as number | undefined,
+    cloudMaxChars: providerConfig.hybridCloudMaxChars as number | undefined,
+    cloudMinChars: providerConfig.hybridCloudMinChars as number | undefined,
+    cloudMinIntervalMs: providerConfig.hybridCloudMinIntervalMs as number | undefined,
+    cloudSoftRpm: providerConfig.hybridCloudSoftRpm as number | undefined,
+    cloudMaxRetries: providerConfig.hybridCloudMaxRetries as number | undefined,
+    cloudInitialRetryDelayMs: providerConfig.hybridCloudInitialRetryDelayMs as number | undefined,
+    cloudCooldownMs: providerConfig.hybridCloudCooldownMs as number | undefined,
+    cloudRequestTimeoutMs: providerConfig.hybridCloudRequestTimeoutMs as number | undefined,
+    debug: providerConfig.hybridDebug === true,
+  }
+}
+
 function buildStreamingSnapshot(): StreamingSessionSnapshot | null {
   // Snapshotted once per session, so a mid-session provider/voice swap
   // does not corrupt an in-flight session — the watcher below detects
@@ -572,9 +825,38 @@ function buildStreamingSnapshot(): StreamingSessionSnapshot | null {
   // can't be opened (no voice picked, no audioContext, no model);
   // `createStageTtsSession` falls back to the segmenter adapter in that
   // case, which is the right behaviour for the rest of the providers too.
-  const voiceId = activeSpeechVoice.value?.id
+  const providerConfig = providersStore.getProviderConfig(activeSpeechProvider.value)
+  const voiceId = activeSpeechVoice.value?.id || (isQwen3LocalSpeechActive() ? (providerConfig?.voiceId as string | undefined) || 'lumi_clone' : '')
   if (!voiceId)
     return null
+
+  if (isQwen3LocalSpeechActive()) {
+    const baseUrl = typeof providerConfig?.baseUrl === 'string' && providerConfig.baseUrl.trim()
+      ? providerConfig.baseUrl.trim()
+      : 'http://127.0.0.1:8766/v1/'
+    const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+    return {
+      model: (activeSpeechModel.value as string | undefined) || (providerConfig?.model as string | undefined) || 'Qwen/Qwen3-TTS-12Hz-0.6B-Base',
+      voice: voiceId,
+      serverUrl: normalizedBaseUrl,
+      wsPath: 'audio/speech/ws',
+      requiresAuth: false,
+      responseFormat: 'wav',
+      bufferEntireSession: false,
+      extraBody: {
+        language: providerConfig?.language || 'Chinese',
+        ref_audio: providerConfig?.refAudioPath || providerConfig?.refAudio || '',
+        ref_text: providerConfig?.refText || '',
+        speaker: providerConfig?.speaker || 'Serena',
+        x_vector_only_mode: providerConfig?.xVectorOnlyMode === true,
+      },
+      hybrid: buildQwen3HybridSnapshot(providerConfig),
+      onDebug: event => ttsDebugStore.recordEvent(event),
+      ownerId: activeCardId.value,
+      onImmediateSpecial: playSpecialToken,
+    }
+  }
+
   const sessionModel = (activeSpeechModel.value as string | undefined) || 'volcengine/seed-tts-2.0'
   const apiResourceId = sessionModel.includes('/') ? sessionModel.split('/', 2)[1] : 'seed-tts-2.0'
   // TTS 2.0 / ICL 2.0 ship subtitles asynchronously relative to audio
@@ -589,6 +871,7 @@ function buildStreamingSnapshot(): StreamingSessionSnapshot | null {
       api_resource_id: apiResourceId,
       audio: { sample_rate: 24000, bit_rate: 64000 },
     },
+    onDebug: event => ttsDebugStore.recordEvent(event),
     ownerId: activeCardId.value,
     onImmediateSpecial: playSpecialToken,
   }
@@ -636,9 +919,11 @@ function openTtsSession(): StageTtsSession {
 
 chatHookCleanups.push(onBeforeMessageComposed(async () => {
   playbackManager.stopAll('new-message')
+  mimoSpeechBuffer = ''
+  mimoSpeechGeneration += 1
 
   setupAnalyser()
-  await setupLipSync()
+  void setupLipSync()
   // Reset assistant caption for a new message
   assistantCaption.value = ''
   try {
@@ -657,7 +942,7 @@ chatHookCleanups.push(onBeforeMessageComposed(async () => {
   }
 
   currentSession?.cancel('new-message')
-  currentSession = openTtsSession()
+  currentSession = isMimoSpeechActive() ? null : openTtsSession()
 }))
 
 chatHookCleanups.push(onBeforeSend(async () => {
@@ -665,18 +950,40 @@ chatHookCleanups.push(onBeforeSend(async () => {
 }))
 
 chatHookCleanups.push(onTokenLiteral(async (literal) => {
+  if (isMimoSpeechActive()) {
+    mimoSpeechBuffer += literal
+    return
+  }
+
   currentSession?.appendText(literal)
 }))
 
 chatHookCleanups.push(onTokenSpecial(async (special) => {
+  if (isMimoSpeechActive())
+    return
+
   currentSession?.appendSpecial(special)
 }))
 
 chatHookCleanups.push(onStreamEnd(async () => {
+  if (isMimoSpeechActive())
+    return
+
   currentSession?.finishInput()
 }))
 
-chatHookCleanups.push(onAssistantResponseEnd(async (_message) => {
+chatHookCleanups.push(onAssistantResponseEnd(async (message) => {
+  if (isMimoSpeechActive()) {
+    const generation = mimoSpeechGeneration
+    const sourceText = (typeof message === 'string' ? message : mimoSpeechBuffer).trim() || mimoSpeechBuffer.trim()
+    const preparedText = await prepareMimoSpeechTextForTts(sourceText)
+    if (generation !== mimoSpeechGeneration)
+      return
+    await synthesizeMimoSpeechAsSingleUtterance(preparedText, generation)
+    mimoSpeechBuffer = ''
+    return
+  }
+
   currentSession?.end()
   // Streaming sessions null-out via the onDone hook; segmenter sessions
   // stay around until the next `onBeforeMessageComposed` cancels them

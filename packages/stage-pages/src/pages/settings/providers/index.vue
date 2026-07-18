@@ -142,6 +142,8 @@ const providerBlocks = computed(() => {
     .map((block) => {
       const filteredProviders = block.providersRef.value
         .filter((p: any) => {
+          if (p.id === 'speech-noop')
+            return false
           if (filterPricing.value !== 'all' && p.pricing !== filterPricing.value)
             return false
           if (filterDeployment.value !== 'all' && p.deployment !== filterDeployment.value)

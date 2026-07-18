@@ -30,7 +30,12 @@ import { useChatSyncStore } from '../stores/chat-sync'
 const router = useRouter()
 const messageInput = ref('')
 const lastEnterTime = ref(0)
-type ImageAttachment = { type: 'image', data: string, mimeType: string, url: string }
+interface ImageAttachment {
+  data: string
+  mimeType: string
+  type: 'image'
+  url: string
+}
 const attachments = ref<ImageAttachment[]>([])
 
 const chatOrchestrator = useChatOrchestratorStore()
@@ -50,6 +55,7 @@ const { activeCardId, activeCard } = storeToRefs(airiCardStore)
 const { t } = useI18n()
 const { openImagePreview } = journalPreviewStore
 const isComposing = ref(false)
+const sessionsDrawerOpen = defineModel<boolean>('sessionsDrawerOpen', { default: false })
 const DOUBLE_ENTER_INTERVAL_MS = 300
 const TRAILING_NEWLINES_REGEX = /[\r\n]+$/
 const MAX_IMAGE_ATTACHMENTS = MAX_LUMI_EYES_CHAT_IMAGES
@@ -372,6 +378,19 @@ async function handleRetryMessage(index: number) {
       <ChatTtsDebugPanel />
 
       <div :class="['flex items-center justify-end gap-2 py-1']">
+        <button
+          class="max-h-[10lh] min-h-[1lh]"
+          bg="neutral-100 dark:neutral-800"
+          text="lg neutral-500 dark:neutral-400"
+          hover:text="primary-500 dark:primary-400"
+          flex items-center justify-center rounded-md p-2 outline-none
+          transition-colors transition-transform active:scale-95
+          :title="t('stage.chat.sessions.title')"
+          @click="sessionsDrawerOpen = true"
+        >
+          <div class="i-solar:chat-line-bold-duotone" />
+        </button>
+
         <button
           :class="[
             'max-h-[10lh] min-h-[1lh]',

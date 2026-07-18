@@ -426,6 +426,7 @@ pages:
       desktop:
         title: 重置桌面设置和状态
         description: 清除 AIRI 桌面设置和运行状态。
+        center: 将 AIRI 窗口移回屏幕中心
         reset: 重置桌面数据
     confirmations:
       tooltip: 您确定吗？
@@ -439,6 +440,7 @@ pages:
       modules_reset: 重置模块设置。
       providers_reset: 服务端设置重置。
       all_deleted: 已删除所有本地数据。
+      desktop_window_centered: AIRI 窗口已移回屏幕中心。
       desktop_reset: 桌面数据重置。
   models:
     description: 切换角色的 Live2D，VRM 模型
@@ -813,11 +815,11 @@ pages:
         request-timeout:
           label: 单次请求超时（毫秒）
           description: 留空使用默认值；长任务默认 60000。
-          placeholder: "60000"
+          placeholder: '60000'
         max-total-timeout:
           label: 总等待上限（毫秒）
           description: 留空使用默认值；长任务默认 180000。
-          placeholder: "180000"
+          placeholder: '180000'
         env:
           label: 环境变量
           description: 注入到子进程的环境变量。

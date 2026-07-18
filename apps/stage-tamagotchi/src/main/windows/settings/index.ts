@@ -32,6 +32,7 @@ export function setupSettingsWindowReusableFunc(params: {
   miniChatWindow: MiniChatWindowManager
   autoUpdater: AutoUpdater
   devtoolsWindow: DevtoolsWindowManager
+  getMainWindow?: () => BrowserWindow | undefined
   onWindowCreated?: (window: BrowserWindow) => void
   serverChannel: ServerChannel
   godotStageManager: GodotStageManager
@@ -74,6 +75,7 @@ export function setupSettingsWindowReusableFunc(params: {
       miniChatWindow: params.miniChatWindow,
       autoUpdater: params.autoUpdater,
       devtoolsWindow: params.devtoolsWindow,
+      getMainWindow: params.getMainWindow,
       serverChannel: params.serverChannel,
       godotStageManager: params.godotStageManager,
       mcpStdioManager: params.mcpStdioManager,

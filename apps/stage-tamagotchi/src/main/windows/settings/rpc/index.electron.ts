@@ -15,12 +15,18 @@ import { defineInvokeHandler } from '@moeru/eventa'
 import { createContext } from '@moeru/eventa/adapters/electron/main'
 import { ipcMain } from 'electron'
 
-import { electronOpenDevtoolsWindow, electronOpenMiniChat, electronOpenSettingsDevtools } from '../../../../shared/eventa'
+import {
+  electronCenterMainWindow,
+  electronOpenDevtoolsWindow,
+  electronOpenMiniChat,
+  electronOpenSettingsDevtools,
+} from '../../../../shared/eventa'
 import { createAuthService } from '../../../services/airi/auth'
 import { createGodotStageService } from '../../../services/airi/godot-stage'
 import { createMcpServersService } from '../../../services/airi/mcp-servers'
 import { createWidgetsService } from '../../../services/airi/widgets'
 import { createAutoUpdaterService } from '../../../services/electron'
+import { centerWindowOnDisplay } from '../../shared/display'
 import { setupBaseWindowElectronInvokes } from '../../shared/window'
 
 export async function setupSettingsWindowInvokes(params: {
@@ -29,6 +35,7 @@ export async function setupSettingsWindowInvokes(params: {
   miniChatWindow: MiniChatWindowManager
   autoUpdater: AutoUpdater
   devtoolsWindow: DevtoolsWindowManager
+  getMainWindow?: () => BrowserWindow | undefined
   serverChannel: ServerChannel
   godotStageManager: GodotStageManager
   mcpStdioManager: McpStdioManager
@@ -54,6 +61,7 @@ export async function setupSettingsWindowInvokes(params: {
   // Register the global shortcut service for the settings window.
   params.globalShortcut.registerWindow({ context, window: params.settingsWindow })
 
+  defineInvokeHandler(context, electronCenterMainWindow, () => centerWindowOnDisplay(params.getMainWindow?.()))
   defineInvokeHandler(context, electronOpenSettingsDevtools, async () => params.settingsWindow.webContents.openDevTools({ mode: 'detach' }))
   defineInvokeHandler(context, electronOpenMiniChat, async () => params.miniChatWindow.openWindow())
   defineInvokeHandler(context, electronOpenDevtoolsWindow, async (payload) => {

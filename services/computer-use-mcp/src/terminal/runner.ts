@@ -1,3 +1,5 @@
+import type { ChildProcess } from 'node:child_process'
+
 import type {
   ApprovalGrantScope,
   ComputerUseConfig,
@@ -7,10 +9,79 @@ import type {
   TerminalState,
 } from '../types'
 
-import { spawn } from 'node:child_process'
-import { env, cwd as processCwd } from 'node:process'
+import { spawn, spawnSync } from 'node:child_process'
+import { basename } from 'node:path'
+import { env, kill as killProcess, platform, cwd as processCwd } from 'node:process'
 
 export const TERMINAL_OUTPUT_MAX_CHARS = 16_384
+
+/**
+ * Grace period between SIGTERM and SIGKILL when reaping a timed-out command's
+ * process group. Mirrors the SIGTERM -> 5s -> SIGKILL escalation already used
+ * by the stage-tamagotchi desktop-overlay smoke harness.
+ */
+const PROCESS_GROUP_KILL_GRACE_MS = 5_000
+
+/**
+ * Signals the timed-out command's entire process group instead of only the
+ * shell process.
+ *
+ * The shell is spawned `detached`, which makes it a process-group leader on
+ * POSIX, so a negative PID reaches every descendant — including background
+ * grandchildren (`cmd &`, `nohup`, long-lived servers) that a bare
+ * `child.kill()` would leave orphaned when the command times out.
+ *
+ * Falls back to signalling just the shell process when group signalling is
+ * unavailable: the group already exited, or the platform has no POSIX process
+ * groups (e.g. Windows, where the detached child still receives the direct
+ * signal).
+ */
+function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals) {
+  const pid = child.pid
+  if (platform === 'win32' && pid != null) {
+    // NOTICE:
+    // Windows cannot signal a detached process group via negative PIDs.
+    // taskkill's `/T` flag is the native process-tree cleanup primitive that
+    // covers child processes spawned by PowerShell/cmd during terminal_exec.
+    // Source/context: `taskkill /?`; used only on timeout cleanup.
+    // Removal condition: Node exposes cross-platform process-tree termination.
+    spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+    return
+  }
+
+  if (pid != null) {
+    try {
+      killProcess(-pid, signal)
+      return
+    }
+    catch {
+      // group already gone, or pid is not a group leader — fall through
+    }
+  }
+
+  try {
+    child.kill(signal)
+  }
+  catch {
+    // process already exited
+  }
+}
+
+function shellArgsForCommand(shell: string, command: string): string[] {
+  const name = basename(shell).toLowerCase()
+
+  if (platform === 'win32') {
+    if (name === 'powershell.exe' || name === 'powershell' || name === 'pwsh.exe' || name === 'pwsh') {
+      return ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command]
+    }
+
+    if (name === 'cmd.exe' || name === 'cmd') {
+      return ['/d', '/s', '/c', command]
+    }
+  }
+
+  return ['-lc', command]
+}
 
 interface OutputCapture {
   value: string
@@ -84,16 +155,21 @@ export function createLocalShellRunner(config: ComputerUseConfig): TerminalRunne
 
       const startedAt = Date.now()
       const result = await new Promise<TerminalCommandResult>((resolve, reject) => {
-        const child = spawn(config.terminalShell, ['-lc', input.command], {
+        const child = spawn(config.terminalShell, shellArgsForCommand(config.terminalShell, input.command), {
           cwd: effectiveCwd,
           env,
           stdio: ['ignore', 'pipe', 'pipe'],
+          // POSIX needs a detached process-group leader for negative-PID
+          // cleanup. Windows keeps stdio pipes reliable without detaching and
+          // uses taskkill `/T` for timeout process-tree cleanup.
+          detached: platform !== 'win32',
         })
 
         const stdout = createOutputCapture()
         const stderr = createOutputCapture()
         let finished = false
         let timedOut = false
+        let escalationTimer: ReturnType<typeof setTimeout> | undefined
 
         const stopTimer = setTimeout(() => {
           if (finished)
@@ -101,7 +177,14 @@ export function createLocalShellRunner(config: ComputerUseConfig): TerminalRunne
 
           timedOut = true
           finished = true
-          child.kill('SIGTERM')
+
+          // Reap the command's whole process group, not just the shell, so
+          // background grandchildren don't outlive the timeout. Escalate to
+          // SIGKILL after a grace period if the group ignores SIGTERM.
+          signalProcessGroup(child, 'SIGTERM')
+          escalationTimer = setTimeout(signalProcessGroup, PROCESS_GROUP_KILL_GRACE_MS, child, 'SIGKILL')
+          escalationTimer.unref()
+
           const timeoutStderr = appendTimeoutMessage(stderr, timeoutMs)
           resolve({
             command: input.command,
@@ -118,7 +201,11 @@ export function createLocalShellRunner(config: ComputerUseConfig): TerminalRunne
           })
         }, timeoutMs)
 
-        const cleanup = () => clearTimeout(stopTimer)
+        const cleanup = () => {
+          clearTimeout(stopTimer)
+          if (escalationTimer != null)
+            clearTimeout(escalationTimer)
+        }
 
         child.stdout.on('data', (chunk) => {
           appendOutput(stdout, chunk.toString('utf-8'))
@@ -138,11 +225,13 @@ export function createLocalShellRunner(config: ComputerUseConfig): TerminalRunne
         })
 
         child.on('close', (code) => {
+          // Always clear pending timers, including the post-timeout SIGKILL
+          // escalation once the group has actually exited.
+          cleanup()
           if (finished)
             return
 
           finished = true
-          cleanup()
           resolve({
             command: input.command,
             stdout: stdout.value,

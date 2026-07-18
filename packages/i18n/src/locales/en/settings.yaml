@@ -445,6 +445,7 @@ pages:
       desktop:
         title: Reset desktop settings & states
         description: Clear AIRI desktop settings and runtime state.
+        center: Move desktop window to center
         reset: Reset desktop data
     confirmations:
       tooltip: Are you sure?
@@ -458,6 +459,7 @@ pages:
       modules_reset: Module settings reset.
       providers_reset: Provider settings reset.
       all_deleted: All local data deleted.
+      desktop_window_centered: Desktop window moved to screen center.
       desktop_reset: Desktop data reset.
   models:
     description: Live2D, VRM, etc.
@@ -832,7 +834,7 @@ pages:
           placeholder: e.g. /Users/you/project
         computer-use-interrupt-shortcut:
           label: Computer Use stop shortcut
-          description: "Global key that immediately stops the active Computer Use session. Default: End."
+          description: 'Global key that immediately stops the active Computer Use session. Default: End.'
         startup-mode:
           label: Startup mode
           description: Choose when AIRI should start and keep this MCP server alive.
@@ -849,11 +851,11 @@ pages:
         request-timeout:
           label: Request timeout (ms)
           description: Leave empty for the default. Long-running services default to 60000.
-          placeholder: "60000"
+          placeholder: '60000'
         max-total-timeout:
           label: Total wait limit (ms)
           description: Leave empty for the default. Long-running services default to 180000.
-          placeholder: "180000"
+          placeholder: '180000'
         env:
           label: Environment
           description: Vars passed to the child process.

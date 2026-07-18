@@ -13,7 +13,7 @@ import { electronApp, optimizer } from '@electron-toolkit/utils'
 import { Format, LogLevel, setGlobalFormat, setGlobalHookPostLog, setGlobalLogLevel, useLogg } from '@guiiai/logg'
 import { createContext } from '@moeru/eventa/adapters/electron/main'
 import { initScreenCaptureForMain } from '@proj-airi/electron-screen-capture/main'
-import { app, ipcMain } from 'electron'
+import { app, ipcMain, session } from 'electron'
 import { noop } from 'es-toolkit'
 import { createLoggLogger, injeca, lifecycle } from 'injeca'
 import { isLinux } from 'std-env'
@@ -37,6 +37,7 @@ import { setupPluginHost } from './services/airi/plugins'
 import { setupArtistryBridge } from './services/airi/widgets/artistry-bridge'
 import { setupAutoUpdater } from './services/electron/auto-updater'
 import { setupGlobalShortcutService } from './services/electron/global-shortcut'
+import { setupMediaPermissionHandlers } from './services/electron/media-permissions'
 import { setupTray } from './tray'
 import { setupAboutWindowReusable } from './windows/about'
 import { setupBeatSync } from './windows/beat-sync'
@@ -114,6 +115,8 @@ app.whenReady().then(async () => {
   if (!shouldStartMainProcess) {
     return
   }
+
+  setupMediaPermissionHandlers(session.defaultSession)
 
   // Initialize file logger and register the hook
   fileLogger = await setupFileLogger()
@@ -217,7 +220,11 @@ app.whenReady().then(async () => {
 
   const settingsWindow = injeca.provide('windows:settings', {
     dependsOn: { widgetsManager, miniChatWindow, beatSync, autoUpdater, devtoolsWindow: devtoolsMarkdownStressWindow, serverChannel, godotStageManager, mcpStdioManager, i18n, windowAuthManager, globalShortcut },
-    build: async ({ dependsOn }) => setupSettingsWindowReusableFunc(dependsOn),
+    build: async ({ dependsOn }) =>
+      setupSettingsWindowReusableFunc({
+        ...dependsOn,
+        getMainWindow: () => userFacingMainWindow,
+      }),
   })
 
   const mainWindow = injeca.provide('windows:main', {
@@ -334,12 +341,20 @@ async function handleAppExit() {
   skipFileLogging = true
   await logIfError('flush file logs', () => fileLogger.close()) // Ensure all logs are flushed
 
-  app.exit(exitedNormally ? 0 : 1)
+  if (!exitedNormally) {
+    app.exit(1)
+  }
+  else {
+    app.quit()
+  }
 }
 
 process.on('SIGINT', () => handleAppExit())
 
 app.on('before-quit', (event) => {
+  if (appExiting)
+    return
+
   event.preventDefault()
   handleAppExit()
 })

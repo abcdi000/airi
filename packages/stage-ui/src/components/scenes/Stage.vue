@@ -354,7 +354,7 @@ function isMimoProviderConfiguredVoiceModel(model: string | undefined) {
 
 function stripMimoTtsControlTags(text: string) {
   return text
-    .replace(/(^|\s)[[(（][A-Za-z\u4E00-\u9FFF][A-Za-z\u4E00-\u9FFF\s,，。.!！?？-]{0,30}[\])）]/g, '$1')
+    .replace(/(^|\s)[[(（][A-Z\u4E00-\u9FFF][A-Z\u4E00-\u9FFF\s,，。.!！?？-]{0,30}[\])）]/gi, '$1')
     .replace(/\s{2,}/g, ' ')
     .trim()
 }
@@ -888,7 +888,15 @@ function resolveSpeechTransport(providerId: string | null | undefined): SpeechTr
 }
 
 function openTtsSession(): StageTtsSession {
-  return createStageTtsSession<AudioBuffer>({
+  // A session must only clear the module-level `currentSession` if it IS that
+  // session. Other in-flight speech intents finishing later must not null a
+  // still-active chat session and drop the rest of the reply.
+  let session: StageTtsSession | null = null
+  const clearIfActive = () => {
+    if (session && currentSession === session && session.intentId.startsWith('stream-'))
+      currentSession = null
+  }
+  session = createStageTtsSession<AudioBuffer>({
     transport: resolveSpeechTransport(activeSpeechProvider.value),
     streaming: buildStreamingSnapshot,
     audioContext,
@@ -906,15 +914,18 @@ function openTtsSession(): StageTtsSession {
           model: activeSpeechModel.value,
           error: err,
         })
-        if (currentSession?.intentId.startsWith('stream-'))
-          currentSession = null
+        // Drop the failed session so no further audio is queued, but let the
+        // playback manager keep draining already-queued audio and emit its own
+        // terminal events. Calling resetSpeakingState() here would force the
+        // mouth shut while audio is still playing.
+        clearIfActive()
       },
       onDone: () => {
-        if (currentSession?.intentId.startsWith('stream-'))
-          currentSession = null
+        clearIfActive()
       },
     },
   })
+  return session
 }
 
 chatHookCleanups.push(onBeforeMessageComposed(async () => {

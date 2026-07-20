@@ -17,7 +17,7 @@ import type {
 
 import process, { env } from 'node:process'
 
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
@@ -404,6 +404,7 @@ function describeServerCommand(config: ElectronMcpStdioServerConfig) {
 const LUMI_EXEC_PATH_PLACEHOLDER = '$' + '{LUMI_EXEC_PATH}'
 const LUMI_APP_PATH_PLACEHOLDER = '$' + '{LUMI_APP_PATH}'
 const LUMI_RESOURCES_PATH_PLACEHOLDER = '$' + '{LUMI_RESOURCES_PATH}'
+const LUMI_USER_DATA_PATH_PLACEHOLDER = '$' + '{LUMI_USER_DATA_PATH}'
 
 function mcpRuntimePaths() {
   const appPath = app.getAppPath()
@@ -411,6 +412,7 @@ function mcpRuntimePaths() {
     appPath,
     execPath: process.execPath,
     resourcesPath: process.resourcesPath || resolve(appPath, '..'),
+    userDataPath: app.getPath('userData'),
   }
 }
 
@@ -429,6 +431,7 @@ function expandMcpRuntimePlaceholders(value: string) {
     .replaceAll(LUMI_EXEC_PATH_PLACEHOLDER, paths.execPath)
     .replaceAll(LUMI_APP_PATH_PLACEHOLDER, paths.appPath)
     .replaceAll(LUMI_RESOURCES_PATH_PLACEHOLDER, paths.resourcesPath)
+    .replaceAll(LUMI_USER_DATA_PATH_PLACEHOLDER, paths.userDataPath)
 }
 
 function expandMcpStringRecord(record: Record<string, string> | undefined) {
@@ -481,8 +484,26 @@ function resolveMcpWorkingDirectory(cwd: string | undefined) {
   if (!cwd)
     return undefined
 
-  if (isAbsolute(cwd))
-    return cwd
+  if (isAbsolute(cwd)) {
+    if (cwd.toLowerCase().endsWith('.asar'))
+      return app.getPath('userData')
+
+    try {
+      if (statSync(cwd).isDirectory())
+        return cwd
+
+      // NOTICE:
+      // Packaged Lumi reports app.getAppPath() as resources/app.asar. Older
+      // MCP presets used ${LUMI_APP_PATH} as cwd, which expands to that archive
+      // file and makes stdio child-process startup fail on Windows. Falling
+      // back to userData keeps already-saved presets working without requiring
+      // users to delete and recreate mcp.json entries.
+      return app.getPath('userData')
+    }
+    catch {
+      return cwd
+    }
+  }
 
   const appPath = app.getAppPath()
   const candidates = [
@@ -609,15 +630,19 @@ export function createMcpStdioManager(): McpStdioManager {
       name: `proj-airi:stage-tamagotchi:mcp:${name}`,
       version: app.getVersion(),
     })
+    const stderrChunks: string[] = []
+
+    getTransportStderr(transport)?.on('data', (data) => {
+      const text = data.toString('utf-8').trim()
+      if (!text)
+        return
+
+      stderrChunks.push(text)
+      log.withFields({ serverName: name }).warn(text)
+    })
 
     try {
       await client.connect(transport)
-      getTransportStderr(transport)?.on('data', (data) => {
-        const text = data.toString('utf-8').trim()
-        if (text) {
-          log.withFields({ serverName: name }).warn(text)
-        }
-      })
       sessions.set(name, { client, transport, config: resolvedConfig })
       setRuntimeStatus({
         name,
@@ -634,6 +659,10 @@ export function createMcpStdioManager(): McpStdioManager {
     }
     catch (error) {
       await transport.close().catch(() => {})
+      const stderr = stderrChunks.join('\n').trim().slice(-mcpTestStderrMaxChars)
+      if (stderr)
+        throw new Error(`${stringifyError(error)}\n\n${stderr}`)
+
       throw error
     }
   }

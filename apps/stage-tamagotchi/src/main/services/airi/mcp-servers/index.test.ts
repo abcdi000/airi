@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const LUMI_EXEC_PATH = '$' + '{LUMI_EXEC_PATH}'
 const LUMI_APP_PATH = '$' + '{LUMI_APP_PATH}'
+const LUMI_USER_DATA_PATH = '$' + '{LUMI_USER_DATA_PATH}'
 
 const appMock = vi.hoisted(() => ({
   getAppPath: vi.fn(),
@@ -296,7 +297,7 @@ describe('createMcpStdioManager', () => {
             ELECTRON_RUN_AS_NODE: '1',
             COMPUTER_USE_EXECUTOR: 'windows-local',
           },
-          cwd: LUMI_APP_PATH,
+          cwd: LUMI_USER_DATA_PATH,
           startupMode: 'on_startup',
           longRunning: true,
           persistent: true,
@@ -314,7 +315,36 @@ describe('createMcpStdioManager', () => {
         ELECTRON_RUN_AS_NODE: '1',
         COMPUTER_USE_EXECUTOR: 'windows-local',
       }),
-      cwd: 'C:\\Program Files\\Lumi\\resources\\app.asar',
+      cwd: userData,
+      stderr: 'pipe',
+    })
+  })
+
+  it('maps legacy app.asar MCP working directories to userData', async () => {
+    const { createMcpStdioManager } = await import('./index')
+    const userData = appMock.getPath()
+    await mkdir(userData, { recursive: true })
+    await writeFile(join(userData, 'mcp.json'), `${JSON.stringify({
+      mcpServers: {
+        playwright: {
+          command: LUMI_EXEC_PATH,
+          args: [`${LUMI_APP_PATH}/node_modules/@proj-airi/playwright-extra-mcp/dist/bin/run.mjs`],
+          env: {
+            ELECTRON_RUN_AS_NODE: '1',
+          },
+          cwd: LUMI_APP_PATH,
+          startupMode: 'on_startup',
+        },
+      },
+    })}\n`)
+
+    const manager = createMcpStdioManager()
+    await manager.applyAndRestart()
+
+    expect(transportMocks.stdioServers[0]).toMatchObject({
+      command: process.execPath,
+      args: ['C:\\Program Files\\Lumi\\resources\\app.asar/node_modules/@proj-airi/playwright-extra-mcp/dist/bin/run.mjs'],
+      cwd: userData,
       stderr: 'pipe',
     })
   })

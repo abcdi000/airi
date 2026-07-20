@@ -16,6 +16,7 @@ import {
 
 const LUMI_EXEC_PATH = '$' + '{LUMI_EXEC_PATH}'
 const LUMI_APP_PATH = '$' + '{LUMI_APP_PATH}'
+const LUMI_USER_DATA_PATH = '$' + '{LUMI_USER_DATA_PATH}'
 
 function translateMessage(key: string, params?: Record<string, unknown>) {
   if (params?.name)
@@ -240,7 +241,7 @@ describe('mcp-config helpers', () => {
         COMPUTER_USE_INTERRUPT_SHORTCUT: 'End',
         COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED: 'false',
       },
-      cwd: LUMI_APP_PATH,
+      cwd: LUMI_USER_DATA_PATH,
       startupMode: 'on_first_use',
       longRunning: true,
       persistent: true,
@@ -257,8 +258,9 @@ describe('mcp-config helpers', () => {
       args: [`${LUMI_APP_PATH}/node_modules/@proj-airi/playwright-extra-mcp/dist/bin/run.mjs`],
       env: {
         ELECTRON_RUN_AS_NODE: '1',
+        LUMI_PLAYWRIGHT_USER_DATA_DIR: `${LUMI_USER_DATA_PATH}/playwright-profile`,
       },
-      cwd: LUMI_APP_PATH,
+      cwd: LUMI_USER_DATA_PATH,
       startupMode: 'on_first_use',
       longRunning: true,
       persistent: true,

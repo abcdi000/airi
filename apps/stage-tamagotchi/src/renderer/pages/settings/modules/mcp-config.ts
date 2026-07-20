@@ -8,6 +8,7 @@ type McpPresetId = 'minecraft' | 'computer_use' | 'playwright'
 
 const LUMI_EXEC_PATH = '$' + '{LUMI_EXEC_PATH}'
 const LUMI_APP_PATH = '$' + '{LUMI_APP_PATH}'
+const LUMI_USER_DATA_PATH = '$' + '{LUMI_USER_DATA_PATH}'
 
 /** Editable MCP server form state used by the settings page. */
 export interface ServerForm {
@@ -136,7 +137,7 @@ export function createWindowsComputerUseMcpServerForm(): ServerForm {
       // bridge off prevents a second browser-control surface from competing with it.
       { key: 'COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED', value: 'false' },
     ],
-    cwd: LUMI_APP_PATH,
+    cwd: LUMI_USER_DATA_PATH,
     enabled: true,
     startupMode: 'on_first_use',
     longRunning: true,
@@ -159,8 +160,9 @@ export function createPlaywrightMcpServerForm(): ServerForm {
     ].join('\n'),
     envEntries: [
       { key: 'ELECTRON_RUN_AS_NODE', value: '1' },
+      { key: 'LUMI_PLAYWRIGHT_USER_DATA_DIR', value: `${LUMI_USER_DATA_PATH}/playwright-profile` },
     ],
-    cwd: LUMI_APP_PATH,
+    cwd: LUMI_USER_DATA_PATH,
     enabled: true,
     startupMode: 'on_first_use',
     longRunning: true,

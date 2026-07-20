@@ -1,3 +1,23 @@
+<h1 align="center">Lumi</h1>
+
+<p align="center">A personal Windows desktop companion fork based on <a href="https://github.com/moeru-ai/airi">Project AIRI</a>.</p>
+
+> [!IMPORTANT]
+> Lumi is a personal-use fork of Project AIRI, customized for a single long-running companion character and Windows desktop workflows. It is not an official Project AIRI release and is not affiliated with or endorsed by the AIRI maintainers.
+>
+> This repository keeps the original AIRI MIT License and copyright notice. The original upstream project is [moeru-ai/airi](https://github.com/moeru-ai/airi).
+
+## Lumi Changes
+
+- Windows desktop-first packaging under the Lumi name, including Windows installer support.
+- Lumi-focused companion data model: long-term memory, short-term memory, impressions, private notes, diary data, and related maintenance views.
+- Updated data import/export so Lumi-specific memory, notes, impressions, diary, and settings data can be archived and restored together.
+- Local semantic memory search with a bundled private Python vector runtime, local embedding model cache, and CUDA-capable PyTorch support for Windows builds.
+- MCP presets for Lumi workflows, including Minecraft, Windows Computer Use, and Playwright-based browser automation.
+- Live2D/VRM desktop companion updates synchronized from newer AIRI changes where they fit Lumi without breaking existing behavior.
+
+The original AIRI README is preserved below for upstream context.
+
 <picture>
   <source
     width="100%"

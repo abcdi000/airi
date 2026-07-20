@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const appMock = vi.hoisted(() => ({
   getVersion: vi.fn(() => '0.9.0-beta.4'),
-  getPath: vi.fn((name: string) => name === 'logs' ? '/tmp/airi/logs' : `/tmp/${name}`),
+  getPath: vi.fn((name: string) => name === 'logs' ? '/tmp/lumi/logs' : `/tmp/${name}`),
   quit: vi.fn(),
   isPackaged: false,
 }))
@@ -121,11 +121,11 @@ describe('setupAutoUpdater', () => {
     vi.clearAllMocks()
     updaterState.instance = createUpdaterMock()
     appMock.getVersion.mockReturnValue('0.9.0-beta.4')
-    appMock.getPath.mockImplementation((name: string) => name === 'logs' ? '/tmp/airi/logs' : `/tmp/${name}`)
+    appMock.getPath.mockImplementation((name: string) => name === 'logs' ? '/tmp/lumi/logs' : `/tmp/${name}`)
     isDevState.value = false
     stdEnvState.isWindows = false
     delete process.env.UPDATE_SERVER_URL
-    delete process.env.AIRI_UPDATE_CHANNEL
+    delete process.env.LUMI_UPDATE_CHANNEL
     mockGitHubReleasesFetch()
   })
 
@@ -143,7 +143,7 @@ describe('setupAutoUpdater', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     expect(updaterState.instance.setFeedURL).toHaveBeenCalledWith({
       provider: 'generic',
-      url: 'https://github.com/moeru-ai/airi/releases/download/v0.9.0-beta.6',
+      url: 'https://github.com/abcdi000/airi/releases/download/v0.9.0-beta.6',
     })
     expect(updaterState.instance.channel).toBe(expectedChannelByArch)
   })
@@ -157,7 +157,7 @@ describe('setupAutoUpdater', () => {
 
     expect(updaterState.instance.setFeedURL).toHaveBeenCalledWith({
       provider: 'generic',
-      url: 'https://github.com/moeru-ai/airi/releases/download/v0.9.0-beta.6',
+      url: 'https://github.com/abcdi000/airi/releases/download/v0.9.0-beta.6',
     })
   })
 
@@ -178,7 +178,7 @@ describe('setupAutoUpdater', () => {
   })
 
   it('supports explicit stable lane selection for future dynamic channel switching', async () => {
-    process.env.AIRI_UPDATE_CHANNEL = 'stable'
+    process.env.LUMI_UPDATE_CHANNEL = 'stable'
     mockGitHubReleasesFetch([
       { tag_name: 'v0.9.0-beta.6', draft: false, prerelease: true },
       { tag_name: 'v0.8.9', draft: false, prerelease: false },
@@ -191,13 +191,13 @@ describe('setupAutoUpdater', () => {
 
     expect(updaterState.instance.setFeedURL).toHaveBeenCalledWith({
       provider: 'generic',
-      url: 'https://github.com/moeru-ai/airi/releases/download/v0.8.9',
+      url: 'https://github.com/abcdi000/airi/releases/download/v0.8.9',
     })
   })
 
-  it.each(laneMatrix)('supports AIRI_UPDATE_CHANNEL override for lane=%s', async (lane) => {
+  it.each(laneMatrix)('supports LUMI_UPDATE_CHANNEL override for lane=%s', async (lane) => {
     appMock.getVersion.mockReturnValue('0.9.0-alpha.2')
-    process.env.AIRI_UPDATE_CHANNEL = lane
+    process.env.LUMI_UPDATE_CHANNEL = lane
     mockGitHubReleasesFetch(matrixReleases)
 
     const { setupAutoUpdater } = await import('./auto-updater')
@@ -206,11 +206,11 @@ describe('setupAutoUpdater', () => {
 
     expect(updaterState.instance.setFeedURL).toHaveBeenCalledWith({
       provider: 'generic',
-      url: `https://github.com/moeru-ai/airi/releases/download/${laneReleaseTagMap[lane]}`,
+      url: `https://github.com/abcdi000/airi/releases/download/${laneReleaseTagMap[lane]}`,
     })
   })
 
-  it.each(bundleVersions)('uses bundled version lane when no AIRI_UPDATE_CHANNEL (bundle=%s)', async (bundleVersion) => {
+  it.each(bundleVersions)('uses bundled version lane when no LUMI_UPDATE_CHANNEL (bundle=%s)', async (bundleVersion) => {
     appMock.getVersion.mockReturnValue(bundleVersion)
     mockGitHubReleasesFetch(matrixReleases)
 
@@ -226,7 +226,7 @@ describe('setupAutoUpdater', () => {
 
     expect(updaterState.instance.setFeedURL).toHaveBeenCalledWith({
       provider: 'generic',
-      url: `https://github.com/moeru-ai/airi/releases/download/${laneReleaseTagMap[expectedLane]}`,
+      url: `https://github.com/abcdi000/airi/releases/download/${laneReleaseTagMap[expectedLane]}`,
     })
   })
 
@@ -235,7 +235,7 @@ describe('setupAutoUpdater', () => {
     async ({ bundleVersion, lane }) => {
       appMock.getVersion.mockReturnValue(bundleVersion)
       isDevState.value = true
-      process.env.AIRI_UPDATE_CHANNEL = lane
+      process.env.LUMI_UPDATE_CHANNEL = lane
       process.env.UPDATE_SERVER_URL = `http://127.0.0.1:8787/${lane}`
 
       const fetchSpy = mockGitHubReleasesFetch(matrixReleases)

@@ -1,9 +1,13 @@
-import type { createContext } from '@moeru/eventa/adapters/electron/main'
-
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 
+import type { createContext } from '@moeru/eventa/adapters/electron/main'
+
+import type { ElectronLumiMemorySnapshot, ElectronLumiMemoryVectorRecord, ElectronLumiMemoryVectorSearchResult, ElectronLumiMemoryVectorStatus } from '../../../../shared/eventa'
+
+import process from 'node:process'
+
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -16,20 +20,19 @@ import {
   electronLumiMemoryClear,
   electronLumiMemoryDeleteMemory,
   electronLumiMemoryDeleteVector,
-  electronLumiMemoryGetVectors,
   electronLumiMemoryGetSnapshot,
+  electronLumiMemoryGetVectors,
   electronLumiMemoryReplaceSnapshot,
   electronLumiMemorySaveEvent,
   electronLumiMemorySearchVectors,
   electronLumiMemorySetSeedId,
+
   electronLumiMemorySyncVector,
   electronLumiMemoryUpsertMemory,
   electronLumiMemoryUpsertVector,
+
   electronLumiMemoryVectorStatus,
-  type ElectronLumiMemorySnapshot,
-  type ElectronLumiMemoryVectorRecord,
-  type ElectronLumiMemoryVectorSearchResult,
-  type ElectronLumiMemoryVectorStatus,
+
 } from '../../../../shared/eventa'
 
 type SqliteValue = string | number | null
@@ -426,7 +429,7 @@ async function backfillVectors(limit = LUMI_MEMORY_VECTOR_BACKFILL_LIMIT): Promi
       vectorWorkerLastError = error instanceof Error ? error.message : String(error)
       vectorWorkerProgress = `补向量失败: ${vectorWorkerLastError}`
       console.warn('[lumi-memory] vector backfill failed', error)
-      break
+      return vectorStatusWithDb(db)
     }
   }
 
@@ -511,16 +514,14 @@ function vectorBackfillCandidates(db: SqliteDatabase, limit: number) {
     WHERE m.status != 'rejected'
     ORDER BY m.updated_at DESC, m.created_at DESC
     LIMIT ?
-  `).all(LUMI_MEMORY_EMBEDDING_MODEL, Math.max(1, limit))
-    .map(rowToMemory)
-    .filter(memory => {
-      const row = db.prepare(`
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL, Math.max(1, limit)).map(rowToMemory).filter((memory) => {
+    const row = db.prepare(`
         SELECT signature
         FROM lumi_memory_vectors
         WHERE memory_id = ? AND model = ?
       `).get(memory.id, LUMI_MEMORY_EMBEDDING_MODEL)
-      return row?.signature !== memoryVectorSignature(memory)
-    })
+    return row?.signature !== memoryVectorSignature(memory)
+  })
 }
 
 function upsertVectorWithDb(db: SqliteDatabase, record: ElectronLumiMemoryVectorRecord) {
@@ -601,6 +602,7 @@ async function ensureVectorWorker(): Promise<ChildProcessWithoutNullStreams> {
   try {
     const script = resolveVectorWorkerScript()
     const command = resolveVectorPythonCommand()
+    const modelCacheRoot = resolveVectorModelCacheRoot()
     vectorWorkerLastError = ''
     vectorWorkerPhase = 'starting'
     vectorWorkerDownloadPercent = undefined
@@ -609,19 +611,22 @@ async function ensureVectorWorker(): Promise<ChildProcessWithoutNullStreams> {
     vectorWorkerDownloadSpeedBytesPerSecond = undefined
     vectorWorkerProgress = `正在启动向量服务: ${command.command} ${command.args.join(' ')}`
     vectorWorker = spawn(command.command, [...command.args, script], {
-      cwd: process.cwd(),
+      cwd: dirname(script),
       env: {
         ...process.env,
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1',
+        HF_HOME: modelCacheRoot,
         HF_HUB_DISABLE_PROGRESS_BARS: '1',
+        SENTENCE_TRANSFORMERS_HOME: modelCacheRoot,
         TQDM_DISABLE: '1',
+        TRANSFORMERS_CACHE: join(modelCacheRoot, 'transformers'),
         LUMI_MEMORY_VECTOR_DEVICE,
       },
       windowsHide: true,
     })
     const stdout = createInterface({ input: vectorWorker.stdout })
-    stdout.on('line', (line) => handleVectorWorkerLine(line))
+    stdout.on('line', line => handleVectorWorkerLine(line))
     vectorWorker.stderr.on('data', (chunk) => {
       handleVectorWorkerStderr(String(chunk))
     })
@@ -634,7 +639,9 @@ async function ensureVectorWorker(): Promise<ChildProcessWithoutNullStreams> {
       vectorWorker = null
       rejectAllVectorRequests(new Error(vectorWorkerLastError))
     })
-    await requestVectorWorker('health', { model: LUMI_MEMORY_EMBEDDING_MODEL }).catch(() => undefined)
+    await requestVectorWorker('health', { model: LUMI_MEMORY_EMBEDDING_MODEL })
+    if (!vectorWorker || vectorWorker.killed)
+      throw new Error(vectorWorkerLastError || 'Lumi memory vector worker exited before health check completed')
     vectorWorkerProgress = '向量服务已启动'
     return vectorWorker
   }
@@ -708,10 +715,56 @@ function uniquePaths(paths: string[]) {
   return [...new Set(paths.filter(Boolean).map(path => resolve(path)))]
 }
 
+function resolveVectorModelCacheRoot() {
+  const userCacheRoot = join(app.getPath('userData'), 'lumi-vector-model-cache')
+  const bundledCacheRoot = bundledVectorModelCacheCandidates().find(candidate => existsSync(candidate))
+  const expectedUserModelCache = join(userCacheRoot, 'hub', modelCacheFolderName(LUMI_MEMORY_EMBEDDING_MODEL))
+  if (bundledCacheRoot && !existsSync(expectedUserModelCache)) {
+    vectorWorkerProgress = '正在准备向量模型缓存'
+    mkdirSync(userCacheRoot, { recursive: true })
+    // NOTICE:
+    // The installed resources directory can be read-only under Program Files.
+    // Hugging Face writes lock files and refs next to cached snapshots, so Lumi
+    // seeds the per-user cache once and lets the worker read/write there.
+    // Remove this copy step only after the vector worker supports read-only cache
+    // overlays or another immutable model-loading mechanism.
+    cpSync(bundledCacheRoot, userCacheRoot, {
+      recursive: true,
+      force: true,
+    })
+  }
+  return userCacheRoot
+}
+
+function bundledVectorModelCacheCandidates() {
+  return uniquePaths([
+    process.resourcesPath ? join(process.resourcesPath, 'vector-model-cache') : '',
+    join(dirname(app.getAppPath()), 'vector-model-cache'),
+    join(app.getAppPath(), 'vector-model-cache'),
+  ])
+}
+
+/**
+ * Normalizes Hugging Face model IDs into cache folder names.
+ *
+ * Before:
+ * - "BAAI/bge-small-zh-v1.5"
+ *
+ * After:
+ * - "models--BAAI--bge-small-zh-v1.5"
+ */
+function modelCacheFolderName(modelId: string) {
+  return `models--${modelId.replaceAll('/', '--')}`
+}
+
 function resolveVectorPythonCommand() {
   const configured = process.env.LUMI_MEMORY_VECTOR_PYTHON
   if (configured && existsSync(configured))
     return { command: configured, args: [] as string[] }
+
+  const bundled = bundledVectorPythonCandidates().find(candidate => existsSync(candidate))
+  if (bundled)
+    return { command: bundled, args: [] as string[] }
 
   const candidates = [
     'D:\\anaconda3\\envs\\airi\\python.exe',
@@ -723,6 +776,26 @@ function resolveVectorPythonCommand() {
     return { command: found, args: [] as string[] }
 
   return { command: 'conda', args: ['run', '-n', 'airi', 'python'] }
+}
+
+function bundledVectorPythonCandidates() {
+  const resourceRoots = uniquePaths([
+    process.resourcesPath ?? '',
+    dirname(app.getAppPath()),
+    app.getAppPath(),
+  ])
+
+  if (process.platform === 'win32') {
+    return resourceRoots.flatMap(root => [
+      join(root, 'python', 'python.exe'),
+      join(root, 'python', 'Scripts', 'python.exe'),
+    ])
+  }
+
+  return resourceRoots.flatMap(root => [
+    join(root, 'python', 'bin', 'python3'),
+    join(root, 'python', 'bin', 'python'),
+  ])
 }
 
 function handleVectorWorkerStderr(chunk: string) {

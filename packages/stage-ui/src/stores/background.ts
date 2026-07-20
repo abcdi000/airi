@@ -342,6 +342,39 @@ export const useBackgroundStore = defineStore('background-entries', () => {
     return journalEntries.value.slice(0, 5)
   })
 
+  async function exportUserEntries() {
+    await initializeStore()
+    return Array.from(entries.value.values())
+      .filter(entry => entry.type !== 'builtin')
+      .map(entry => ({ ...entry }))
+  }
+
+  async function importUserEntries(importedEntries: BackgroundEntry[]) {
+    await initializeStore()
+
+    const nextEntries = new Map(entries.value)
+    for (const entry of importedEntries) {
+      if (!entry.id.startsWith(STORAGE_PREFIX) || entry.type === 'builtin' || !(entry.blob instanceof Blob))
+        continue
+      const normalized: BackgroundEntry = {
+        id: entry.id,
+        type: entry.type,
+        characterId: entry.characterId,
+        title: entry.title.trim() || 'Imported Background',
+        blob: entry.blob,
+        prompt: entry.prompt,
+        remixId: entry.remixId,
+        createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : Date.now(),
+      }
+      await localforage.setItem(normalized.id, normalized)
+      ensureObjectUrl(normalized.id, normalized.blob)
+      nextEntries.set(normalized.id, normalized)
+    }
+
+    entries.value = nextEntries
+    await sync()
+  }
+
   return {
     entries,
     loading,
@@ -353,6 +386,8 @@ export const useBackgroundStore = defineStore('background-entries', () => {
     journalRecentEntries,
     addBackground,
     removeBackground,
+    exportUserEntries,
+    importUserEntries,
     getBackgroundUrl: (id: string) => backgroundUrls[id] ?? null,
     initializeStore,
   }

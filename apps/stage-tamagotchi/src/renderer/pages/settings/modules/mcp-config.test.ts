@@ -6,11 +6,16 @@ import {
   buildConfigFile,
   buildServerConfig,
   createMinecraftMcpServerForm,
+  createPlaywrightMcpServerForm,
   createWindowsComputerUseMcpServerForm,
   findServerIdentifierByRowId,
   loadServerForms,
+  MCP_SERVER_PRESETS,
   syncJsonDraftFromServers,
 } from './mcp-config'
+
+const LUMI_EXEC_PATH = '$' + '{LUMI_EXEC_PATH}'
+const LUMI_APP_PATH = '$' + '{LUMI_APP_PATH}'
 
 function translateMessage(key: string, params?: Record<string, unknown>) {
   if (params?.name)
@@ -224,9 +229,10 @@ describe('mcp-config helpers', () => {
     const server = createWindowsComputerUseMcpServerForm()
 
     expect(buildServerConfig(server)).toEqual({
-      command: 'pnpm',
-      args: ['-F', '@proj-airi/computer-use-mcp', 'start'],
+      command: LUMI_EXEC_PATH,
+      args: [`${LUMI_APP_PATH}/node_modules/@proj-airi/computer-use-mcp/dist/bin/run.mjs`],
       env: {
+        ELECTRON_RUN_AS_NODE: '1',
         COMPUTER_USE_EXECUTOR: 'windows-local',
         COMPUTER_USE_APPROVAL_MODE: 'never',
         COMPUTER_USE_MAX_OPERATIONS: '16',
@@ -234,13 +240,39 @@ describe('mcp-config helpers', () => {
         COMPUTER_USE_INTERRUPT_SHORTCUT: 'End',
         COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED: 'false',
       },
-      cwd: '.',
+      cwd: LUMI_APP_PATH,
       startupMode: 'on_first_use',
       longRunning: true,
       persistent: true,
       requestTimeoutMs: 60000,
       maxTotalTimeoutMs: 180000,
     })
+  })
+
+  it('creates the bundled Playwright MCP preset through the standard MCP config shape', () => {
+    const server = createPlaywrightMcpServerForm()
+
+    expect(buildServerConfig(server)).toEqual({
+      command: LUMI_EXEC_PATH,
+      args: [`${LUMI_APP_PATH}/node_modules/@proj-airi/playwright-extra-mcp/dist/bin/run.mjs`],
+      env: {
+        ELECTRON_RUN_AS_NODE: '1',
+      },
+      cwd: LUMI_APP_PATH,
+      startupMode: 'on_first_use',
+      longRunning: true,
+      persistent: true,
+      requestTimeoutMs: 60000,
+      maxTotalTimeoutMs: 180000,
+    })
+  })
+
+  it('exposes all bundled MCP presets in the settings registry', () => {
+    expect(MCP_SERVER_PRESETS.map(preset => preset.id)).toEqual([
+      'minecraft',
+      'computer_use',
+      'playwright',
+    ])
   })
 
   it('rejects MCP total timeouts shorter than request timeouts', () => {

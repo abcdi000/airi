@@ -8,6 +8,7 @@ import { createDataSettingsStatusState } from '@proj-airi/stage-pages/pages/sett
 
 import DesktopFolderSection from './components/desktop-folder-section.vue'
 import DesktopResetSection from './components/desktop-reset-section.vue'
+import LumiArchiveSection from './components/lumi-archive-section.vue'
 import LumiMigrationSection from './components/lumi-migration-section.vue'
 import LumiUserProfileSection from './components/lumi-user-profile-section.vue'
 
@@ -18,6 +19,7 @@ const { statusMessage, statusTone, handleStatus } = createDataSettingsStatusStat
   <div :class="['flex flex-col gap-4 pb-4']">
     <StatusBanner v-if="statusMessage" :message="statusMessage" :tone="statusTone" />
     <DesktopFolderSection @status="handleStatus" />
+    <LumiArchiveSection @status="handleStatus" />
     <LumiMigrationSection />
     <LumiUserProfileSection />
     <ChatsSection @status="handleStatus" />

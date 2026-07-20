@@ -41,8 +41,8 @@ else {
 }
 
 export default {
-  appId: 'ai.moeru.airi',
-  productName: 'AIRI',
+  appId: 'app.lumi.desktop',
+  productName: 'Lumi',
   directories: {
     output: 'dist',
     buildResources: 'build',
@@ -75,6 +75,10 @@ export default {
     'out/**',
     'resources/**',
     'package.json',
+    // NOTICE: Large runtime payloads are copied via `extraResources` so they
+    // stay outside app.asar and can be executed/read by Python at runtime.
+    '!resources/python{,/**}',
+    '!resources/vector-model-cache{,/**}',
     // NOTICE: Exclude npm `electron` package from app payload.
     // Electron runtime is already provided by the outer app bundle; bundling a nested
     // `node_modules/electron/dist/Electron.app` makes electron-builder deep-sign it and
@@ -103,29 +107,65 @@ export default {
       to: 'godot-stage',
       filter: ['**/*'],
     },
+    {
+      from: '../../services/lumi-memory-vector',
+      to: 'services/lumi-memory-vector',
+      filter: [
+        'README.md',
+        'requirements.txt',
+        'server.py',
+      ],
+    },
+    {
+      from: 'resources/python',
+      to: 'python',
+      filter: ['**/*'],
+    },
+    {
+      from: 'resources/vector-model-cache',
+      to: 'vector-model-cache',
+      filter: ['**/*'],
+    },
+  ],
+  extraFiles: [
+    {
+      from: 'external-plugins',
+      to: 'plugins/v1',
+      filter: ['**/*'],
+    },
   ],
   extraMetadata: {
-    name: 'ai.moeru.airi',
+    name: 'lumi',
     main: 'out/main/index.js',
-    homepage: 'https://airi.moeru.ai/docs/',
-    repository: 'https://github.com/moeru-ai/airi',
+    homepage: 'https://github.com/abcdi000/airi',
+    repository: 'https://github.com/abcdi000/airi',
     license: 'MIT',
   },
   win: {
-    executableName: 'airi',
+    executableName: 'lumi',
     // NOTICE: Keep `channel: 'latest-${arch}'` for architecture-aware updater metadata.
     // electron-builder expands `${arch}` at publish-time (for example: `latest-x64`, `latest-arm64`),
     // and electron-updater later consumes that expanded channel to resolve platform-specific *.yml files.
     // This prevents cross-arch lookups such as arm64 clients reading x64 metadata.
     publish: {
       provider: 'github',
-      owner: 'moeru-ai',
+      owner: 'abcdi000',
       repo: 'airi',
       channel: 'latest-${arch}',
     },
   },
   nsis: {
     artifactName: '${productName}-${version}-windows-${arch}-setup.${ext}',
+    shortcutName: '${productName}',
+    uninstallDisplayName: '${productName}',
+    createDesktopShortcut: 'always',
+    deleteAppDataOnUninstall: true,
+    oneClick: false,
+    allowToChangeInstallationDirectory: true,
+    runAfterFinish: true,
+  },
+  nsisWeb: {
+    artifactName: '${productName}-${version}-windows-${arch}-web-setup.${ext}',
     shortcutName: '${productName}',
     uninstallDisplayName: '${productName}',
     createDesktopShortcut: 'always',
@@ -208,10 +248,10 @@ export default {
     },
     extendInfo: [
       {
-        NSMicrophoneUsageDescription: 'AIRI requires microphone access for voice interaction',
+        NSMicrophoneUsageDescription: 'Lumi requires microphone access for voice interaction',
       },
       {
-        NSCameraUsageDescription: 'AIRI requires camera access for vision understanding',
+        NSCameraUsageDescription: 'Lumi requires camera access for vision understanding',
       },
     ],
     // For self-publishing, testing, and distribution after modified the code without access to
@@ -222,7 +262,7 @@ export default {
     hardenedRuntime: true,
     // notarize: false,
     notarize: true,
-    executableName: 'airi',
+    executableName: 'lumi',
     icon: useIconFormattedMacAppIcon ? 'icon.icon' : 'icon.icns',
   },
   dmg: {
@@ -236,14 +276,14 @@ export default {
     // NOTICE: Same channel rule as Windows/macOS. Keep `${arch}` to avoid x64/arm64 feed collisions on Linux.
     publish: {
       provider: 'github',
-      owner: 'moeru-ai',
+      owner: 'abcdi000',
       repo: 'airi',
       channel: 'latest-${arch}',
     },
     category: 'Utility',
-    synopsis: 'AI VTuber/Waifu chatbot app inspired by Neuro-sama.',
-    description: 'AIRI is an AI VTuber/Waifu chatbot supporting Live2D/VRM avatars, featuring human-like interactions and modular stage-based rendering.',
-    executableName: 'airi',
+    synopsis: 'Lumi desktop companion.',
+    description: 'Lumi is a desktop companion with Live2D/VRM avatars, memory, diary, and proactive Windows desktop features.',
+    executableName: 'lumi',
     artifactName: '${productName}-${version}-linux-${arch}.${ext}',
     icon: 'build/icons/icon.png',
   },

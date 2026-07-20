@@ -1,12 +1,16 @@
 import type { ChatSessionsExport } from '../types/chat-session'
+import type { LumiDataArchive } from './data-maintenance/lumi-archive'
 
 import { isStageTamagotchi } from '@proj-airi/stage-shared'
 import { useLive2dParams, useSettingsLive2d } from '@proj-airi/stage-ui-live2d'
 import { useModelStore } from '@proj-airi/stage-ui-three'
 
+import { useBackgroundStore } from '../stores/background'
 import { useChatOrchestratorStore } from '../stores/chat'
 import { useChatSessionStore } from '../stores/chat/session-store'
 import { useDisplayModelsStore } from '../stores/display-models'
+import { useLumiCurrentStateStore } from '../stores/lumi-current-state'
+import { useLumiEmotionStore } from '../stores/lumi-emotion'
 import { useLumiMemoryStore } from '../stores/lumi-memory'
 import { useLumiUserProfileStore } from '../stores/lumi-user-profile'
 import { useMcpStore } from '../stores/mcp'
@@ -21,6 +25,14 @@ import { useTwitterStore } from '../stores/modules/twitter'
 import { useOnboardingStore } from '../stores/onboarding'
 import { useProvidersStore } from '../stores/providers'
 import { useSettings, useSettingsAudioDevice } from '../stores/settings'
+import {
+  deserializeBackgroundEntries,
+  exportLumiLocalStorageSnapshot,
+  isLumiDataArchivePayload,
+  LUMI_DATA_ARCHIVE_FORMAT,
+  restoreLumiLocalStorageSnapshot,
+  serializeBackgroundEntries,
+} from './data-maintenance/lumi-archive'
 
 export function useDataMaintenance() {
   const chatStore = useChatSessionStore()
@@ -44,6 +56,9 @@ export function useDataMaintenance() {
   const airiCardStore = useAiriCardStore()
   const lumiMemoryStore = useLumiMemoryStore()
   const lumiUserProfileStore = useLumiUserProfileStore()
+  const lumiCurrentStateStore = useLumiCurrentStateStore()
+  const lumiEmotionStore = useLumiEmotionStore()
+  const backgroundStore = useBackgroundStore()
 
   async function deleteAllModels() {
     await displayModelsStore.resetDisplayModels()
@@ -77,6 +92,25 @@ export function useDataMaintenance() {
     return new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
   }
 
+  async function exportLumiDataArchive() {
+    const archive: LumiDataArchive = {
+      format: LUMI_DATA_ARCHIVE_FORMAT,
+      version: 1,
+      source: 'lumi',
+      exportedAt: new Date().toISOString(),
+      sections: {
+        chatSessions: await chatStore.exportSessions(),
+        lumiMemory: await lumiMemoryStore.exportSnapshot(),
+        lumiUserProfile: lumiUserProfileStore.exportSnapshot(),
+        lumiCurrentState: lumiCurrentStateStore.exportSnapshot(),
+        lumiEmotion: lumiEmotionStore.exportSnapshot(),
+        backgroundEntries: await serializeBackgroundEntries(await backgroundStore.exportUserEntries()),
+        localStorage: exportLumiLocalStorageSnapshot(),
+      },
+    }
+    return new Blob([JSON.stringify(archive, null, 2)], { type: 'application/json' })
+  }
+
   function isChatSessionsPayload(payload: unknown): payload is ChatSessionsExport {
     if (!payload || typeof payload !== 'object')
       return false
@@ -87,6 +121,23 @@ export function useDataMaintenance() {
     if (!isChatSessionsPayload(payload))
       throw new Error('Invalid chat session export format')
     await chatStore.importSessions(payload)
+  }
+
+  async function importLumiDataArchive(payload: Record<string, unknown>) {
+    if (isChatSessionsPayload(payload)) {
+      await importChatSessions(payload)
+      return
+    }
+    if (!isLumiDataArchivePayload(payload))
+      throw new Error('Invalid Lumi data archive format')
+
+    await chatStore.importSessions(payload.sections.chatSessions)
+    await lumiMemoryStore.importSnapshot(payload.sections.lumiMemory)
+    await lumiUserProfileStore.importSnapshot(payload.sections.lumiUserProfile)
+    await lumiCurrentStateStore.importSnapshot(payload.sections.lumiCurrentState)
+    lumiEmotionStore.importSnapshot(payload.sections.lumiEmotion)
+    await backgroundStore.importUserEntries(await deserializeBackgroundEntries(payload.sections.backgroundEntries))
+    restoreLumiLocalStorageSnapshot(payload.sections.localStorage)
   }
 
   async function resetSettingsState() {
@@ -123,6 +174,8 @@ export function useDataMaintenance() {
     deleteAllChatSessions,
     exportChatSessions,
     importChatSessions,
+    exportLumiDataArchive,
+    importLumiDataArchive,
     deleteAllData,
     resetDesktopApplicationState,
   }

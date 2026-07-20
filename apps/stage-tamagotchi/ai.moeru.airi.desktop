@@ -1,10 +1,10 @@
 [Desktop Entry]
-Name=AIRI
-Exec=airi %U
+Name=Lumi
+Exec=lumi %U
 Terminal=false
 Type=Application
-Icon=ai.moeru.airi
-StartupWMClass=AIRI
-Comment=AIRI is an AI VTuber/Waifu chatbot supporting Live2D/VRM avatars, featuring human-like interactions and modular stage-based rendering.
+Icon=app.lumi.desktop
+StartupWMClass=Lumi
+Comment=Lumi is a desktop companion with Live2D/VRM avatars, memory, diary, and proactive desktop features.
 Categories=Utility;
 

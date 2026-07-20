@@ -119,6 +119,8 @@ external-plugins/lumi-diary/config.json
 .tmp/
 .computer-use-mcp/
 .playwright-mcp/
+apps/stage-tamagotchi/resources/python/
+apps/stage-tamagotchi/resources/vector-model-cache/
 **/.computer-use-mcp/
 **/.playwright-mcp/
 moussy-snapshot-*.yml

@@ -753,7 +753,9 @@ pages:
         presets-title: 快速预设
         minecraft-preset-description: 添加 Minecraft 持久 MCP。请先在 Minecraft Java 世界里「对局域网开放」，默认连接 localhost:25565；AIRI 会在首次使用时启动它，并尽量常驻到 AIRI 关闭。
         computer-use-preset-title: Windows Computer Use 预设
-        computer-use-preset-description: 添加 Lumi 的本地 Windows 控制 MCP。网页仍由现有 Playwright MCP 处理；原生窗口操作会先观察、再执行，并在每个动作前请求你的确认。
+        computer-use-preset-description: 添加 Lumi 的本地 Windows 控制 MCP。安装版会使用随包服务；网页仍由 Playwright MCP 处理，原生窗口操作会先观察、再执行，并在每个动作前请求你的确认。
+        playwright-preset-title: Playwright Browser 预设
+        playwright-preset-description: 添加 Lumi 随包的 Playwright MCP，用于网页打开、点击、输入、截图、标签页和页面状态检查。适合作为浏览器自动化的标准入口。
       status:
         unknown: 未加载
       actions:
@@ -763,6 +765,7 @@ pages:
         add-server: 添加
         add-minecraft-preset: 添加 Minecraft MCP 预设
         add-computer-use-preset: 添加 Windows Computer Use 预设
+        add-playwright-preset: 添加 Playwright MCP 预设
         add-env: 添加变量
         add-header: 添加请求头
         remove: 移除
@@ -859,6 +862,7 @@ pages:
         restarted: 重启好啦！启动了 {started} 个，失败 {failed} 个，跳过 {skipped} 个
         minecraft-preset-added: 已添加 Minecraft MCP 预设。保存并重启后，首次调用工具时会自动启动它。
         computer-use-preset-added: 已添加 Windows Computer Use MCP 预设。保存并重启后，Lumi 会通过现有 MCP 链路使用它。
+        playwright-preset-added: 已添加 Playwright MCP 预设。保存并重启后，Lumi 会使用随包浏览器自动化服务。
   flux:
     title: Flux
     buy: 充值

@@ -1,9 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const LUMI_EXEC_PATH = '$' + '{LUMI_EXEC_PATH}'
+const LUMI_APP_PATH = '$' + '{LUMI_APP_PATH}'
+
 const appMock = vi.hoisted(() => ({
+  getAppPath: vi.fn(),
   getPath: vi.fn(),
   getVersion: vi.fn(),
 }))
@@ -17,6 +22,10 @@ const clientMocks = vi.hoisted(() => ({
   close: vi.fn(),
   connect: vi.fn(),
   listTools: vi.fn(),
+}))
+
+const transportMocks = vi.hoisted(() => ({
+  stdioServers: [] as unknown[],
 }))
 
 vi.mock('electron', () => ({
@@ -55,7 +64,9 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', async () => {
     StdioClientTransport: class {
       stderr = new PassThrough()
 
-      constructor(readonly server: unknown) {}
+      constructor(readonly server: unknown) {
+        transportMocks.stdioServers.push(server)
+      }
 
       close = vi.fn(async () => undefined)
     },
@@ -73,6 +84,8 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 describe('createMcpStdioManager', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    transportMocks.stdioServers = []
+    appMock.getAppPath.mockReturnValue('C:\\Program Files\\Lumi\\resources\\app.asar')
     appMock.getPath.mockReturnValue(join(tmpdir(), `airi-mcp-test-${Date.now()}-${Math.random().toString(36).slice(2)}`))
     appMock.getVersion.mockReturnValue('0.10.0')
     clientMocks.connect.mockResolvedValue(undefined)
@@ -267,6 +280,42 @@ describe('createMcpStdioManager', () => {
       persistent: true,
       requestTimeoutMs: 60000,
       maxTotalTimeoutMs: 180000,
+    })
+  })
+
+  it('expands Lumi runtime placeholders before creating stdio transports', async () => {
+    const { createMcpStdioManager } = await import('./index')
+    const userData = appMock.getPath()
+    await mkdir(userData, { recursive: true })
+    await writeFile(join(userData, 'mcp.json'), `${JSON.stringify({
+      mcpServers: {
+        computer_use: {
+          command: LUMI_EXEC_PATH,
+          args: [`${LUMI_APP_PATH}/node_modules/@proj-airi/computer-use-mcp/dist/bin/run.mjs`],
+          env: {
+            ELECTRON_RUN_AS_NODE: '1',
+            COMPUTER_USE_EXECUTOR: 'windows-local',
+          },
+          cwd: LUMI_APP_PATH,
+          startupMode: 'on_startup',
+          longRunning: true,
+          persistent: true,
+        },
+      },
+    })}\n`)
+
+    const manager = createMcpStdioManager()
+    await manager.applyAndRestart()
+
+    expect(transportMocks.stdioServers[0]).toMatchObject({
+      command: process.execPath,
+      args: ['C:\\Program Files\\Lumi\\resources\\app.asar/node_modules/@proj-airi/computer-use-mcp/dist/bin/run.mjs'],
+      env: expect.objectContaining({
+        ELECTRON_RUN_AS_NODE: '1',
+        COMPUTER_USE_EXECUTOR: 'windows-local',
+      }),
+      cwd: 'C:\\Program Files\\Lumi\\resources\\app.asar',
+      stderr: 'pipe',
     })
   })
 

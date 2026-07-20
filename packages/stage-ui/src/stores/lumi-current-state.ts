@@ -26,6 +26,11 @@ export interface LumiCurrentStatePersistenceSnapshot {
   dbPath?: string
 }
 
+export interface LumiCurrentStateExportSnapshot extends LumiCurrentStatePersistenceSnapshot {
+  updateEveryTurns: number
+  exportedAt: string
+}
+
 export interface LumiCurrentStatePersistenceBridge {
   loadCurrentStateFromDatabase: () => Promise<LumiCurrentStatePersistenceSnapshot>
   saveCurrentState: (snapshot: LumiCurrentStatePersistenceSnapshot) => Promise<LumiCurrentStatePersistenceSnapshot>
@@ -274,11 +279,23 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     return candidates
   }
 
-  function exportSnapshot() {
+  function exportSnapshot(): LumiCurrentStateExportSnapshot {
     return {
-      state: currentState.value,
+      state: hasState.value ? currentState.value : null,
+      updateEveryTurns: normalizedUpdateEveryTurns.value,
       exportedAt: new Date().toISOString(),
+      dbPath: persistenceDbPath.value || undefined,
     }
+  }
+
+  async function importSnapshot(snapshot: Partial<LumiCurrentStateExportSnapshot>) {
+    if (typeof snapshot.updateEveryTurns === 'number' && Number.isFinite(snapshot.updateEveryTurns))
+      updateEveryTurns.value = Math.min(20, Math.max(1, Math.round(snapshot.updateEveryTurns)))
+
+    if (snapshot.state)
+      await saveCurrentState(snapshot.state)
+    else if (snapshot.state === null)
+      await clearCurrentState()
   }
 
   return {
@@ -297,5 +314,6 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     buildPromptContext,
     buildProfileCandidatesFromState,
     exportSnapshot,
+    importSnapshot,
   }
 })

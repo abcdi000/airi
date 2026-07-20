@@ -1231,6 +1231,9 @@ importers:
       '@proj-airi/ccc':
         specifier: workspace:^
         version: link:../../packages/ccc
+      '@proj-airi/computer-use-mcp':
+        specifier: workspace:^
+        version: link:../../services/computer-use-mcp
       '@proj-airi/drizzle-duckdb-wasm':
         specifier: 'catalog:'
         version: 0.5.0(drizzle-orm@0.45.2(@electric-sql/pglite@0.4.4)(@opentelemetry/api@1.9.1)(@prisma/client@5.22.0)(@types/pg@8.20.0)(better-sqlite3@12.5.0)(kysely@0.28.14)(pg@8.20.0)(postgres@3.4.9))
@@ -1246,6 +1249,9 @@ importers:
       '@proj-airi/i18n':
         specifier: workspace:^
         version: link:../../packages/i18n
+      '@proj-airi/playwright-extra-mcp':
+        specifier: workspace:^
+        version: link:../../services/playwright-extra-mcp
       '@proj-airi/plugin-sdk-tamagotchi':
         specifier: workspace:^
         version: link:../../packages/plugin-sdk-tamagotchi

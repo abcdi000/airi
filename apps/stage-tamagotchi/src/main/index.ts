@@ -97,7 +97,7 @@ if (isLinux) {
 }
 
 app.dock?.setIcon(icon)
-electronApp.setAppUserModelId('ai.moeru.airi')
+electronApp.setAppUserModelId('app.lumi.desktop')
 
 // Track the real user-facing AIRI window because the process also owns hidden utility windows.
 // The second-instance handler should restore the main UI instead of accidentally surfacing internals.

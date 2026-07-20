@@ -15,10 +15,11 @@ import type {
   ElectronMcpToolDescriptor,
 } from '../../../../shared/eventa'
 
+import process, { env } from 'node:process'
+
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
-import { env } from 'node:process'
 
 import { useLogg } from '@guiiai/logg'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -33,10 +34,10 @@ import {
   electronMcpGetComputerUseChatTurn,
   electronMcpGetRuntimeStatus,
   electronMcpInterruptComputerUse,
-  electronMcpSetComputerUseChatActive,
   electronMcpListTools,
   electronMcpOpenConfigFile,
   electronMcpReadConfigText,
+  electronMcpSetComputerUseChatActive,
   electronMcpTestServer,
   electronMcpWriteConfigText,
 } from '../../../../shared/eventa'
@@ -194,13 +195,13 @@ function extractPlaywrightRefFromTarget(target: unknown): { element?: string, re
     return null
 
   const trimmed = target.trim()
-  const match = trimmed.match(/\[ref=([^\]\s]+)\]/) ?? trimmed.match(/\bref=([^\]\s]+)/)
+  const match = trimmed.match(/\[ref=(\S+)\]/) ?? trimmed.match(/\bref=(\S+)/)
   if (!match?.[1])
     return null
 
   const element = trimmed
-    .replace(/\s*\[ref=[^\]]+\]\s*$/, '')
-    .replace(/\s*\bref=[^\s]+\s*$/, '')
+    .replace(/\s*\[ref=\S+\]\s*$/, '')
+    .replace(/\s*\bref=\S+\s*$/, '')
     .trim()
   return {
     element: element || undefined,
@@ -288,7 +289,7 @@ function sanitizeBrowserMcpPayload(payload: ElectronMcpCallToolPayload): Electro
     ...payload,
     arguments: normalized.args,
     debug: {
-      ...(payload.debug ?? {}),
+      ...payload.debug,
       mainSanitizedBrowserPayload: true,
       mainOriginalArguments: previewMcpDebugValue(payload.arguments),
       mainSanitizedArguments: previewMcpDebugValue(normalized.args),
@@ -400,6 +401,58 @@ function describeServerCommand(config: ElectronMcpStdioServerConfig) {
   return config.url ?? config.command ?? ''
 }
 
+const LUMI_EXEC_PATH_PLACEHOLDER = '$' + '{LUMI_EXEC_PATH}'
+const LUMI_APP_PATH_PLACEHOLDER = '$' + '{LUMI_APP_PATH}'
+const LUMI_RESOURCES_PATH_PLACEHOLDER = '$' + '{LUMI_RESOURCES_PATH}'
+
+function mcpRuntimePaths() {
+  const appPath = app.getAppPath()
+  return {
+    appPath,
+    execPath: process.execPath,
+    resourcesPath: process.resourcesPath || resolve(appPath, '..'),
+  }
+}
+
+/**
+ * Expands Lumi runtime placeholders used by bundled MCP presets.
+ *
+ * Before:
+ * - "${LUMI_APP_PATH}/node_modules/@proj-airi/computer-use-mcp/dist/bin/run.mjs"
+ *
+ * After:
+ * - "C:/Program Files/Lumi/resources/app.asar/node_modules/@proj-airi/computer-use-mcp/dist/bin/run.mjs"
+ */
+function expandMcpRuntimePlaceholders(value: string) {
+  const paths = mcpRuntimePaths()
+  return value
+    .replaceAll(LUMI_EXEC_PATH_PLACEHOLDER, paths.execPath)
+    .replaceAll(LUMI_APP_PATH_PLACEHOLDER, paths.appPath)
+    .replaceAll(LUMI_RESOURCES_PATH_PLACEHOLDER, paths.resourcesPath)
+}
+
+function expandMcpStringRecord(record: Record<string, string> | undefined) {
+  if (!record)
+    return undefined
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [
+      key,
+      expandMcpRuntimePlaceholders(value),
+    ]),
+  )
+}
+
+function resolveMcpServerConfig(config: ElectronMcpStdioServerConfig): ElectronMcpStdioServerConfig {
+  return {
+    ...config,
+    command: config.command ? expandMcpRuntimePlaceholders(config.command) : undefined,
+    args: config.args?.map(arg => expandMcpRuntimePlaceholders(arg)),
+    cwd: config.cwd ? expandMcpRuntimePlaceholders(config.cwd) : undefined,
+    env: expandMcpStringRecord(config.env),
+    headers: expandMcpStringRecord(config.headers),
+  }
+}
+
 function getRequestTimeout(config: ElectronMcpStdioServerConfig) {
   return config.requestTimeoutMs
     ?? (config.longRunning ? mcpLongRunningRequestTimeoutMsec : mcpRequestTimeoutMsec)
@@ -451,24 +504,25 @@ function extendMcpEnvironment(overrides: Record<string, string>) {
 }
 
 function createTransport(config: ElectronMcpStdioServerConfig): McpClientTransport {
-  if (config.url) {
-    return new StreamableHTTPClientTransport(new URL(config.url), {
-      requestInit: config.headers
-        ? { headers: config.headers }
+  const resolvedConfig = resolveMcpServerConfig(config)
+  if (resolvedConfig.url) {
+    return new StreamableHTTPClientTransport(new URL(resolvedConfig.url), {
+      requestInit: resolvedConfig.headers
+        ? { headers: resolvedConfig.headers }
         : undefined,
     })
   }
 
-  if (!config.command)
+  if (!resolvedConfig.command)
     throw new Error('MCP server must define either command or url')
 
   return new StdioClientTransport({
-    command: config.command,
-    args: config.args ?? [],
+    command: resolvedConfig.command,
+    args: resolvedConfig.args ?? [],
     // MCP-specific variables extend the desktop environment so stdio commands
     // still retain PATH and can resolve node/pnpm exactly like existing entries.
-    env: config.env ? extendMcpEnvironment(config.env) : undefined,
-    cwd: resolveMcpWorkingDirectory(config.cwd),
+    env: resolvedConfig.env ? extendMcpEnvironment(resolvedConfig.env) : undefined,
+    cwd: resolveMcpWorkingDirectory(resolvedConfig.cwd),
     stderr: 'pipe',
   })
 }
@@ -549,7 +603,8 @@ export function createMcpStdioManager(): McpStdioManager {
   }
 
   const startServer = async (name: string, config: ElectronMcpStdioServerConfig) => {
-    const transport = createTransport(config)
+    const resolvedConfig = resolveMcpServerConfig(config)
+    const transport = createTransport(resolvedConfig)
     const client = new Client({
       name: `proj-airi:stage-tamagotchi:mcp:${name}`,
       version: app.getVersion(),
@@ -563,18 +618,18 @@ export function createMcpStdioManager(): McpStdioManager {
           log.withFields({ serverName: name }).warn(text)
         }
       })
-      sessions.set(name, { client, transport, config })
+      sessions.set(name, { client, transport, config: resolvedConfig })
       setRuntimeStatus({
         name,
         state: 'running',
-        command: describeServerCommand(config),
-        args: config.args ?? [],
+        command: describeServerCommand(resolvedConfig),
+        args: resolvedConfig.args ?? [],
         pid: getTransportPid(transport),
-        startupMode: getStartupMode(config),
-        longRunning: config.longRunning,
-        persistent: config.persistent,
-        requestTimeoutMs: getRequestTimeout(config),
-        maxTotalTimeoutMs: getMaxTotalTimeout(config),
+        startupMode: getStartupMode(resolvedConfig),
+        longRunning: resolvedConfig.longRunning,
+        persistent: resolvedConfig.persistent,
+        requestTimeoutMs: getRequestTimeout(resolvedConfig),
+        maxTotalTimeoutMs: getMaxTotalTimeout(resolvedConfig),
       })
     }
     catch (error) {
@@ -725,13 +780,13 @@ export function createMcpStdioManager(): McpStdioManager {
           // Approval controls are owned by Electron's native dialog, never the model.
           .filter(item => !isComputerUseApprovalTool(serverName, item.name))
           .map<ElectronMcpToolDescriptor>(item => ({
-          serverName,
-          name: `${serverName}${toolNameSeparator}${item.name}`,
-          toolName: item.name,
-          description: item.description,
-          inputSchema: item.inputSchema,
-          serverLongRunning: session.config.longRunning,
-          serverPersistent: session.config.persistent,
+            serverName,
+            name: `${serverName}${toolNameSeparator}${item.name}`,
+            toolName: item.name,
+            description: item.description,
+            inputSchema: item.inputSchema,
+            serverLongRunning: session.config.longRunning,
+            serverPersistent: session.config.persistent,
           }))
       }
       catch (error) {

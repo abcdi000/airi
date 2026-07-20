@@ -789,7 +789,9 @@ pages:
         presets-title: Quick presets
         minecraft-preset-description: Add a persistent Minecraft MCP. Open your Minecraft Java world to LAN first; the preset connects to localhost:25565 and AIRI starts it on first use, then keeps it alive until AIRI exits.
         computer-use-preset-title: Windows Computer Use preset
-        computer-use-preset-description: Add Lumi's local Windows control MCP. Existing Playwright MCP remains the browser route; native window actions observe first and ask for confirmation before execution.
+        computer-use-preset-description: Add Lumi's local Windows control MCP. Installed builds use the bundled service; Playwright remains the browser route, while native window actions observe first and ask for confirmation before execution.
+        playwright-preset-title: Playwright Browser preset
+        playwright-preset-description: Add Lumi's bundled Playwright MCP for opening pages, clicking, typing, screenshots, tabs, and page-state inspection.
       status:
         unknown: not loaded
       actions:
@@ -799,6 +801,7 @@ pages:
         add-server: Add server
         add-minecraft-preset: Add Minecraft MCP preset
         add-computer-use-preset: Add Windows Computer Use preset
+        add-playwright-preset: Add Playwright MCP preset
         add-env: Add var
         add-header: Add header
         remove: Remove
@@ -895,6 +898,7 @@ pages:
         restarted: All restarted! {started} started, {failed} failed, {skipped} skipped.
         minecraft-preset-added: Minecraft MCP preset added. After saving and restarting, AIRI will start it automatically when the tool is first used.
         computer-use-preset-added: Windows Computer Use MCP preset added. After saving and restarting, Lumi will use it through the existing MCP pipeline.
+        playwright-preset-added: Playwright MCP preset added. After saving and restarting, Lumi will use the bundled browser automation service.
   flux:
     title: Flux
     buy: Charge

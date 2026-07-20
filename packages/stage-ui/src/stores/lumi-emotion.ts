@@ -1,6 +1,9 @@
 import type { LumiEmotionTag, LumiEmotionTurnInput, LumiRelationshipAssessment, LumiRelationshipGateResult, LumiStateSnapshot } from '../../../lumi-runtime/src'
 
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
+import { defineStore } from 'pinia'
+import { computed, ref } from 'vue'
+
 import {
   checkLumiRelationshipGate,
   createDefaultLumiStateSnapshot,
@@ -10,8 +13,6 @@ import {
   selectLumiExpression,
   updateLumiStateAfterTurn,
 } from '../../../lumi-runtime/src'
-import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
 
 const LUMI_EMOTION_STORAGE_KEY = 'lumi/emotion/state:v1'
 const LUMI_EMOTION_SEED_STORAGE_KEY = 'lumi/emotion/seed:v1'
@@ -106,6 +107,19 @@ export const useLumiEmotionStore = defineStore('lumi-emotion', () => {
     snapshot.value = normalizeStateSnapshot(state)
   }
 
+  function exportSnapshot() {
+    return {
+      snapshot: snapshot.value,
+      seedId: seedId.value,
+      exportedAt: new Date().toISOString(),
+    }
+  }
+
+  function importSnapshot(input: { snapshot?: LumiStateSnapshot | null, seedId?: string }) {
+    snapshot.value = input.snapshot ? normalizeStateSnapshot(input.snapshot) : null
+    seedId.value = typeof input.seedId === 'string' ? input.seedId : ''
+  }
+
   function resetState() {
     snapshot.reset()
     seedId.reset()
@@ -125,6 +139,8 @@ export const useLumiEmotionStore = defineStore('lumi-emotion', () => {
     setPendingRelationshipAssessment,
     clearPendingRelationshipAssessment,
     setState,
+    exportSnapshot,
+    importSnapshot,
     resetState,
     pendingRelationshipAssessment,
     pendingRelationshipGate,

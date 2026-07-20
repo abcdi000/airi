@@ -4,6 +4,10 @@ import type {
 } from '../../../../shared/eventa'
 
 type TranslateMcpMessage = (key: string, params?: Record<string, unknown>) => string
+type McpPresetId = 'minecraft' | 'computer_use' | 'playwright'
+
+const LUMI_EXEC_PATH = '$' + '{LUMI_EXEC_PATH}'
+const LUMI_APP_PATH = '$' + '{LUMI_APP_PATH}'
 
 /** Editable MCP server form state used by the settings page. */
 export interface ServerForm {
@@ -28,6 +32,17 @@ export interface LoadedServerForms {
   servers: ServerForm[]
   savedIds: Set<string>
   selectedRowId: string
+}
+
+/** One-click MCP preset shown by the desktop MCP settings page. */
+export interface McpServerPreset {
+  id: McpPresetId
+  titleKey: string
+  descriptionKey: string
+  icon: string
+  actionLabelKey: string
+  addedMessageKey: string
+  create: () => ServerForm
 }
 
 function makeRowId() {
@@ -104,15 +119,14 @@ export function createWindowsComputerUseMcpServerForm(): ServerForm {
   return {
     rowId: makeRowId(),
     identifier: 'computer_use',
-    command: 'pnpm',
+    command: LUMI_EXEC_PATH,
     url: '',
     headersEntries: [],
     argsText: [
-      '-F',
-      '@proj-airi/computer-use-mcp',
-      'start',
+      `${LUMI_APP_PATH}/node_modules/@proj-airi/computer-use-mcp/dist/bin/run.mjs`,
     ].join('\n'),
     envEntries: [
+      { key: 'ELECTRON_RUN_AS_NODE', value: '1' },
       { key: 'COMPUTER_USE_EXECUTOR', value: 'windows-local' },
       { key: 'COMPUTER_USE_APPROVAL_MODE', value: 'never' },
       { key: 'COMPUTER_USE_MAX_OPERATIONS', value: '16' },
@@ -122,7 +136,7 @@ export function createWindowsComputerUseMcpServerForm(): ServerForm {
       // bridge off prevents a second browser-control surface from competing with it.
       { key: 'COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED', value: 'false' },
     ],
-    cwd: '.',
+    cwd: LUMI_APP_PATH,
     enabled: true,
     startupMode: 'on_first_use',
     longRunning: true,
@@ -131,6 +145,60 @@ export function createWindowsComputerUseMcpServerForm(): ServerForm {
     maxTotalTimeoutMs: '180000',
   }
 }
+
+/** Creates Lumi's bundled Playwright MCP row for browser inspection and actions. */
+export function createPlaywrightMcpServerForm(): ServerForm {
+  return {
+    rowId: makeRowId(),
+    identifier: 'playwright',
+    command: LUMI_EXEC_PATH,
+    url: '',
+    headersEntries: [],
+    argsText: [
+      `${LUMI_APP_PATH}/node_modules/@proj-airi/playwright-extra-mcp/dist/bin/run.mjs`,
+    ].join('\n'),
+    envEntries: [
+      { key: 'ELECTRON_RUN_AS_NODE', value: '1' },
+    ],
+    cwd: LUMI_APP_PATH,
+    enabled: true,
+    startupMode: 'on_first_use',
+    longRunning: true,
+    persistent: true,
+    requestTimeoutMs: '60000',
+    maxTotalTimeoutMs: '180000',
+  }
+}
+
+export const MCP_SERVER_PRESETS: McpServerPreset[] = [
+  {
+    id: 'minecraft',
+    titleKey: 'add.presets-title',
+    descriptionKey: 'add.minecraft-preset-description',
+    icon: 'i-solar:gamepad-bold-duotone',
+    actionLabelKey: 'actions.add-minecraft-preset',
+    addedMessageKey: 'messages.minecraft-preset-added',
+    create: createMinecraftMcpServerForm,
+  },
+  {
+    id: 'computer_use',
+    titleKey: 'add.computer-use-preset-title',
+    descriptionKey: 'add.computer-use-preset-description',
+    icon: 'i-solar:cursor-square-bold-duotone',
+    actionLabelKey: 'actions.add-computer-use-preset',
+    addedMessageKey: 'messages.computer-use-preset-added',
+    create: createWindowsComputerUseMcpServerForm,
+  },
+  {
+    id: 'playwright',
+    titleKey: 'add.playwright-preset-title',
+    descriptionKey: 'add.playwright-preset-description',
+    icon: 'i-solar:global-line-duotone',
+    actionLabelKey: 'actions.add-playwright-preset',
+    addedMessageKey: 'messages.playwright-preset-added',
+    create: createPlaywrightMcpServerForm,
+  },
+]
 
 /** Resolves the persisted server identifier for a selected row. */
 export function findServerIdentifierByRowId(servers: ServerForm[], rowId: string) {

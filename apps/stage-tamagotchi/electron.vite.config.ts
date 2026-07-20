@@ -23,6 +23,12 @@ export default defineConfig({
   main: {
     build: {
       externalizeDeps: {
+        exclude: [
+          // Lumi's Claude Code main-process service shares this pure TypeScript
+          // router with the renderer. Bundle it so installed Electron never tries
+          // to type-strip @proj-airi/stage-ui source files from node_modules.
+          '@proj-airi/stage-ui',
+        ],
         include: [
           // Native modules that have `__dirname` usages. Externalize to avoid bundling
           // them into ESM and causing issues in runtime.
@@ -72,6 +78,7 @@ export default defineConfig({
     resolve: {
       alias: {
         '@proj-airi/i18n': resolve(join(import.meta.dirname, '..', '..', 'packages', 'i18n', 'src')),
+        '@proj-airi/stage-ui/libs/lumi-agent': resolve(join(import.meta.dirname, '..', '..', 'packages', 'stage-ui', 'src', 'libs', 'lumi-agent', 'index.ts')),
         '@proj-airi/server-runtime/server': resolve(join(import.meta.dirname, '..', '..', 'packages', 'server-runtime', 'src', 'server', 'index.ts')),
         '@proj-airi/server-runtime': resolve(join(import.meta.dirname, '..', '..', 'packages', 'server-runtime', 'src', 'index.ts')),
       },

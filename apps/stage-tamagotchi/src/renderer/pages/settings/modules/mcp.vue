@@ -21,7 +21,6 @@ import McpConnectionTestPanel from './components/McpConnectionTestPanel.vue'
 import McpJsonEditor from './components/McpJsonEditor.vue'
 import McpServerForm from './components/McpServerForm.vue'
 
-import { useTamagotchiMcpToolsStore } from '../../../stores/mcp-tools'
 import {
   electronMcpApplyAndRestart,
   electronMcpGetRuntimeStatus,
@@ -31,14 +30,14 @@ import {
   electronMcpWriteConfigText,
 } from '../../../../shared/eventa'
 import { parseElectronMcpConfigText } from '../../../../shared/mcp-config'
+import { useTamagotchiMcpToolsStore } from '../../../stores/mcp-tools'
 import {
   buildConfigFile,
   buildServerConfig,
   createServerForm,
-  createMinecraftMcpServerForm,
-  createWindowsComputerUseMcpServerForm,
   findServerIdentifierByRowId,
   loadServerForms,
+  MCP_SERVER_PRESETS,
   previewServerCommand,
   syncJsonDraftFromServers,
 } from './mcp-config'
@@ -241,22 +240,16 @@ function createUniqueIdentifier(base: string) {
   return `${base}_${index}`
 }
 
-function addMinecraftPreset() {
-  const server = createMinecraftMcpServerForm()
+function addPreset(presetId: string) {
+  const preset = MCP_SERVER_PRESETS.find(item => item.id === presetId)
+  if (!preset)
+    return
+  const server = preset.create()
   server.identifier = createUniqueIdentifier(server.identifier)
   servers.value.push(server)
   expandedIds.value.add(server.rowId)
   testRowId.value = server.rowId
-  infoMessage.value = tn('messages.minecraft-preset-added')
-}
-
-function addComputerUsePreset() {
-  const server = createWindowsComputerUseMcpServerForm()
-  server.identifier = createUniqueIdentifier(server.identifier)
-  servers.value.push(server)
-  expandedIds.value.add(server.rowId)
-  testRowId.value = server.rowId
-  infoMessage.value = tn('messages.computer-use-preset-added')
+  infoMessage.value = tn(preset.addedMessageKey)
 }
 
 function removeServer(rowId: string) {
@@ -495,35 +488,23 @@ onMounted(async () => {
         </p>
       </div>
 
-      <div class="flex flex-col gap-3 rounded-lg border border-primary-500/20 bg-primary-500/5 p-3">
+      <div
+        v-for="preset in MCP_SERVER_PRESETS"
+        :key="preset.id"
+        class="flex flex-col gap-3 border border-primary-500/20 rounded-lg bg-primary-500/5 p-3"
+      >
         <div class="flex flex-col gap-1">
           <div class="text-sm font-medium">
-            {{ tn('add.presets-title') }}
+            {{ tn(preset.titleKey) }}
           </div>
           <p class="text-xs text-neutral-500 dark:text-neutral-400">
-            {{ tn('add.minecraft-preset-description') }}
+            {{ tn(preset.descriptionKey) }}
           </p>
         </div>
         <Button
           variant="secondary" size="sm" :disabled="isBusy"
-          icon="i-solar:gamepad-bold-duotone" :label="tn('actions.add-minecraft-preset')"
-          @click="addMinecraftPreset"
-        />
-      </div>
-
-      <div class="flex flex-col gap-3 rounded-lg border border-primary-500/20 bg-primary-500/5 p-3">
-        <div class="flex flex-col gap-1">
-          <div class="text-sm font-medium">
-            {{ tn('add.computer-use-preset-title') }}
-          </div>
-          <p class="text-xs text-neutral-500 dark:text-neutral-400">
-            {{ tn('add.computer-use-preset-description') }}
-          </p>
-        </div>
-        <Button
-          variant="secondary" size="sm" :disabled="isBusy"
-          icon="i-solar:cursor-square-bold-duotone" :label="tn('actions.add-computer-use-preset')"
-          @click="addComputerUsePreset"
+          :icon="preset.icon" :label="tn(preset.actionLabelKey)"
+          @click="addPreset(preset.id)"
         />
       </div>
 

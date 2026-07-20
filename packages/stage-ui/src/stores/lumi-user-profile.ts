@@ -11,34 +11,34 @@ export type LumiUserProfileStatus = 'active' | 'archived' | 'deleted'
 export type LumiUserProfilePendingStatus = 'pending' | 'approved' | 'rejected'
 export type LumiUserProfileSourceKind = 'chat' | 'daily_diary' | 'screen_observation' | 'manual' | 'bootstrap_profile' | 'current_state'
 
-export type LumiUserProfileKey =
-  | 'nickname'
-  | 'long_term_goals'
-  | 'long_term_identity'
-  | 'long_term_interests'
-  | 'learning_direction'
-  | 'communication_preference'
-  | 'relationship_to_lumi'
-  | 'emotional_patterns'
-  | 'strengths'
-  | 'encouragement_guidelines'
-  | 'project_context'
-  | 'relationship_guidelines'
-  | 'important_understanding'
-  | 'identity'
-  | 'personality_traits'
-  | 'relationship_boundary'
-  | 'life_decisions'
-  | 'current_focus'
-  | 'recent_interests'
-  | 'active_project'
-  | 'unresolved_problem'
-  | 'current_learning_topic'
-  | 'mood'
-  | 'energy'
-  | 'focus_level'
-  | 'main_activity'
-  | 'pressure_source'
+export type LumiUserProfileKey
+  = | 'nickname'
+    | 'long_term_goals'
+    | 'long_term_identity'
+    | 'long_term_interests'
+    | 'learning_direction'
+    | 'communication_preference'
+    | 'relationship_to_lumi'
+    | 'emotional_patterns'
+    | 'strengths'
+    | 'encouragement_guidelines'
+    | 'project_context'
+    | 'relationship_guidelines'
+    | 'important_understanding'
+    | 'identity'
+    | 'personality_traits'
+    | 'relationship_boundary'
+    | 'life_decisions'
+    | 'current_focus'
+    | 'recent_interests'
+    | 'active_project'
+    | 'unresolved_problem'
+    | 'current_learning_topic'
+    | 'mood'
+    | 'energy'
+    | 'focus_level'
+    | 'main_activity'
+    | 'pressure_source'
 
 export interface LumiUserProfileSource {
   kind: LumiUserProfileSourceKind
@@ -806,6 +806,32 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
     }
   }
 
+  async function importSnapshot(snapshot: LumiUserProfileSnapshot | LumiUserProfilePersistenceSnapshot) {
+    const nextSnapshot: LumiUserProfilePersistenceSnapshot = {
+      entries: Array.isArray(snapshot.entries) ? snapshot.entries : [],
+      pendingUpdates: Array.isArray(snapshot.pendingUpdates) ? snapshot.pendingUpdates : [],
+      events: Array.isArray(snapshot.events) ? snapshot.events : [],
+      autoUpdateEnabled: Boolean(snapshot.autoUpdateEnabled),
+      bootstrapVersion: typeof snapshot.bootstrapVersion === 'string' ? snapshot.bootstrapVersion : '',
+      dbPath: snapshot.dbPath,
+      meta: snapshot.meta,
+    }
+
+    const bridge = persistenceBridge.value
+    if (bridge) {
+      try {
+        applyPersistenceSnapshot(await bridge.replaceSnapshot(nextSnapshot))
+      }
+      catch (error) {
+        warnPersistenceFailure('import profile snapshot', error)
+        throw error
+      }
+      return
+    }
+
+    applyPersistenceSnapshot(nextSnapshot)
+  }
+
   function buildRelevantContext(input: {
     messageText: string
     recentMessages?: ChatHistoryItem[]
@@ -852,7 +878,7 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
     if (!normalized)
       return candidates
 
-    const focusMatch = normalized.match(/(?:我现在|最近|这段时间|目前)(?:主要)?(?:在|想|关注|研究|做|开发|写)([^。！？\n]{2,40})/)
+    const focusMatch = normalized.match(/(?:我现在|最近|这段时间|目前)(?:主要)?(?:[在想做写]|关注|研究|开发)([^。！？\n]{2,40})/)
     if (focusMatch?.[1]) {
       candidates.push({
         layer: 'dynamic',
@@ -1107,6 +1133,7 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
     setAutoUpdateEnabled,
     clearProfile,
     exportSnapshot,
+    importSnapshot,
     buildRelevantContext,
     parseCuratorOutput,
     extractDeterministicCandidates,
@@ -1793,7 +1820,7 @@ function isSimilarText(left: string, right: string) {
 }
 
 function normalizeSearchText(text: string) {
-  return text.toLowerCase().replace(/[^\p{L}\p{N}_\u4E00-\u9FFF]+/gu, ' ').trim()
+  return text.toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, ' ').trim()
 }
 
 function isToday(value: string) {

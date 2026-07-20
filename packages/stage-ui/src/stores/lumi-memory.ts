@@ -1,6 +1,9 @@
 import type { LumiMemoryCandidate, LumiMemoryFragment, LumiMemoryRetrievalResult, LumiMemorySearchRequest, LumiMemoryStatus } from '../../../lumi-runtime/src'
 
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
+import { defineStore } from 'pinia'
+import { computed, ref, shallowRef } from 'vue'
+
 import {
   decideLumiMemoryStatus,
   extractLumiMemoryCandidates,
@@ -10,8 +13,6 @@ import {
   parseLumiMemoryCuratorOutput,
   retrieveLumiMemories,
 } from '../../../lumi-runtime/src'
-import { defineStore } from 'pinia'
-import { computed, ref, shallowRef } from 'vue'
 
 export type { LumiMemoryFragment, LumiMemoryStatus, LumiMemoryType } from '../../../lumi-runtime/src'
 
@@ -635,6 +636,62 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     void persistenceBridge.value?.clear().catch(error => console.warn('[lumi-memory] failed to clear SQLite persistence', error))
   }
 
+  async function exportSnapshot(): Promise<LumiMemoryPersistenceSnapshot> {
+    await initializePersistence()
+    const bridge = persistenceBridge.value
+    if (bridge) {
+      const snapshot = await bridge.getSnapshot()
+      return {
+        fragments: snapshot.fragments.map(fragment => normalizeMemoryScores(fragment)),
+        events: snapshot.events,
+        seedId: snapshot.seedId,
+        dbPath: snapshot.dbPath,
+      }
+    }
+    return {
+      fragments: fragments.value.map(fragment => normalizeMemoryScores(fragment)),
+      events: events.value,
+      seedId: seedId.value,
+      dbPath: persistenceDbPath.value || undefined,
+    }
+  }
+
+  async function importSnapshot(snapshot: LumiMemoryPersistenceSnapshot) {
+    const nextSnapshot: LumiMemoryPersistenceSnapshot = {
+      fragments: Array.isArray(snapshot.fragments)
+        ? snapshot.fragments.map(fragment => normalizeMemoryScores(fragment)).slice(0, LUMI_SEMANTIC_MEMORY_LIMIT)
+        : [],
+      events: Array.isArray(snapshot.events) ? snapshot.events.slice(0, 200) : [],
+      seedId: typeof snapshot.seedId === 'string' ? snapshot.seedId : '',
+      dbPath: snapshot.dbPath,
+    }
+
+    const bridge = persistenceBridge.value
+    if (bridge) {
+      try {
+        const persisted = await bridge.replaceSnapshot(nextSnapshot)
+        fragments.value = persisted.fragments.map(fragment => normalizeMemoryScores(fragment))
+        events.value = persisted.events
+        seedId.value = persisted.seedId
+        persistenceDbPath.value = persisted.dbPath ?? persistenceDbPath.value
+      }
+      catch (error) {
+        persistenceLastError.value = error instanceof Error ? error.message : String(error)
+        throw error
+      }
+    }
+    else {
+      fragments.value = nextSnapshot.fragments
+      events.value = nextSnapshot.events
+      seedId.value = nextSnapshot.seedId
+    }
+
+    semanticMemoryVectors.clear()
+    semanticIndexReady.value = false
+    semanticIndexedCount.value = 0
+    await loadPersistedSemanticVectors()
+  }
+
   function persistMemory(memory: LumiMemoryFragment) {
     const bridge = persistenceBridge.value
     if (!bridge)
@@ -846,6 +903,8 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     mergeMemories,
     setLatestTopic,
     getLatestTopic,
+    exportSnapshot,
+    importSnapshot,
     memoryDriver,
     resetState,
   }
@@ -917,7 +976,7 @@ function isEchoOfExistingMemory(content: string, memories: LumiMemoryFragment[])
     return false
 
   const normalized = normalizeForEchoCheck(content)
-  return memories.some(memory => {
+  return memories.some((memory) => {
     const existing = normalizeForEchoCheck(memory.content)
     return normalized === existing
       || (normalized.length > 32 && existing.includes(normalized))
@@ -1083,7 +1142,7 @@ function memoryTokens(text: string): Set<string> {
   for (const match of text.toLowerCase().match(/[a-z0-9_]{2,}/g) ?? [])
     tokens.add(match)
 
-  const cjk = text.match(/[\u3400-\u9fff]/gu) ?? []
+  const cjk = text.match(/[\u3400-\u9FFF]/gu) ?? []
   for (let index = 0; index < cjk.length; index += 1) {
     tokens.add(cjk[index])
     if (index + 1 < cjk.length)

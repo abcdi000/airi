@@ -22,10 +22,12 @@
     "dev:xwayland": "electron-vite dev -- --ozone-platform=x11",
     "build": "electron-vite build",
     "postinstall": "electron-builder install-app-deps",
-    "build:unpack": "pnpm run build && electron-builder --dir",
-    "build:win": "pnpm run build && electron-builder --win",
-    "build:mac": "pnpm run build && electron-builder --mac",
-    "build:linux": "pnpm run build && electron-builder --linux",
+    "build:mcp-services": "pnpm -F @proj-airi/computer-use-mcp build && pnpm -F @proj-airi/playwright-extra-mcp build",
+    "build:python-runtime": "tsx scripts/prepare-vector-python-runtime.ts",
+    "build:unpack": "pnpm run build:mcp-services && pnpm run build:python-runtime && pnpm run build && electron-builder --dir",
+    "build:win": "pnpm run build:mcp-services && pnpm run build:python-runtime && pnpm run build && electron-builder --win nsis-web",
+    "build:mac": "pnpm run build:mcp-services && pnpm run build && electron-builder --mac",
+    "build:linux": "pnpm run build:mcp-services && pnpm run build && electron-builder --linux",
     "rename-artifacts": "mkdir -p bundle && tsx scripts/rename-artifacts.ts",
     "merge-latest-mac": "tsx scripts/merge-latest-mac.ts",
     "regenerate-windows-latest": "tsx scripts/regenerate-windows-latest.ts",
@@ -57,11 +59,13 @@
     "@pinia/colada": "catalog:",
     "@proj-airi/audio": "workspace:^",
     "@proj-airi/ccc": "workspace:^",
+    "@proj-airi/computer-use-mcp": "workspace:^",
     "@proj-airi/drizzle-duckdb-wasm": "catalog:",
     "@proj-airi/font-chillroundm": "workspace:^",
     "@proj-airi/font-cjkfonts-allseto": "workspace:^",
     "@proj-airi/font-xiaolai": "workspace:^",
     "@proj-airi/i18n": "workspace:^",
+    "@proj-airi/playwright-extra-mcp": "workspace:^",
     "@proj-airi/plugin-sdk-tamagotchi": "workspace:^",
     "@proj-airi/server-sdk": "workspace:*",
     "@proj-airi/stage-layouts": "workspace:^",
@@ -210,7 +214,7 @@
     "yauzl": "^3.3.0"
   },
   "build": {
-    "appId": "ai.moeru.airi",
+    "appId": "app.lumi.desktop",
     "extends": "electron-builder.config.ts"
   }
 }

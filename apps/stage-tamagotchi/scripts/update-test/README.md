@@ -5,7 +5,7 @@ This directory provides a local mocked update-server workflow for Stage Tamagotc
 It is intended to verify AIRI's updater path:
 
 - explicit `UPDATE_SERVER_URL` override mode
-- lane switching (`stable`, `beta`, `alpha`, `nightly`) via `AIRI_UPDATE_CHANNEL`
+- lane switching (`stable`, `beta`, `alpha`, `nightly`) via `LUMI_UPDATE_CHANNEL`
 - developer-only updater diagnostics inspection
 
 ## Files
@@ -38,7 +38,7 @@ Then, in another terminal:
 cd apps/stage-tamagotchi
 UPDATE_SERVER_URL=http://127.0.0.1:8787/stable pnpm run dev
 # optional lane override:
-# AIRI_UPDATE_CHANNEL=beta UPDATE_SERVER_URL=http://127.0.0.1:8787/beta pnpm run dev
+# LUMI_UPDATE_CHANNEL=beta UPDATE_SERVER_URL=http://127.0.0.1:8787/beta pnpm run dev
 ```
 
 ## Verification Flow
@@ -86,7 +86,7 @@ Environment variables supported by the wrapper:
 - `CHANNEL`
 - `TARGET`
 - `VERSION`
-- `AIRI_UPDATE_CHANNEL` (at app launch time; independent from `CHANNEL`)
+- `LUMI_UPDATE_CHANNEL` (at app launch time; independent from `CHANNEL`)
 - `RUN_SECONDS` (matrix app runtime per case; default `18`)
 - `LOG_DIR` (matrix artifact directory override)
 

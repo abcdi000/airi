@@ -3,7 +3,7 @@
 <p align="center">A personal Windows desktop companion fork based on <a href="https://github.com/moeru-ai/airi">Project AIRI</a>.</p>
 
 > [!IMPORTANT]
-> Lumi is a personal-use fork of Project AIRI, customized for a single long-running companion character and Windows desktop workflows. It is not an official Project AIRI release and is not affiliated with or endorsed by the AIRI maintainers.
+> Lumi is a personal-use fork of Project AIRI, customized for a single long-running companion character and Windows desktop workflows. It is not an official Project AIRI release.
 >
 > This repository keeps the original AIRI MIT License and copyright notice. The original upstream project is [moeru-ai/airi](https://github.com/moeru-ai/airi).
 

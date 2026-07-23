@@ -54,6 +54,12 @@ vi.mock('../../modules/consciousness', () => ({
   }),
 }))
 
+vi.mock('../../modules/hearing', () => ({
+  useHearingSpeechInputPipeline: () => ({
+    transcribeForRecording: vi.fn(),
+  }),
+}))
+
 vi.mock('../../providers', () => ({
   useProvidersStore: () => ({}),
 }))

@@ -1,0 +1,36 @@
+{
+  "name": "@proj-airi/lumi-server",
+  "type": "module",
+  "version": "0.10.2",
+  "private": true,
+  "description": "Standalone authoritative Lumi Online server process",
+  "license": "MIT",
+  "exports": {
+    "./config": "./src/config.ts"
+  },
+  "bin": {
+    "lumi-server": "./dist/cli.mjs"
+  },
+  "files": [
+    "README.md",
+    "dist",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsdown src/cli.ts --dts",
+    "dev": "tsx watch src/cli.ts start --config ./lumi-server.json",
+    "start": "tsx src/cli.ts start --config ./lumi-server.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@moeru/std": "catalog:",
+    "@proj-airi/lumi-server-runtime": "workspace:*",
+    "cac": "catalog:",
+    "valibot": "catalog:"
+  },
+  "devDependencies": {
+    "tsx": "catalog:",
+    "vitest": "catalog:vitest"
+  }
+}

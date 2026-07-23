@@ -7,7 +7,7 @@ import type {
   LumiRankedMemory,
 } from './types'
 
-import { isRecallableMemory } from './validation'
+import { canAccessLumiMemory, isRecallableMemory } from './validation'
 
 export interface LumiRetrievalOptions {
   includeMigratedUsersForLocal?: boolean
@@ -32,6 +32,7 @@ const RELATIONSHIP_TYPES = new Set<LumiMemoryType>(['relationship_event', 'confl
 const LONG_TERM_TYPES = new Set<LumiMemoryType>([
   'user_preference',
   'user_fact',
+  'persona_fact',
   'persona_preference',
   'shared_event',
   'promise',
@@ -51,24 +52,24 @@ const MEMORY_STOPWORDS = new Set([
   'how',
   'remember',
   'recall',
-  '\u4ec0\u4e48',
-  '\u54ea\u4e2a',
-  '\u54ea\u91cc',
-  '\u600e\u4e48',
-  '\u4e3a\u4ec0',
-  '\u8bb0\u5f97',
-  '\u8fd8\u8bb0',
+  '\u4EC0\u4E48',
+  '\u54EA\u4E2A',
+  '\u54EA\u91CC',
+  '\u600E\u4E48',
+  '\u4E3A\u4EC0',
+  '\u8BB0\u5F97',
+  '\u8FD8\u8BB0',
 ])
 const QUERY_STOPWORDS = new Set([
   'favorite',
-  '\u559c\u6b22',
-  '\u6700\u559c',
+  '\u559C\u6B22',
+  '\u6700\u559C',
   '\u6211\u6700',
-  '\u6211\u559c',
-  '\u4ec0\u4e48',
-  '\u54ea\u4e2a',
-  '\u8bb0\u5f97',
-  '\u8fd8\u8bb0',
+  '\u6211\u559C',
+  '\u4EC0\u4E48',
+  '\u54EA\u4E2A',
+  '\u8BB0\u5F97',
+  '\u8FD8\u8BB0',
 ])
 
 export function retrieveLumiMemories(
@@ -157,31 +158,47 @@ function searchExternalVectorScores(
 export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
   const text = query.toLowerCase()
 
-  if (/(\u662f\u8c01|\u8c01\u662f|\u53eb\u4ec0\u4e48|\u540d\u5b57|\u5973\u670b\u53cb|\u7537\u670b\u53cb|\u597d\u53cb|\u670b\u53cb|\u5907\u6ce8|\u6635\u79f0|\u7528\u6237\u540d|\u8d26\u53f7|\u8d26\u6237)/i.test(text)) {
+  if (/birthday|生日|出生日期|纪念日/i.test(text)) {
     return {
-      preferredTypes: ['user_fact', 'user_preference', 'relationship_event', 'shared_event'],
+      preferredTypes: ['persona_fact', 'user_fact', 'shared_event', 'relationship_event'],
+      queryIntent: 'memory_recall',
+      reason: 'User is asking about a persona or participant date fact.',
+    }
+  }
+
+  if (/\u662F\u8C01|\u8C01\u662F|\u53EB\u4EC0\u4E48|\u540D\u5B57|\u5973\u670B\u53CB|\u7537\u670B\u53CB|\u597D\u53CB|\u670B\u53CB|\u5907\u6CE8|\u6635\u79F0|\u7528\u6237\u540D|\u8D26\u53F7|\u8D26\u6237/.test(text)) {
+    return {
+      preferredTypes: ['persona_fact', 'user_fact', 'user_preference', 'relationship_event', 'shared_event'],
       queryIntent: 'memory_recall',
       reason: 'User is asking for a stored personal relationship or identity fact.',
     }
   }
 
-  if (/\b\d{1,2}[-/]\d{1,2}\b|\u53d1\u751f\u4e86\u4ec0\u4e48|\u90a3\u5929|\u9664\u6b64\u4e4b\u5916|\u8fd8\u6709\u5417|\u522b\u7684\u5417|\u5176\u4ed6\u5417/.test(text)) {
+  if (/\bfavou?rite\b|\blikes?\b|\bprefers?\b|\bdislikes?\b|\bcolou?r\b|最爱|爱好|偏好|喜欢|讨厌/.test(text)) {
     return {
-      preferredTypes: ['shared_event', 'relationship_event', 'emotional_echo', 'user_fact'],
+      preferredTypes: ['persona_preference', 'persona_fact', 'user_preference', 'user_fact', 'shared_event'],
+      queryIntent: 'memory_recall',
+      reason: 'User is asking for a stored persona or participant preference.',
+    }
+  }
+
+  if (/\b\d{1,2}[-/]\d{1,2}\b|\u53D1\u751F\u4E86\u4EC0\u4E48|\u90A3\u5929|\u9664\u6B64\u4E4B\u5916|\u8FD8\u6709\u5417|\u522B\u7684\u5417|\u5176\u4ED6\u5417/.test(text)) {
+    return {
+      preferredTypes: ['persona_fact', 'shared_event', 'relationship_event', 'emotional_echo', 'user_fact'],
       queryIntent: 'memory_recall',
       reason: 'User is asking about a dated event or follow-up to recalled events.',
     }
   }
 
-  if (/remember|recall|\u8fd8\u8bb0\u5f97|\u8bb0\u5f97|\u559c\u6b22\u4ec0\u4e48/.test(text)) {
+  if (/remember|recall|\u8FD8\u8BB0\u5F97|\u8BB0\u5F97|\u559C\u6B22\u4EC0\u4E48/.test(text)) {
     return {
-      preferredTypes: ['user_preference', 'user_fact', 'shared_event'],
+      preferredTypes: ['persona_fact', 'persona_preference', 'user_preference', 'user_fact', 'shared_event'],
       queryIntent: 'memory_recall',
       reason: 'User is asking for remembered personal context.',
     }
   }
 
-  if (/again|\u53c8\u8fd9\u6837|\u6bcf\u6b21\u90fd|\u521a\u624d|\u751f\u6c14|\u54ed/.test(text)) {
+  if (/again|\u53C8\u8FD9\u6837|\u6BCF\u6B21\u90FD|\u521A\u624D|\u751F\u6C14|\u54ED/.test(text)) {
     return {
       preferredTypes: ['conflict_event', 'relationship_event', 'emotional_echo'],
       queryIntent: 'conflict_context',
@@ -189,7 +206,7 @@ export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
     }
   }
 
-  if (/must obey|no boundaries|forget your boundaries|\u6539\u6389|\u5fc5\u987b\u670d\u4ece|\u6ca1\u6709\u8fb9\u754c|\u5fd8\u6389\u4f60\u7684\u8fb9\u754c/.test(text)) {
+  if (/must obey|no boundaries|forget your boundaries|\u6539\u6389|\u5FC5\u987B\u670D\u4ECE|\u6CA1\u6709\u8FB9\u754C|\u5FD8\u6389\u4F60\u7684\u8FB9\u754C/.test(text)) {
     return {
       preferredTypes: ['persona_preference', 'relationship_event'],
       queryIntent: 'boundary_pressure',
@@ -197,7 +214,7 @@ export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
     }
   }
 
-  if (/project|progress|repo|api|backend|migration|\u9879\u76ee|\u8fdb\u5ea6|\u540e\u7aef|\u63a5\u53e3|airi|lumi|\u8fc1\u79fb/.test(text)) {
+  if (/project|progress|repo|api|backend|migration|\u9879\u76EE|\u8FDB\u5EA6|\u540E\u7AEF|\u63A5\u53E3|airi|\u8FC1\u79FB/.test(text)) {
     return {
       preferredTypes: ['project_context', 'promise', 'shared_event'],
       queryIntent: 'project_context',
@@ -276,7 +293,7 @@ function filterSearchPool(
 
   return fragments
     .filter(fragment => fragment.personaId === request.personaId)
-    .filter(fragment => includeMigratedUsers || fragment.userId === request.userId)
+    .filter(fragment => includeMigratedUsers || canAccessLumiMemory(fragment, request))
     .filter(fragment => fragment.status === 'active' && isRecallableMemory(fragment))
     .filter(fragment => !requestTypes.length || requestTypes.includes(fragment.type))
     .sort((left, right) => (right.updatedAt || '').localeCompare(left.updatedAt || ''))
@@ -306,7 +323,7 @@ function uniqueMemoryFragments(memories: LumiMemoryFragment[]): LumiMemoryFragme
 }
 
 function deterministicEmbedding(text: string, dimensions = 64): number[] {
-  const vector = Array.from({ length: dimensions }, () => 0)
+  const vector = new Array<number>(dimensions).fill(0)
   for (const token of tokenize(text)) {
     const index = fnv1a(token) % dimensions
     vector[index] += 1
@@ -446,27 +463,27 @@ function contextDependentEvidenceMarkers(query: string) {
       topic.push(marker.toLowerCase())
   }
 
-  if (/\bentities?\b|\u5b9e\u4f53/.test(text))
-    addSpecific('entity', '\u5b9e\u4f53')
-  if (/\blevels?\b|\u5c42\u7ea7|\u5c42/.test(text))
-    addSpecific('level', '\u5c42\u7ea7', '\u5c42')
-  if (/\bcharacters?\b|\u89d2\u8272/.test(text))
-    addSpecific('character', '\u89d2\u8272')
-  if (/\bmovies?\b|\bfilms?\b|\u7535\u5f71/.test(text))
-    addSpecific('movie', 'film', '\u7535\u5f71')
-  if (/\bgames?\b|\u6e38\u620f/.test(text))
-    addSpecific('game', '\u6e38\u620f')
-  if (/\bitems?\b|\u7269\u54c1|\u9053\u5177/.test(text))
-    addSpecific('item', '\u7269\u54c1', '\u9053\u5177')
-  if (/\bplaces?\b|\blocations?\b|\u5730\u65b9|\u54ea\u91cc/.test(text))
-    addSpecific('place', 'location', '\u5730\u65b9')
+  if (/\bentities?\b|\u5B9E\u4F53/.test(text))
+    addSpecific('entity', '\u5B9E\u4F53')
+  if (/\blevels?\b|\u5C42\u7EA7|\u5C42/.test(text))
+    addSpecific('level', '\u5C42\u7EA7', '\u5C42')
+  if (/\bcharacters?\b|\u89D2\u8272/.test(text))
+    addSpecific('character', '\u89D2\u8272')
+  if (/\bmovies?\b|\bfilms?\b|\u7535\u5F71/.test(text))
+    addSpecific('movie', 'film', '\u7535\u5F71')
+  if (/\bgames?\b|\u6E38\u620F/.test(text))
+    addSpecific('game', '\u6E38\u620F')
+  if (/\bitems?\b|\u7269\u54C1|\u9053\u5177/.test(text))
+    addSpecific('item', '\u7269\u54C1', '\u9053\u5177')
+  if (/\bplaces?\b|\blocations?\b|\u5730\u65B9|\u54EA\u91CC/.test(text))
+    addSpecific('place', 'location', '\u5730\u65B9')
 
-  if (/\bbackrooms?\b|\u540e\u5ba4/.test(text))
-    addTopic('backrooms', '\u540e\u5ba4')
+  if (/\bbackrooms?\b|\u540E\u5BA4/.test(text))
+    addTopic('backrooms', '\u540E\u5BA4')
   if (/\bscp\b/.test(text))
     addTopic('scp')
-  if (/\bminecraft\b|\u6211\u7684\u4e16\u754c/.test(text))
-    addTopic('minecraft', '\u6211\u7684\u4e16\u754c')
+  if (/\bminecraft\b|\u6211\u7684\u4E16\u754C/.test(text))
+    addTopic('minecraft', '\u6211\u7684\u4E16\u754C')
 
   return {
     specific: [...new Set(specific)],
@@ -482,7 +499,7 @@ function tokenize(text: string): Set<string> {
       tokens.add(match)
   }
 
-  const cjkChars = normalized.match(/[\u3400-\u9fff]/gu) ?? []
+  const cjkChars = normalized.match(/[\u3400-\u9FFF]/gu) ?? []
   for (let index = 0; index < cjkChars.length; index += 1) {
     tokens.add(cjkChars[index])
     if (index + 1 < cjkChars.length)
@@ -500,7 +517,7 @@ function meaningfulTokens(text: string): Set<string> {
       tokens.add(match)
   }
 
-  const cjkChars = normalized.match(/[\u3400-\u9fff]/gu) ?? []
+  const cjkChars = normalized.match(/[\u3400-\u9FFF]/gu) ?? []
   for (let index = 0; index < cjkChars.length - 1; index += 1) {
     const bigram = `${cjkChars[index]}${cjkChars[index + 1]}`
     if (!MEMORY_STOPWORDS.has(bigram))
@@ -519,29 +536,29 @@ function specificMemoryTerms(text: string): Set<string> {
 }
 
 function addSynonymTokens(text: string, tokens: Set<string>) {
-  if (/\u540e\u5ba4|\bbackrooms?\b/.test(text)) {
+  if (/\u540E\u5BA4|\bbackrooms?\b/.test(text)) {
     tokens.add('backrooms')
-    tokens.add('\u540e\u5ba4')
+    tokens.add('\u540E\u5BA4')
   }
-  if (/\u5b9e\u4f53|\bentities?\b/.test(text)) {
+  if (/\u5B9E\u4F53|\bentities?\b/.test(text)) {
     tokens.add('entity')
-    tokens.add('\u5b9e\u4f53')
+    tokens.add('\u5B9E\u4F53')
   }
-  if (/\u5c42\u7ea7|\u5c42|\blevels?\b/.test(text)) {
+  if (/\u5C42\u7EA7|\u5C42|\blevels?\b/.test(text)) {
     tokens.add('level')
-    tokens.add('\u5c42\u7ea7')
+    tokens.add('\u5C42\u7EA7')
   }
-  if (/\u559c\u6b22|\u6700\u559c\u6b22|\bfavou?rites?\b|\blikes?\b/.test(text)) {
+  if (/\u559C\u6B22|\u6700\u559C\u6B22|\bfavou?rites?\b|\blikes?\b/.test(text)) {
     tokens.add('favorite')
-    tokens.add('\u559c\u6b22')
+    tokens.add('\u559C\u6B22')
   }
-  if (/\u7535\u5f71|\bmovies?\b|\bfilms?\b/.test(text)) {
+  if (/\u7535\u5F71|\bmovies?\b|\bfilms?\b/.test(text)) {
     tokens.add('movie')
-    tokens.add('\u7535\u5f71')
+    tokens.add('\u7535\u5F71')
   }
-  if (/\u89d2\u8272|\bcharacters?\b/.test(text)) {
+  if (/\u89D2\u8272|\bcharacters?\b/.test(text)) {
     tokens.add('character')
-    tokens.add('\u89d2\u8272')
+    tokens.add('\u89D2\u8272')
   }
 }
 

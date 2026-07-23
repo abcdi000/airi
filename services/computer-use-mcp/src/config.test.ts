@@ -58,8 +58,9 @@ describe('resolveComputerUseConfig', () => {
     const config = resolveComputerUseConfig()
 
     expect(config.executor).toBe('macos-local')
-    expect(config.openableApps).toEqual(['Finder', 'Terminal', 'Cursor', 'Visual Studio Code', 'Google Chrome'])
     expect(config.denyApps).toContain('airi')
+    expect(config.denyApps).toContain('lumi')
+    expect(config.denyApps).not.toContain('settings')
     expect(config.terminalShell).toBeTruthy()
     expect(config.permissionChainHint).toContain('swift/quartz + open')
     expect(config.requireAllowedBoundsForMutatingActions).toBe(false)
@@ -74,11 +75,29 @@ describe('resolveComputerUseConfig', () => {
     const config = resolveComputerUseConfig()
 
     expect(config.executor).toBe('windows-local')
-    expect(config.openableApps).toContain('Windows Terminal')
-    expect(config.openableApps).toContain('QQ')
     expect(config.permissionChainHint).toContain('Windows UI Automation + SendInput')
     expect(config.requireAllowedBoundsForMutatingActions).toBe(false)
     expect(config.requireCoordinateAlignmentForMutatingActions).toBe(false)
+  })
+
+  it('uses custom application and window-title blacklists from env', () => {
+    process.env.COMPUTER_USE_DENY_APPS = 'Bank Client, Password Vault'
+    process.env.COMPUTER_USE_DENY_WINDOW_TITLES = 'Payment confirmation, Private document'
+
+    const config = resolveComputerUseConfig()
+
+    expect(config.denyApps).toEqual(['Bank Client', 'Password Vault'])
+    expect(config.denyWindowTitles).toEqual(['Payment confirmation', 'Private document'])
+  })
+
+  it('allows an explicitly empty application blacklist', () => {
+    process.env.COMPUTER_USE_DENY_APPS = ''
+    process.env.COMPUTER_USE_DENY_WINDOW_TITLES = ''
+
+    const config = resolveComputerUseConfig()
+
+    expect(config.denyApps).toEqual([])
+    expect(config.denyWindowTitles).toEqual([])
   })
 
   it('enables the browser dom bridge by default and respects overrides', () => {

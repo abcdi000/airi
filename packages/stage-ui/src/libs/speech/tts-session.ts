@@ -110,8 +110,8 @@ export interface PlaybackManagerSubset<TAudio> {
 /**
  * Internal helpers the streaming adapter calls out to. Lets the adapter
  * react to terminal events (error / done) by clearing whatever state the
- * host is holding — Stage.vue keeps a `currentSession` ref and needs to
- * null it when the underlying ws terminates on its own.
+ * host is holding. Stage.vue keeps one session per concurrent chat turn and
+ * removes the matching entry when the underlying WebSocket terminates.
  */
 export interface StreamingSessionHooks {
   /** Called once when the ws terminates with an error. */
@@ -289,7 +289,7 @@ export interface StageTtsSessionContext<TAudio = AudioBuffer> {
  *   the next LLM intent.
  *
  * Expects:
- * - Caller has already cancelled / cleared any previous session ref.
+ * - Caller owns the returned session for exactly one chat turn.
  * - When `transport === 'bidirectional-ws'`, the snapshot's `voice` is
  *   a real voice id and `audioContext` is set; otherwise the factory
  *   silently falls back to the segmenter path (codex review MEDIUM #3
@@ -299,9 +299,9 @@ export interface StageTtsSessionContext<TAudio = AudioBuffer> {
  *   behaviour for every REST provider).
  *
  * Returns:
- * - A `StageTtsSession`. Stage.vue stores it in a single `currentSession`
- *   ref and calls `appendText` / `appendSpecial` / `finishInput` / `end`
- *   / `cancel` on it from the hooks.
+ * - A `StageTtsSession`. Stage.vue stores it under the matching chat turn
+ *   and calls `appendText` / `appendSpecial` / `finishInput` / `end` /
+ *   `cancel` only from that turn's hooks.
  */
 export function createStageTtsSession<TAudio = AudioBuffer>(
   ctx: StageTtsSessionContext<TAudio>,

@@ -18,6 +18,7 @@ import { useLumiProactiveVisionStore } from '../../../stores/lumi-proactive-visi
 import { useLumiSelfAdjustmentStore } from '../../../stores/lumi-self-adjustment'
 import { useLumiSelfTodoStore } from '../../../stores/lumi-self-todo'
 import { useTamagotchiPluginToolsStore } from '../../../stores/plugin-tools'
+import VisionCapturePreview from './components/visionCapturePreview.vue'
 
 const pluginStore = usePluginHostInspectorStore()
 const proactiveVisionStore = useLumiProactiveVisionStore()
@@ -73,6 +74,10 @@ const {
   lastObservation,
   lastMessage,
   lastCaptureAt,
+  lastCaptureSourceId,
+  lastCaptureSourceName,
+  lastCapturedImageDataUrl,
+  lastVisionInputImageDataUrl,
   lastMessageAt,
   lastScheduledDelayMs,
   tickCount,
@@ -653,6 +658,7 @@ watch(diaryPluginLoaded, (loaded) => {
 })
 
 onMounted(async () => {
+  proactiveVisionStore.requestLastCaptureImages()
   await pluginStore.refreshAll().catch(() => {})
   await proactiveVisionStore.refreshSources().catch(() => {})
   if (diaryPluginLoaded.value) {
@@ -1910,6 +1916,16 @@ onMounted(async () => {
         theme="orange"
         label="主动视觉错误"
         :description="lastError"
+      />
+
+      <VisionCapturePreview
+        v-if="lastCapturedImageDataUrl && lastVisionInputImageDataUrl"
+        :captured-at="lastCaptureAt"
+        :source-id="lastCaptureSourceId"
+        :source-name="lastCaptureSourceName"
+        :captured-image-data-url="lastCapturedImageDataUrl"
+        :vision-input-image-data-url="lastVisionInputImageDataUrl"
+        @clear="proactiveVisionStore.clearLastCaptureImages()"
       />
 
       <div :class="['grid', 'gap-3', 'lg:grid-cols-2']">

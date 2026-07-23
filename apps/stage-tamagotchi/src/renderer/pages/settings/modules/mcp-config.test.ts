@@ -239,6 +239,8 @@ describe('mcp-config helpers', () => {
         COMPUTER_USE_MAX_OPERATIONS: '16',
         COMPUTER_USE_MAX_OPERATION_UNITS: '96',
         COMPUTER_USE_INTERRUPT_SHORTCUT: 'End',
+        COMPUTER_USE_DENY_APPS: '1password,bitwarden,keepass,keychain,system settings,windows security,activity monitor,lumi,airi',
+        COMPUTER_USE_DENY_WINDOW_TITLES: '',
         COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED: 'false',
       },
       cwd: LUMI_USER_DATA_PATH,
@@ -258,6 +260,13 @@ describe('mcp-config helpers', () => {
       args: [`${LUMI_APP_PATH}/node_modules/@proj-airi/playwright-extra-mcp/dist/bin/run.mjs`],
       env: {
         ELECTRON_RUN_AS_NODE: '1',
+        LUMI_BROWSER_DEFAULT_BACKEND: 'patchright',
+        LUMI_BROWSER_FALLBACK_BACKEND: 'playwright',
+        LUMI_BROWSER_PROFILE_PATH: `${LUMI_USER_DATA_PATH}/playwright-profile`,
+        LUMI_PATCHRIGHT_CHANNEL: 'chrome',
+        LUMI_PATCHRIGHT_HEADLESS: 'false',
+        LUMI_PATCHRIGHT_PERSISTENT_CONTEXT: 'true',
+        LUMI_PATCHRIGHT_NO_VIEWPORT: 'true',
         LUMI_PLAYWRIGHT_USER_DATA_DIR: `${LUMI_USER_DATA_PATH}/playwright-profile`,
       },
       cwd: LUMI_USER_DATA_PATH,
@@ -267,6 +276,83 @@ describe('mcp-config helpers', () => {
       requestTimeoutMs: 60000,
       maxTotalTimeoutMs: 180000,
     })
+  })
+
+  it('upgrades an existing bundled browser MCP without replacing its profile or explicit backend', () => {
+    const loaded = loadServerForms({
+      mcpServers: {
+        playwright: {
+          command: LUMI_EXEC_PATH,
+          args: [`${LUMI_APP_PATH}/node_modules/@proj-airi/playwright-extra-mcp/dist/bin/run.mjs`],
+          env: {
+            ELECTRON_RUN_AS_NODE: '1',
+            LUMI_BROWSER_DEFAULT_BACKEND: 'playwright',
+            LUMI_PLAYWRIGHT_USER_DATA_DIR: 'D:\\Lumi\\existing-profile',
+          },
+        },
+      },
+    })
+    const config = buildServerConfig(loaded.servers[0]!)
+
+    expect(loaded.upgradedBrowserServers).toEqual(['playwright'])
+    expect(config.env).toMatchObject({
+      LUMI_BROWSER_DEFAULT_BACKEND: 'playwright',
+      LUMI_BROWSER_FALLBACK_BACKEND: 'playwright',
+      LUMI_BROWSER_PROFILE_PATH: 'D:\\Lumi\\existing-profile',
+      LUMI_PATCHRIGHT_CHANNEL: 'chrome',
+      LUMI_PATCHRIGHT_HEADLESS: 'false',
+      LUMI_PATCHRIGHT_PERSISTENT_CONTEXT: 'true',
+      LUMI_PATCHRIGHT_NO_VIEWPORT: 'true',
+      LUMI_PLAYWRIGHT_USER_DATA_DIR: 'D:\\Lumi\\existing-profile',
+    })
+  })
+
+  it('does not migrate a custom MCP that only uses the playwright identifier', () => {
+    const loaded = loadServerForms({
+      mcpServers: {
+        playwright: {
+          command: 'npx',
+          args: ['custom-playwright-mcp'],
+        },
+      },
+    })
+
+    expect(loaded.upgradedBrowserServers).toEqual([])
+    expect(buildServerConfig(loaded.servers[0]!).env).toBeUndefined()
+  })
+
+  it('recognizes a legacy development browser path without overriding its JSON profile', () => {
+    const loaded = loadServerForms({
+      mcpServers: {
+        playwright: {
+          command: 'node',
+          args: [
+            'D:\\project\\airi\\services\\playwright-extra-mcp\\dist\\bin\\run.mjs',
+            '--config',
+            'C:\\Lumi\\lumi-browser-profile.json',
+          ],
+        },
+      },
+    })
+    const env = buildServerConfig(loaded.servers[0]!).env
+    const migrated = buildServerConfig(loaded.servers[0]!)
+
+    expect(loaded.upgradedBrowserServers).toEqual(['playwright'])
+    expect(migrated.command).toBe(LUMI_EXEC_PATH)
+    expect(migrated.args).toEqual([
+      `${LUMI_APP_PATH}/node_modules/@proj-airi/playwright-extra-mcp/dist/bin/run.mjs`,
+      '--config',
+      'C:\\Lumi\\lumi-browser-profile.json',
+    ])
+    expect(migrated.cwd).toBe(LUMI_USER_DATA_PATH)
+    expect(env).toMatchObject({
+      ELECTRON_RUN_AS_NODE: '1',
+      LUMI_BROWSER_DEFAULT_BACKEND: 'patchright',
+      LUMI_BROWSER_FALLBACK_BACKEND: 'playwright',
+      LUMI_PATCHRIGHT_HEADLESS: 'false',
+    })
+    expect(env).not.toHaveProperty('LUMI_BROWSER_PROFILE_PATH')
+    expect(env).not.toHaveProperty('LUMI_PLAYWRIGHT_USER_DATA_DIR')
   })
 
   it('exposes all bundled MCP presets in the settings registry', () => {

@@ -1,11 +1,12 @@
 import type { Tool } from '@xsai/shared-chat'
 
 import type { LumiMemoryFragment, LumiRankedMemory } from '../../../lumi-runtime/src'
+import type { ChatInteractionContext } from '../types/chat'
 
-import { buildLumiContextualMemoryQuery, isContextDependentMemoryText } from '../../../lumi-runtime/src'
 import { tool } from '@xsai/tool'
 import { z } from 'zod'
 
+import { buildLumiContextualMemoryQuery, isContextDependentMemoryText } from '../../../lumi-runtime/src'
 import { LUMI_AIRI_CARD_ID } from '../constants/lumi-card'
 import { extractMessageText } from '../libs/chat-sync'
 import { useChatSessionStore } from './chat/session-store'
@@ -15,8 +16,18 @@ import { useLumiMemoryStore } from './lumi-memory'
 import { useAiriCardStore } from './modules/airi-card'
 
 const LUMI_MEMORY_TOOLS_PROVIDER = 'lumi-memory'
+const LUMI_MEMORY_SEARCH_TOOL_NAME = 'lumi_memory_search'
+
+interface LumiMemoryToolContext {
+  appendDebug?: (kind: 'memory_search', lines: string[], sessionId?: string) => void
+  /** Immutable conversation identity captured before the send enters its queue. */
+  interaction?: ChatInteractionContext
+  /** Session whose visible history supplies contextual query hints. */
+  sessionId?: string
+}
+
 export function registerLumiMemoryTools(options: {
-  appendDebug?: (kind: 'memory_search', lines: string[]) => void
+  appendDebug?: (kind: 'memory_search', lines: string[], sessionId?: string) => void
 } = {}) {
   const toolsStore = useLlmToolsStore()
   const promptsStore = useLlmToolsetPromptsStore()
@@ -41,16 +52,42 @@ export function registerLumiMemoryTools(options: {
   ])
 }
 
+/**
+ * Binds the Lumi memory tool to one immutable chat turn while retaining all
+ * unrelated MCP and plugin tools supplied by the caller.
+ *
+ * Use when:
+ * - A queued send may execute concurrently with another conversation.
+ * - Memory ACL inputs must not come from mutable foreground UI state.
+ *
+ * Expects:
+ * - `interaction` and `sessionId` were captured from the target session before enqueue.
+ *
+ * Returns:
+ * - A lazy resolver compatible with `StreamOptions.tools`.
+ */
+export function bindLumiMemoryToolsForTurn(
+  tools: Tool[] | (() => Promise<Tool[] | undefined>) | undefined,
+  context: LumiMemoryToolContext,
+): () => Promise<Tool[]> {
+  return async () => {
+    const resolvedTools = typeof tools === 'function' ? await tools() : tools
+    const memoryTool = await createLumiMemorySearchTool(context)
+    return [
+      ...(resolvedTools ?? []).filter(tool => toolNameFrom(tool) !== LUMI_MEMORY_SEARCH_TOOL_NAME),
+      memoryTool,
+    ]
+  }
+}
+
 export function clearLumiMemoryTools() {
   useLlmToolsStore().clearTools(LUMI_MEMORY_TOOLS_PROVIDER)
   useLlmToolsetPromptsStore().clearToolsetPrompts(LUMI_MEMORY_TOOLS_PROVIDER)
 }
 
-function createLumiMemorySearchTool(options: {
-  appendDebug?: (kind: 'memory_search', lines: string[]) => void
-}): Promise<Tool> {
+function createLumiMemorySearchTool(options: LumiMemoryToolContext): Promise<Tool> {
   return tool({
-    name: 'lumi_memory_search',
+    name: LUMI_MEMORY_SEARCH_TOOL_NAME,
     description: 'Search Lumi long-term memory when the current reply needs stored personal facts, past shared events, promises, preferences, project continuity, or an unresolved concrete person/nickname/account/place/project/event/relationship mentioned by the user.',
     parameters: z.object({
       query: z.string().min(1).describe('The exact memory question or fact to recall. Include the user wording when possible.'),
@@ -70,10 +107,19 @@ function createLumiMemorySearchTool(options: {
         })
       }
 
+      const sessionId = options.sessionId
+      const interaction = options.interaction
+      if (!sessionId || !interaction) {
+        return JSON.stringify({
+          status: 'missing_interaction_context',
+          message: 'Lumi memory search requires an immutable per-turn identity and conversation context.',
+          memories: [],
+        })
+      }
+
       const memoryStore = useLumiMemoryStore()
       memoryStore.initialize()
       const sessionStore = useChatSessionStore()
-      const sessionId = sessionStore.activeSessionId
       const recentMessages = sessionId
         ? sessionStore.getSessionMessages(sessionId)
             .filter(message => message.role === 'user')
@@ -94,9 +140,13 @@ function createLumiMemorySearchTool(options: {
       ].filter(Boolean).join('\n')
       const result = await memoryStore.retrieveSemantic({
         query,
-        userId: 'local',
+        userId: interaction?.actorId ?? 'local',
+        viewerUserId: interaction?.actorId,
         personaId: LUMI_AIRI_CARD_ID,
         limit: payload.limit ?? 5,
+        conversationType: interaction?.conversationType ?? 'direct',
+        conversationId: interaction?.conversationId,
+        participantUserIds: interaction?.participantIds,
       })
       const memories = result.rankedMemories
         .filter(item => isUsableLumiToolMemory(item, result.route.queryIntent))
@@ -122,7 +172,7 @@ function createLumiMemorySearchTool(options: {
         bestEvidence ? `best_evidence: ${previewText(bestEvidence.content, 180)}` : '',
         memories.length ? '' : 'rule: do not answer this recall from style/persona memories or guesses',
         ...memories.slice(0, 3).map(item => `- ${item.memory.type} score=${item.finalScore.toFixed(2)}: ${previewText(item.memory.content, 90)}`),
-      ].filter(Boolean))
+      ].filter(Boolean), interaction?.conversationId)
 
       return JSON.stringify({
         status,
@@ -135,6 +185,8 @@ function createLumiMemorySearchTool(options: {
               type: bestEvidence.type,
               content: bestEvidence.content,
               tags: bestEvidence.tags,
+              scope: bestEvidence.scope,
+              disclosureReason: bestEvidence.disclosureReason,
             }
           : null,
         memories: memories.map(item => ({
@@ -142,6 +194,8 @@ function createLumiMemorySearchTool(options: {
           type: item.memory.type,
           content: item.memory.content,
           tags: item.memory.tags,
+          scope: item.memory.scope,
+          disclosureReason: item.memory.disclosureReason,
           confidence: item.memory.confidence,
           importance: item.memory.importance,
           finalScore: Number(item.finalScore.toFixed(3)),
@@ -153,6 +207,14 @@ function createLumiMemorySearchTool(options: {
       })
     },
   })
+}
+
+function toolNameFrom(tool: Tool) {
+  const candidate = tool as Tool & {
+    name?: string
+    function?: { name?: string }
+  }
+  return candidate.name ?? candidate.function?.name
 }
 
 export function shouldSkipLumiMemorySearch(query: string) {
@@ -173,10 +235,10 @@ export function shouldSkipLumiMemorySearch(query: string) {
   if (hasUnresolvedConcreteEntityMention(text))
     return ''
 
-  if (/^(你好|嗨|哈喽|啊+|嗯+|哦+|行吧|好吧|可以|谢谢|辛苦|我懂|懂了|没事|算了|继续|说吧)[。！？!?\s]*$/i.test(text))
+  if (/^(?:你好|嗨|哈喽|啊+|嗯+|哦+|行吧|好吧|可以|谢谢|辛苦|我懂|懂了|没事|算了|继续|说吧)[。！？!?\s]*$/.test(text))
     return 'routine_acknowledgement'
 
-  if (/(换个话题|不聊这个|别说这个|算了|不是这个|你说错了|我不是问这个|别重复|停)/.test(text))
+  if (/换个话题|不聊这个|别说这个|算了|不是这个|你说错了|我不是问这个|别重复|停/.test(text))
     return 'topic_change_or_correction'
 
   if (text.length <= 18)
@@ -199,24 +261,24 @@ function classifyLumiMemorySearchGuard(text: string): string | null {
 }
 
 function isCleanRoutineAcknowledgement(text: string) {
-  return /^(\u4f60\u597d|\u55e8|\u54c8\u55bd|\u554a|\u55ef|\u54e6|\u884c\u5427|\u597d\u5427|\u53ef\u4ee5|\u8c22\u8c22|\u8f9b\u82e6|\u6211\u61c2|\u61c2\u4e86|\u6ca1\u4e8b|\u7b97\u4e86|\u7ee7\u7eed|\u8bf4\u5427)[\u3002\uff01\uff1f!?,\uff0c\s]*$/i.test(text)
+  return /^(?:\u4F60\u597D|[\u55E8\u554A\u55EF\u54E6]|\u54C8\u55BD|\u884C\u5427|\u597D\u5427|\u53EF\u4EE5|\u8C22\u8C22|\u8F9B\u82E6|\u6211\u61C2|\u61C2\u4E86|\u6CA1\u4E8B|\u7B97\u4E86|\u7EE7\u7EED|\u8BF4\u5427)[\u3002\uFF01\uFF1F!?,\uFF0C\s]*$/.test(text)
 }
 
 function isCleanTopicChangeOrCorrection(text: string) {
-  return /(\u6362\u4e2a\u8bdd\u9898|\u4e0d\u804a\u8fd9\u4e2a|\u522b\u8bf4\u8fd9\u4e2a|\u4e0d\u662f\u8fd9\u4e2a|\u4f60\u8bf4\u9519\u4e86|\u6211\u4e0d\u662f\u95ee\u8fd9\u4e2a|\u522b\u91cd\u590d|\u505c)/.test(text)
+  return /\u6362\u4E2A\u8BDD\u9898|\u4E0D\u804A\u8FD9\u4E2A|\u522B\u8BF4\u8FD9\u4E2A|\u4E0D\u662F\u8FD9\u4E2A|\u4F60\u8BF4\u9519\u4E86|\u6211\u4E0D\u662F\u95EE\u8FD9\u4E2A|\u522B\u91CD\u590D|\u505C/.test(text)
 }
 
 function isCleanExplicitRecallQuery(text: string) {
-  return /(\u8bb0\u5f97|\u8fd8\u8bb0\u5f97|\u60f3\u8d77\u6765|\u56de\u5fc6|\u957f\u671f\u8bb0\u5fc6|\u8bb0\u5fc6\u91cc|\u4e0a\u6b21|\u4e4b\u524d|\u4ee5\u524d|\u90a3\u5929|\u53d1\u751f\u4e86\u4ec0\u4e48|\u6211\u559c\u6b22|\u6211\u6700\u559c\u6b22|\u6211\u8bf4\u8fc7|\u4f60\u7b54\u5e94|\u7ea6\u5b9a|\u627f\u8bfa|\u504f\u597d|\u54ea\u4e00|\u54ea\u4e00\u4e2a|\u54ea\u90e8|\u54ea\u5929|\u4ec0\u4e48\u65f6\u5019|\u662f\u8c01|\u8c01\u662f|\u53eb\u4ec0\u4e48|\u540d\u5b57|\u5973\u670b\u53cb|\u7537\u670b\u53cb|\u597d\u53cb|\u670b\u53cb|\u5907\u6ce8|\u6635\u79f0|\u7528\u6237\u540d|\u8d26\u53f7|\u8d26\u6237|remember|recall|previously|before)/i.test(text)
+  return /\u8BB0\u5F97|\u8FD8\u8BB0\u5F97|\u60F3\u8D77\u6765|\u56DE\u5FC6|\u957F\u671F\u8BB0\u5FC6|\u8BB0\u5FC6\u91CC|\u4E0A\u6B21|\u4E4B\u524D|\u4EE5\u524D|\u90A3\u5929|\u53D1\u751F\u4E86\u4EC0\u4E48|\u6211\u559C\u6B22|\u6211\u6700\u559C\u6B22|\u6211\u8BF4\u8FC7|\u4F60\u7B54\u5E94|\u7EA6\u5B9A|\u627F\u8BFA|\u504F\u597D|\u54EA\u4E00|\u54EA\u90E8|\u54EA\u5929|\u4EC0\u4E48\u65F6\u5019|\u662F\u8C01|\u8C01\u662F|\u53EB\u4EC0\u4E48|\u540D\u5B57|\u5973\u670B\u53CB|\u7537\u670B\u53CB|\u597D\u53CB|\u670B\u53CB|\u5907\u6CE8|\u6635\u79F0|\u7528\u6237\u540D|\u8D26\u53F7|\u8D26\u6237|remember|recall|previously|before/i.test(text)
 }
 
 function isExplicitRecallQuery(text: string) {
-  return /(记得|还记得|想起来|回忆|上次|之前|以前|那天|发生了什么|我喜欢|我最喜欢|我说过|你答应|约定|承诺|偏好|哪一|哪个|哪部|哪天|什么时候|remember|recall|previously|before)/i.test(text)
+  return /记得|还记得|想起来|回忆|上次|之前|以前|那天|发生了什么|我喜欢|我最喜欢|我说过|你答应|约定|承诺|偏好|哪一|哪个|哪部|哪天|什么时候|remember|recall|previously|before/i.test(text)
 }
 
 function hasUnresolvedConcreteEntityMention(text: string) {
   const ignored = new Set(['airi', 'lumi', 'doggy', 'personaos', 'ai'])
-  const latinNames = text.match(/\b[A-Za-z][A-Za-z0-9_-]{2,}\b/g) ?? []
+  const latinNames = text.match(/\b[A-Z][\w-]{2,}\b/gi) ?? []
   return latinNames.some(name => !ignored.has(name.toLowerCase()))
 }
 
@@ -268,30 +330,30 @@ function buildSpecificRecallEvidenceMarkers(messageText: string, topicHints: str
       topic.push(marker.toLowerCase())
   }
 
-  if (/\bentities?\b|\u5b9e\u4f53/.test(text))
-    addSpecific('entity', '\u5b9e\u4f53')
-  if (/\blevels?\b|\u5c42\u7ea7|\u5c42/.test(text))
-    addSpecific('level', '\u5c42\u7ea7', '\u5c42')
-  if (/\bcharacters?\b|\u89d2\u8272/.test(text))
-    addSpecific('character', '\u89d2\u8272')
-  if (/\bmovies?\b|\bfilms?\b|\u7535\u5f71/.test(text))
-    addSpecific('movie', 'film', '\u7535\u5f71')
-  if (/\bgames?\b|\u6e38\u620f/.test(text))
-    addSpecific('game', '\u6e38\u620f')
-  if (/\bitems?\b|\u7269\u54c1|\u9053\u5177/.test(text))
-    addSpecific('item', '\u7269\u54c1', '\u9053\u5177')
-  if (/\bplaces?\b|\blocations?\b|\u5730\u65b9|\u54ea\u91cc/.test(text))
-    addSpecific('place', 'location', '\u5730\u65b9')
-  if (/\btone\b|\u8bed\u6c14/.test(text))
-    addSpecific('tone', '\u8bed\u6c14')
+  if (/\bentities?\b|\u5B9E\u4F53/.test(text))
+    addSpecific('entity', '\u5B9E\u4F53')
+  if (/\blevels?\b|\u5C42\u7EA7|\u5C42/.test(text))
+    addSpecific('level', '\u5C42\u7EA7', '\u5C42')
+  if (/\bcharacters?\b|\u89D2\u8272/.test(text))
+    addSpecific('character', '\u89D2\u8272')
+  if (/\bmovies?\b|\bfilms?\b|\u7535\u5F71/.test(text))
+    addSpecific('movie', 'film', '\u7535\u5F71')
+  if (/\bgames?\b|\u6E38\u620F/.test(text))
+    addSpecific('game', '\u6E38\u620F')
+  if (/\bitems?\b|\u7269\u54C1|\u9053\u5177/.test(text))
+    addSpecific('item', '\u7269\u54C1', '\u9053\u5177')
+  if (/\bplaces?\b|\blocations?\b|\u5730\u65B9|\u54EA\u91CC/.test(text))
+    addSpecific('place', 'location', '\u5730\u65B9')
+  if (/\btone\b|\u8BED\u6C14/.test(text))
+    addSpecific('tone', '\u8BED\u6C14')
 
   const topicText = `${topicHints.join(' ')} ${topicWindow}`.toLowerCase()
-  if (/\bbackrooms?\b|\u540e\u5ba4/.test(topicText))
-    addTopic('backrooms', '\u540e\u5ba4')
+  if (/\bbackrooms?\b|\u540E\u5BA4/.test(topicText))
+    addTopic('backrooms', '\u540E\u5BA4')
   if (/\bscp\b/.test(topicText))
     addTopic('scp')
-  if (/\bminecraft\b|\u6211\u7684\u4e16\u754c/.test(topicText))
-    addTopic('minecraft', '\u6211\u7684\u4e16\u754c')
+  if (/\bminecraft\b|\u6211\u7684\u4E16\u754C/.test(topicText))
+    addTopic('minecraft', '\u6211\u7684\u4E16\u754C')
 
   return {
     specific: [...new Set(specific)],

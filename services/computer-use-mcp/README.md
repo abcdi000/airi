@@ -162,10 +162,10 @@ Workflow orchestration:
 The local executor boundary is intentionally narrow and explicit:
 
 - global screen coordinates are allowed for UI actions
-- `allowApps` is not used as a hard gate for click/type/scroll
-- `denyApps` still blocks sensitive foreground apps
-- `COMPUTER_USE_OPENABLE_APPS` only gates `desktop_open_app` and `desktop_focus_app`
-- AIRI itself is in the default deny list to avoid self-operation
+- applications do not need to appear in an allow list
+- `COMPUTER_USE_DENY_APPS` blocks app open/focus and interaction with matching foreground apps
+- `COMPUTER_USE_DENY_WINDOW_TITLES` blocks interaction with matching sensitive windows
+- Lumi and AIRI are in the default deny list to avoid self-operation
 - terminal commands always require approval
 - app open/focus always require approval
 - click/type/press/scroll still use per-action approval
@@ -186,13 +186,17 @@ Core:
 - `COMPUTER_USE_MAX_OPERATION_UNITS`
 - `COMPUTER_USE_MAX_PENDING_ACTIONS`
 
+Application policy:
+
+- `COMPUTER_USE_DENY_APPS`
+  - comma-separated, case-insensitive application or process-name fragments
+  - set to an empty value to allow every application
+  - default includes password managers, system security surfaces, Lumi, and AIRI
+- `COMPUTER_USE_DENY_WINDOW_TITLES`
+  - comma-separated, case-insensitive window-title fragments
+
 macOS orchestration:
 
-- `COMPUTER_USE_OPENABLE_APPS`
-  - default `Terminal,Cursor,Google Chrome`
-- `COMPUTER_USE_DENY_APPS`
-  - default includes `1Password`, `Keychain`, `System Settings`, `Activity Monitor`, `AIRI`
-- `COMPUTER_USE_DENY_WINDOW_TITLES`
 - `COMPUTER_USE_TERMINAL_SHELL`
   - default current shell, otherwise `/bin/zsh`
 - `COMPUTER_USE_ALLOWED_BOUNDS`
@@ -255,7 +259,8 @@ Example local macOS entry:
       "env": {
         "COMPUTER_USE_EXECUTOR": "macos-local",
         "COMPUTER_USE_APPROVAL_MODE": "actions",
-        "COMPUTER_USE_OPENABLE_APPS": "Terminal,Cursor,Google Chrome"
+        "COMPUTER_USE_DENY_APPS": "1password,keychain,system settings,lumi,airi",
+        "COMPUTER_USE_DENY_WINDOW_TITLES": "Payment confirmation,Private document"
       }
     }
   }

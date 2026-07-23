@@ -1,9 +1,13 @@
+import type { LumiUserProfilePersistenceBridge, LumiUserProfilePersistenceSnapshot } from './lumi-user-profile'
+
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { LumiUserProfilePersistenceBridge, LumiUserProfilePersistenceSnapshot } from './lumi-user-profile'
-
+import { LUMI_DOGGY_USER_ID, LUMI_MOUSSY_USER_ID } from './lumi-identity'
 import { LUMI_BOOTSTRAP_PROFILE_VERSION, useLumiUserProfileStore } from './lumi-user-profile'
+
+const TEST_NOW = new Date().toISOString()
+const TEST_ONE_HOUR_EARLIER = new Date(Date.now() - 60 * 60 * 1000).toISOString()
 
 describe('lumi-user-profile store', () => {
   beforeEach(() => {
@@ -28,7 +32,7 @@ describe('lumi-user-profile store', () => {
     const results = store.applyCandidates(candidates, {
       sourceKind: 'chat',
       sourceMessageId: 'msg-1',
-      now: '2026-06-05T12:00:00.000Z',
+      now: TEST_NOW,
     })
 
     expect(results.some(result => result.status === 'stored')).toBe(true)
@@ -76,7 +80,7 @@ describe('lumi-user-profile store', () => {
       value: 'AIRI 插件系统',
       confidence: 0.82,
       evidence: '我现在主要在做 AIRI 插件系统',
-    }, { sourceKind: 'chat', now: '2026-06-04T12:00:00.000Z' })
+    }, { sourceKind: 'chat', now: TEST_ONE_HOUR_EARLIER })
     expect(first.status).toBe('stored')
 
     const second = store.applyCandidate({
@@ -85,7 +89,7 @@ describe('lumi-user-profile store', () => {
       value: 'Lumi 用户画像系统',
       confidence: 0.86,
       evidence: '我们应该实现用户画像系统',
-    }, { sourceKind: 'chat', now: '2026-06-04T13:00:00.000Z' })
+    }, { sourceKind: 'chat', now: TEST_NOW })
     expect(second.status).toBe('stored')
 
     const entry = store.dynamicEntries[0]
@@ -428,6 +432,37 @@ describe('lumi-user-profile store', () => {
     expect(context).toContain('Daily State as Core Profile')
   })
 
+  it('clears the previous user profile before the next user finishes loading', async () => {
+    const doggySnapshot = emptyProfileSnapshot({
+      entries: [profileEntryFixture({ id: 'doggy-profile', value: 'Doggy private profile' })],
+    })
+    const moussySnapshot = emptyProfileSnapshot({
+      entries: [profileEntryFixture({ id: 'moussy-profile', value: 'Moussy private profile' })],
+      canImportLegacyLocalData: false,
+    })
+    let finishMoussyLoad = (_snapshot: LumiUserProfilePersistenceSnapshot) => {}
+    const moussyLoad = new Promise<LumiUserProfilePersistenceSnapshot>((resolve) => {
+      finishMoussyLoad = resolve
+    })
+    const bridge = createProfilePersistenceBridge(doggySnapshot)
+    bridge.loadProfileFromDatabase = vi.fn()
+      .mockResolvedValueOnce(doggySnapshot)
+      .mockReturnValueOnce(moussyLoad)
+    const store = useLumiUserProfileStore()
+    store.setPersistenceBridge(bridge)
+    await store.initializePersistence()
+
+    const pendingReload = store.reloadFromDatabase()
+
+    expect(store.entries).toHaveLength(0)
+    expect(store.persistenceReady).toBe(false)
+    finishMoussyLoad(moussySnapshot)
+    await pendingReload
+    expect(store.entries).toEqual([
+      expect.objectContaining({ id: 'moussy-profile', value: 'Moussy private profile' }),
+    ])
+  })
+
   it('does not block profile updates when SQLite writes fail', async () => {
     const store = useLumiUserProfileStore()
     const bridge = createProfilePersistenceBridge(emptyProfileSnapshot())
@@ -635,6 +670,53 @@ describe('lumi-user-profile store', () => {
     })
     expect(store.autoReviewPendingUpdates[0]?.source).toHaveLength(10)
   })
+
+  it('keeps concurrent explicit-user profile writes and prompt context isolated', async () => {
+    const snapshots = new Map<string, LumiUserProfilePersistenceSnapshot>([
+      [LUMI_DOGGY_USER_ID, emptyProfileSnapshot()],
+      [LUMI_MOUSSY_USER_ID, emptyProfileSnapshot()],
+    ])
+    const bridge = createProfilePersistenceBridge(emptyProfileSnapshot())
+    bridge.loadProfileFromDatabase = vi.fn(async userId => snapshots.get(userId ?? '') ?? emptyProfileSnapshot())
+    bridge.replaceSnapshot = vi.fn(async (snapshot, userId) => {
+      expect(userId).toBeTruthy()
+      snapshots.set(userId!, snapshot)
+      return snapshot
+    })
+    const store = useLumiUserProfileStore()
+    store.setActiveProfileUser('settings-preview-user')
+    store.setPersistenceBridge(bridge)
+
+    await Promise.all([
+      store.applyCandidatesForUser(LUMI_DOGGY_USER_ID, [{
+        layer: 'dynamic',
+        key: 'active_project',
+        value: 'Doggy is building the Lumi desktop host',
+        confidence: 0.9,
+        evidence: 'Doggy project evidence',
+      }], { sourceKind: 'chat', sourceMessageId: 'doggy-message' }),
+      store.applyCandidatesForUser(LUMI_MOUSSY_USER_ID, [{
+        layer: 'dynamic',
+        key: 'recent_interests',
+        value: 'Moussy is learning a new cooperative game',
+        confidence: 0.88,
+        evidence: 'Moussy interest evidence',
+      }], { sourceKind: 'chat', sourceMessageId: 'moussy-message' }),
+    ])
+
+    const doggyContext = store.buildRelevantContext({ messageText: 'Lumi desktop host project' }, LUMI_DOGGY_USER_ID)
+    const moussyContext = store.buildRelevantContext({ messageText: 'cooperative game' }, LUMI_MOUSSY_USER_ID)
+    expect(doggyContext).toContain('Doggy is building the Lumi desktop host')
+    expect(doggyContext).not.toContain('Moussy is learning a new cooperative game')
+    expect(moussyContext).toContain('Moussy is learning a new cooperative game')
+    expect(moussyContext).not.toContain('Doggy is building the Lumi desktop host')
+    expect(snapshots.get(LUMI_DOGGY_USER_ID)?.entries).toEqual([
+      expect.objectContaining({ value: 'Doggy is building the Lumi desktop host' }),
+    ])
+    expect(snapshots.get(LUMI_MOUSSY_USER_ID)?.entries).toEqual([
+      expect.objectContaining({ value: 'Moussy is learning a new cooperative game' }),
+    ])
+  })
 })
 
 function emptyProfileSnapshot(patch: Partial<LumiUserProfilePersistenceSnapshot> = {}): LumiUserProfilePersistenceSnapshot {
@@ -657,10 +739,10 @@ function profileEntryFixture(patch: Partial<LumiUserProfilePersistenceSnapshot['
     value: 'fixture',
     confidence: 0.9,
     weight: 0.8,
-    source: [{ kind: 'manual', quote: 'manual', createdAt: '2026-06-04T00:00:00.000Z' }],
-    createdAt: '2026-06-04T00:00:00.000Z',
-    updatedAt: '2026-06-04T00:00:00.000Z',
-    lastSeenAt: '2026-06-04T00:00:00.000Z',
+    source: [{ kind: 'manual', quote: 'manual', createdAt: TEST_NOW }],
+    createdAt: TEST_NOW,
+    updatedAt: TEST_NOW,
+    lastSeenAt: TEST_NOW,
     status: 'active',
     history: [],
     ...patch,

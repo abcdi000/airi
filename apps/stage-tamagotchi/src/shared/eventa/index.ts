@@ -1,4 +1,18 @@
 import type { Locale } from '@intlify/core'
+import type {
+  LumiAccessRevokedPushed,
+  LumiConversationListResponse,
+  LumiConversationMessagesPushed,
+  LumiConversationReplayRequest,
+  LumiConversationReplayResponse,
+  LumiGenerationPushed,
+  LumiOnlineCapabilities,
+  LumiOnlineDevice,
+  LumiOnlinePerson,
+  LumiPresencePushed,
+  LumiSendMessageRequest,
+  LumiSendMessageResponse,
+} from '@proj-airi/lumi-online'
 import type { ServerOptions } from '@proj-airi/server-runtime/server'
 import type {
   ShortcutBinding,
@@ -10,7 +24,7 @@ import type {
   StageViewRequestAckPayload,
   StageViewSnapshotPayload,
 } from '@proj-airi/stage-shared/godot-stage'
-import type { ServerChannelQrPayload } from '@proj-airi/stage-shared/server-channel-qr'
+import type { LumiChannelDeviceQrPayload, LumiChannelDeviceScope, LumiChannelToolScope, ServerChannelQrPayload } from '@proj-airi/stage-shared/server-channel-qr'
 import type {
   ThreeHitTestReadTracePayload,
   ThreeSceneRenderInfoTracePayload,
@@ -38,6 +52,32 @@ export const electronOpenMinecraftMcpMonitor = defineInvokeEventa('eventa:invoke
 export const electronOpenSettingsDevtools = defineInvokeEventa('eventa:invoke:electron:windows:settings:devtools:open')
 export const electronOpenDevtoolsWindow = defineInvokeEventa<void, { key: string, route?: string, width?: number, height?: number, x?: number, y?: number }>('eventa:invoke:electron:windows:devtools:open')
 
+export interface ElectronLumiOnlineState {
+  status: 'offline' | 'connecting' | 'online' | 'reconnecting' | 'error'
+  runtimeMode?: 'offline-client' | 'online-client'
+  serverUrl?: string
+  person?: LumiOnlinePerson
+  capabilities?: LumiOnlineCapabilities
+  error?: string
+}
+
+export const electronLumiOnlineGetState = defineInvokeEventa<ElectronLumiOnlineState>('eventa:invoke:electron:lumi-online:state')
+export const electronLumiOnlineLogin = defineInvokeEventa<ElectronLumiOnlineState, { serverUrl: string, username: string, password: string, deviceId: string, deviceName: string }>('eventa:invoke:electron:lumi-online:login')
+export const electronLumiOnlineClaimInvitation = defineInvokeEventa<ElectronLumiOnlineState, { serverUrl: string, invitationCode: string, username: string, password: string, deviceId: string, deviceName: string }>('eventa:invoke:electron:lumi-online:invitation:claim')
+export const electronLumiOnlineConnectStored = defineInvokeEventa<ElectronLumiOnlineState, { deviceId: string, deviceName: string }>('eventa:invoke:electron:lumi-online:connect-stored')
+export const electronLumiOnlineLogout = defineInvokeEventa<ElectronLumiOnlineState>('eventa:invoke:electron:lumi-online:logout')
+export const electronLumiOnlineListConversations = defineInvokeEventa<LumiConversationListResponse>('eventa:invoke:electron:lumi-online:conversations')
+export const electronLumiOnlineReplayConversation = defineInvokeEventa<LumiConversationReplayResponse, LumiConversationReplayRequest>('eventa:invoke:electron:lumi-online:replay')
+export const electronLumiOnlineSendMessage = defineInvokeEventa<LumiSendMessageResponse, LumiSendMessageRequest>('eventa:invoke:electron:lumi-online:send')
+export const electronLumiOnlineListDevices = defineInvokeEventa<{ devices: LumiOnlineDevice[] }>('eventa:invoke:electron:lumi-online:devices')
+export const electronLumiOnlineRevokeDevice = defineInvokeEventa<{ device: LumiOnlineDevice }, { deviceId: string }>('eventa:invoke:electron:lumi-online:devices:revoke')
+export const electronLumiOnlineTranscribeVoice = defineInvokeEventa<{ text: string }, { audio: Uint8Array, mimeType: string }>('eventa:invoke:electron:lumi-online:voice:transcribe')
+export const electronLumiOnlineStateChanged = defineEventa<ElectronLumiOnlineState>('eventa:event:electron:lumi-online:state-changed')
+export const electronLumiOnlineMessagesPushed = defineEventa<LumiConversationMessagesPushed>('eventa:event:electron:lumi-online:messages')
+export const electronLumiOnlineGenerationPushed = defineEventa<LumiGenerationPushed>('eventa:event:electron:lumi-online:generation')
+export const electronLumiOnlinePresencePushed = defineEventa<LumiPresencePushed>('eventa:event:electron:lumi-online:presence')
+export const electronLumiOnlineAccessRevoked = defineEventa<LumiAccessRevokedPushed>('eventa:event:electron:lumi-online:access-revoked')
+
 export interface ElectronWindowBounds {
   x: number
   y: number
@@ -56,6 +96,80 @@ export interface ElectronServerChannelConfig {
 export const electronGetServerChannelConfig = defineInvokeEventa<ElectronServerChannelConfig>('eventa:invoke:electron:server-channel:get-config')
 export const electronApplyServerChannelConfig = defineInvokeEventa<ElectronServerChannelConfig, Partial<ElectronServerChannelConfig>>('eventa:invoke:electron:server-channel:apply-config')
 export const electronGetServerChannelQrPayload = defineInvokeEventa<ServerChannelQrPayload>('eventa:invoke:electron:server-channel:get-qr-payload')
+
+export interface ElectronLumiChannelDevice {
+  id: string
+  name: string
+  userId: string
+  conversationId: string
+  roomTitle: string
+  scopes: LumiChannelDeviceScope[]
+  createdAt: string
+  revokedAt: string | null
+}
+export interface ElectronLumiChannelDeviceList {
+  hostInstanceId: string
+  devices: ElectronLumiChannelDevice[]
+}
+export interface ElectronLumiChannelDeviceCredential {
+  hostInstanceId: string
+  device: ElectronLumiChannelDevice
+  /** Plaintext credential shown once immediately after creation. */
+  token: string
+  /** Complete one-device connection payload suitable for QR transfer. */
+  pairing: LumiChannelDeviceQrPayload
+}
+export interface ElectronLumiChannelDeviceArchiveRecord extends ElectronLumiChannelDevice {
+  tokenHash: string
+}
+export interface ElectronLumiChannelDeviceArchiveSnapshot {
+  version: 3
+  hostInstanceId: string
+  devices: ElectronLumiChannelDeviceArchiveRecord[]
+  audit: ElectronLumiChannelAuditEntry[]
+}
+export interface ElectronLumiChannelDeviceArchiveSnapshotV2 {
+  version: 2
+  hostInstanceId: string
+  devices: Array<Omit<ElectronLumiChannelDeviceArchiveRecord, 'scopes'> & { scopes: string[] }>
+  audit: ElectronLumiChannelAuditEntry[]
+}
+export type ElectronLumiChannelAuditKind
+  = | 'device-created'
+    | 'device-revoked'
+    | 'authenticated'
+    | 'authentication-failed'
+    | 'disconnected'
+    | 'event-accepted'
+    | 'event-rejected'
+    | 'tool-resource-started'
+    | 'tool-resource-finished'
+    | 'tool-resource-terminated'
+export interface ElectronLumiChannelAuditEntry {
+  id: string
+  createdAt: string
+  kind: ElectronLumiChannelAuditKind
+  deviceId?: string
+  deviceName?: string
+  userId?: string
+  conversationId?: string
+  eventType?: string
+  code?: string
+  reason?: string
+  retryAfterMs?: number
+  remoteAddress?: string
+}
+export interface ElectronLumiChannelAuditSnapshot {
+  entries: ElectronLumiChannelAuditEntry[]
+}
+export const electronListLumiChannelDevices = defineInvokeEventa<ElectronLumiChannelDeviceList>('eventa:invoke:electron:server-channel:devices:list')
+export const electronCreateLumiChannelDevice = defineInvokeEventa<ElectronLumiChannelDeviceCredential, { name: string, userId: string, conversationId: string, roomTitle: string, toolScopes?: LumiChannelToolScope[] }>('eventa:invoke:electron:server-channel:devices:create')
+export const electronRevokeLumiChannelDevice = defineInvokeEventa<ElectronLumiChannelDevice, { deviceId: string }>('eventa:invoke:electron:server-channel:devices:revoke')
+export const electronListLumiChannelAudit = defineInvokeEventa<ElectronLumiChannelAuditSnapshot>('eventa:invoke:electron:server-channel:devices:audit:list')
+export const electronClearLumiChannelAudit = defineInvokeEventa<void>('eventa:invoke:electron:server-channel:devices:audit:clear')
+export const electronExportLumiChannelDeviceArchive = defineInvokeEventa<ElectronLumiChannelDeviceArchiveSnapshot>('eventa:invoke:electron:server-channel:devices:archive:export')
+export const electronImportLumiChannelDeviceArchive = defineInvokeEventa<ElectronLumiChannelDeviceArchiveSnapshot, ElectronLumiChannelDeviceArchiveSnapshot | ElectronLumiChannelDeviceArchiveSnapshotV2>('eventa:invoke:electron:server-channel:devices:archive:import')
+export const electronClearLumiChannelDevices = defineInvokeEventa<void>('eventa:invoke:electron:server-channel:devices:clear')
 
 export type ElectronUpdaterChannel = 'latest' | 'stable' | 'alpha' | 'beta' | 'nightly' | 'canary'
 
@@ -286,6 +400,25 @@ export interface ElectronMcpComputerUseChatTurn {
   turnId: string
 }
 
+export type ElectronMcpExclusiveResource = 'browser' | 'computer-use' | 'minecraft'
+
+/** Content-free ownership metadata for one active exclusive MCP call. */
+export interface ElectronMcpResourceLeaseInput {
+  id: string
+  resource: ElectronMcpExclusiveResource
+  toolName: string
+  serverName: string
+  actorId: string
+  conversationId: string
+  deviceId?: string
+}
+
+/** Operator-visible state for one active exclusive MCP call. */
+export interface ElectronMcpResourceLease extends ElectronMcpResourceLeaseInput {
+  startedAt: string
+  terminationRequestedAt: string | null
+}
+
 export const electronMcpOpenConfigFile = defineInvokeEventa<{ path: string }>('eventa:invoke:electron:mcp:open-config-file')
 export const electronMcpApplyAndRestart = defineInvokeEventa<ElectronMcpStdioApplyResult>('eventa:invoke:electron:mcp:apply-and-restart')
 export const electronMcpGetRuntimeStatus = defineInvokeEventa<ElectronMcpStdioRuntimeStatus>('eventa:invoke:electron:mcp:get-runtime-status')
@@ -294,6 +427,8 @@ export const electronMcpCallTool = defineInvokeEventa<ElectronMcpCallToolResult,
 export const electronMcpInterruptComputerUse = defineInvokeEventa<{ interrupted: boolean }>('eventa:invoke:electron:mcp:interrupt-computer-use')
 export const electronMcpSetComputerUseChatActive = defineInvokeEventa<void, { sourceId: string, active: boolean, reset?: boolean, turnId?: string }>('eventa:invoke:electron:mcp:set-computer-use-chat-active')
 export const electronMcpGetComputerUseChatTurn = defineInvokeEventa<ElectronMcpComputerUseChatTurn | undefined>('eventa:invoke:electron:mcp:get-computer-use-chat-turn')
+export const electronMcpListResourceLeases = defineInvokeEventa<ElectronMcpResourceLease[]>('eventa:invoke:electron:mcp:resource-leases:list')
+export const electronMcpTerminateResourceLease = defineInvokeEventa<ElectronMcpResourceLease, { leaseId: string }>('eventa:invoke:electron:mcp:resource-leases:terminate')
 export const electronMcpReadConfigText = defineInvokeEventa<ElectronMcpStdioConfigText>('eventa:invoke:electron:mcp:read-config-text')
 export const electronMcpWriteConfigText = defineInvokeEventa<ElectronMcpStdioConfigText, { text: string }>('eventa:invoke:electron:mcp:write-config-text')
 export const electronMcpTestServer = defineInvokeEventa<ElectronMcpStdioTestResult, ElectronMcpStdioTestPayload>('eventa:invoke:electron:mcp:test-server')
@@ -334,6 +469,42 @@ export const electronAppOpenUserDataFolder = defineInvokeEventa<{ path: string }
 export const electronAppOpenPath = defineInvokeEventa<{ path: string }, { path: string }>('eventa:invoke:electron:app:open-path')
 export const electronAppQuit = defineInvokeEventa<void>('eventa:invoke:electron:app:quit')
 
+export interface ElectronLumiUserRecord {
+  id: string
+  displayName: string
+  preferredAddress: string
+  role: 'owner' | 'member' | 'guest'
+  status: 'active' | 'inactive'
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ElectronLumiExternalIdentityRecord {
+  id: string
+  userId: string
+  provider: string
+  providerInstanceId: string
+  externalUserId: string
+  createdAt: string
+}
+
+export interface ElectronLumiIdentitySnapshot {
+  users: ElectronLumiUserRecord[]
+  externalIdentities: ElectronLumiExternalIdentityRecord[]
+  activeUserId: string
+  migrationVersion: string
+  dbPath?: string
+}
+
+export const electronLumiIdentityGetSnapshot = defineInvokeEventa<ElectronLumiIdentitySnapshot>('eventa:invoke:electron:lumi-identity:get-snapshot')
+export const electronLumiIdentityCreateUser = defineInvokeEventa<ElectronLumiIdentitySnapshot, { displayName: string, preferredAddress?: string }>('eventa:invoke:electron:lumi-identity:create-user')
+export const electronLumiIdentityUpdateUser = defineInvokeEventa<ElectronLumiIdentitySnapshot, { id: string, displayName?: string, preferredAddress?: string, status?: 'active' | 'inactive' }>('eventa:invoke:electron:lumi-identity:update-user')
+export const electronLumiIdentitySetActiveUser = defineInvokeEventa<ElectronLumiIdentitySnapshot, { userId: string }>('eventa:invoke:electron:lumi-identity:set-active-user')
+export const electronLumiIdentityLinkExternalIdentity = defineInvokeEventa<ElectronLumiIdentitySnapshot, { userId: string, provider: string, providerInstanceId: string, externalUserId: string }>('eventa:invoke:electron:lumi-identity:link-external-identity')
+export const electronLumiIdentityReplaceSnapshot = defineInvokeEventa<ElectronLumiIdentitySnapshot, ElectronLumiIdentitySnapshot>('eventa:invoke:electron:lumi-identity:replace-snapshot')
+export const electronLumiIdentityChanged = defineEventa<ElectronLumiIdentitySnapshot>('eventa:event:electron:lumi-identity:changed')
+export const electronLumiIdentitySetRuntimeBusy = defineInvokeEventa<void, { busy: boolean }>('eventa:invoke:electron:lumi-identity:set-runtime-busy')
+
 export interface ElectronLumiMemorySnapshot {
   fragments: Record<string, any>[]
   events: Record<string, any>[]
@@ -372,20 +543,20 @@ export interface ElectronLumiMemoryVectorSearchResult {
   status: ElectronLumiMemoryVectorStatus
 }
 
-export const electronLumiMemoryGetSnapshot = defineInvokeEventa<ElectronLumiMemorySnapshot>('eventa:invoke:electron:lumi-memory:get-snapshot')
-export const electronLumiMemoryReplaceSnapshot = defineInvokeEventa<ElectronLumiMemorySnapshot, ElectronLumiMemorySnapshot>('eventa:invoke:electron:lumi-memory:replace-snapshot')
+export const electronLumiMemoryGetSnapshot = defineInvokeEventa<ElectronLumiMemorySnapshot, { userId: string }>('eventa:invoke:electron:lumi-memory:get-snapshot')
+export const electronLumiMemoryReplaceSnapshot = defineInvokeEventa<ElectronLumiMemorySnapshot, { userId: string, snapshot: ElectronLumiMemorySnapshot }>('eventa:invoke:electron:lumi-memory:replace-snapshot')
 export const electronLumiMemoryUpsertMemory = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-memory:upsert-memory')
-export const electronLumiMemoryDeleteMemory = defineInvokeEventa<void, { id: string }>('eventa:invoke:electron:lumi-memory:delete-memory')
-export const electronLumiMemoryGetVectors = defineInvokeEventa<ElectronLumiMemoryVectorRecord[], { model: string }>('eventa:invoke:electron:lumi-memory:get-vectors')
+export const electronLumiMemoryDeleteMemory = defineInvokeEventa<void, { id: string, userId: string }>('eventa:invoke:electron:lumi-memory:delete-memory')
+export const electronLumiMemoryGetVectors = defineInvokeEventa<ElectronLumiMemoryVectorRecord[], { model: string, userId: string }>('eventa:invoke:electron:lumi-memory:get-vectors')
 export const electronLumiMemoryUpsertVector = defineInvokeEventa<void, ElectronLumiMemoryVectorRecord>('eventa:invoke:electron:lumi-memory:upsert-vector')
 export const electronLumiMemoryDeleteVector = defineInvokeEventa<void, { memoryId: string, model?: string }>('eventa:invoke:electron:lumi-memory:delete-vector')
-export const electronLumiMemoryVectorStatus = defineInvokeEventa<ElectronLumiMemoryVectorStatus>('eventa:invoke:electron:lumi-memory:vector-status')
-export const electronLumiMemoryBackfillVectors = defineInvokeEventa<ElectronLumiMemoryVectorStatus, { limit?: number }>('eventa:invoke:electron:lumi-memory:backfill-vectors')
-export const electronLumiMemorySearchVectors = defineInvokeEventa<ElectronLumiMemoryVectorSearchResult, { query: string, limit?: number }>('eventa:invoke:electron:lumi-memory:search-vectors')
+export const electronLumiMemoryVectorStatus = defineInvokeEventa<ElectronLumiMemoryVectorStatus, { userId: string }>('eventa:invoke:electron:lumi-memory:vector-status')
+export const electronLumiMemoryBackfillVectors = defineInvokeEventa<ElectronLumiMemoryVectorStatus, { userId: string, limit?: number }>('eventa:invoke:electron:lumi-memory:backfill-vectors')
+export const electronLumiMemorySearchVectors = defineInvokeEventa<ElectronLumiMemoryVectorSearchResult, { userId: string, query: string, limit?: number }>('eventa:invoke:electron:lumi-memory:search-vectors')
 export const electronLumiMemorySyncVector = defineInvokeEventa<ElectronLumiMemoryVectorStatus, Record<string, any>>('eventa:invoke:electron:lumi-memory:sync-vector')
-export const electronLumiMemorySaveEvent = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-memory:save-event')
-export const electronLumiMemorySetSeedId = defineInvokeEventa<void, { seedId: string }>('eventa:invoke:electron:lumi-memory:set-seed-id')
-export const electronLumiMemoryClear = defineInvokeEventa<void>('eventa:invoke:electron:lumi-memory:clear')
+export const electronLumiMemorySaveEvent = defineInvokeEventa<void, { userId: string, event: Record<string, any> }>('eventa:invoke:electron:lumi-memory:save-event')
+export const electronLumiMemorySetSeedId = defineInvokeEventa<void, { userId: string, seedId: string }>('eventa:invoke:electron:lumi-memory:set-seed-id')
+export const electronLumiMemoryClear = defineInvokeEventa<void, { userId: string }>('eventa:invoke:electron:lumi-memory:clear')
 
 export interface ElectronLumiUserProfileSnapshot {
   entries: Record<string, any>[]
@@ -395,30 +566,31 @@ export interface ElectronLumiUserProfileSnapshot {
   bootstrapVersion: string
   dbPath?: string
   meta?: Record<string, any>
+  canImportLegacyLocalData?: boolean
 }
 
-export const electronLumiUserProfileGetSnapshot = defineInvokeEventa<ElectronLumiUserProfileSnapshot>('eventa:invoke:electron:lumi-user-profile:get-snapshot')
-export const electronLumiUserProfileReplaceSnapshot = defineInvokeEventa<ElectronLumiUserProfileSnapshot, ElectronLumiUserProfileSnapshot>('eventa:invoke:electron:lumi-user-profile:replace-snapshot')
-export const electronLumiUserProfileSaveEntry = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-user-profile:save-entry')
-export const electronLumiUserProfileUpdateEntry = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-user-profile:update-entry')
-export const electronLumiUserProfileArchiveEntry = defineInvokeEventa<void, { id: string }>('eventa:invoke:electron:lumi-user-profile:archive-entry')
-export const electronLumiUserProfileDeleteEntry = defineInvokeEventa<void, { id: string }>('eventa:invoke:electron:lumi-user-profile:delete-entry')
-export const electronLumiUserProfileSaveEvidence = defineInvokeEventa<void, { entryId: string, evidence: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:save-evidence')
-export const electronLumiUserProfileSaveHistory = defineInvokeEventa<void, { entryId?: string, history?: Record<string, any>, event?: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:save-history')
-export const electronLumiUserProfileSavePendingUpdate = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-user-profile:save-pending-update')
-export const electronLumiUserProfileApprovePendingUpdate = defineInvokeEventa<void, { id: string, entry?: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:approve-pending-update')
-export const electronLumiUserProfileRejectPendingUpdate = defineInvokeEventa<void, { id: string }>('eventa:invoke:electron:lumi-user-profile:reject-pending-update')
-export const electronLumiUserProfileSetMeta = defineInvokeEventa<void, { key: string, value: any }>('eventa:invoke:electron:lumi-user-profile:set-meta')
-export const electronLumiUserProfileClear = defineInvokeEventa<void>('eventa:invoke:electron:lumi-user-profile:clear')
+export const electronLumiUserProfileGetSnapshot = defineInvokeEventa<ElectronLumiUserProfileSnapshot, { userId: string }>('eventa:invoke:electron:lumi-user-profile:get-snapshot')
+export const electronLumiUserProfileReplaceSnapshot = defineInvokeEventa<ElectronLumiUserProfileSnapshot, { userId: string, snapshot: ElectronLumiUserProfileSnapshot }>('eventa:invoke:electron:lumi-user-profile:replace-snapshot')
+export const electronLumiUserProfileSaveEntry = defineInvokeEventa<void, { userId: string, entry: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:save-entry')
+export const electronLumiUserProfileUpdateEntry = defineInvokeEventa<void, { userId: string, entry: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:update-entry')
+export const electronLumiUserProfileArchiveEntry = defineInvokeEventa<void, { userId: string, id: string }>('eventa:invoke:electron:lumi-user-profile:archive-entry')
+export const electronLumiUserProfileDeleteEntry = defineInvokeEventa<void, { userId: string, id: string }>('eventa:invoke:electron:lumi-user-profile:delete-entry')
+export const electronLumiUserProfileSaveEvidence = defineInvokeEventa<void, { userId: string, entryId: string, evidence: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:save-evidence')
+export const electronLumiUserProfileSaveHistory = defineInvokeEventa<void, { userId: string, entryId?: string, history?: Record<string, any>, event?: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:save-history')
+export const electronLumiUserProfileSavePendingUpdate = defineInvokeEventa<void, { userId: string, pending: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:save-pending-update')
+export const electronLumiUserProfileApprovePendingUpdate = defineInvokeEventa<void, { userId: string, id: string, entry?: Record<string, any> }>('eventa:invoke:electron:lumi-user-profile:approve-pending-update')
+export const electronLumiUserProfileRejectPendingUpdate = defineInvokeEventa<void, { userId: string, id: string }>('eventa:invoke:electron:lumi-user-profile:reject-pending-update')
+export const electronLumiUserProfileSetMeta = defineInvokeEventa<void, { userId: string, key: string, value: any }>('eventa:invoke:electron:lumi-user-profile:set-meta')
+export const electronLumiUserProfileClear = defineInvokeEventa<void, { userId: string }>('eventa:invoke:electron:lumi-user-profile:clear')
 
 export interface ElectronLumiCurrentStateSnapshot {
   state: Record<string, any> | null
   dbPath?: string
 }
 
-export const electronLumiCurrentStateGetSnapshot = defineInvokeEventa<ElectronLumiCurrentStateSnapshot>('eventa:invoke:electron:lumi-current-state:get-snapshot')
-export const electronLumiCurrentStateSaveSnapshot = defineInvokeEventa<ElectronLumiCurrentStateSnapshot, ElectronLumiCurrentStateSnapshot>('eventa:invoke:electron:lumi-current-state:save-snapshot')
-export const electronLumiCurrentStateClear = defineInvokeEventa<void>('eventa:invoke:electron:lumi-current-state:clear')
+export const electronLumiCurrentStateGetSnapshot = defineInvokeEventa<ElectronLumiCurrentStateSnapshot, { userId: string }>('eventa:invoke:electron:lumi-current-state:get-snapshot')
+export const electronLumiCurrentStateSaveSnapshot = defineInvokeEventa<ElectronLumiCurrentStateSnapshot, { userId: string, snapshot: ElectronLumiCurrentStateSnapshot }>('eventa:invoke:electron:lumi-current-state:save-snapshot')
+export const electronLumiCurrentStateClear = defineInvokeEventa<void, { userId: string }>('eventa:invoke:electron:lumi-current-state:clear')
 
 export interface ElectronClaudeCodeAgentRunPayload {
   userRequest: string
@@ -592,6 +764,24 @@ export const widgetsUpdateEvent = defineEventa<WidgetsUpdatePayload>('eventa:eve
 // Onboarding window events
 export const electronOnboardingClose = defineInvokeEventa('eventa:invoke:electron:windows:onboarding:close')
 export const electronOpenOnboarding = defineInvokeEventa('eventa:invoke:electron:windows:onboarding:open')
+export const electronOnboardingOpenOnlineAccount = defineInvokeEventa('eventa:invoke:electron:windows:onboarding:open-online-account')
+
+export interface ElectronLumiDiaryExportEntry {
+  id: string
+  entryDate: string
+  title: string
+  content: string
+  sourceSummary: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ElectronLumiDiaryExportSnapshot {
+  diaryDir: string
+  entries: ElectronLumiDiaryExportEntry[]
+}
+
+export const electronLumiDiaryExportAll = defineInvokeEventa<ElectronLumiDiaryExportSnapshot>('eventa:invoke:electron:lumi-diary:export-all')
 
 // Auth — OIDC Authorization Code + PKCE flow via system browser
 export interface ElectronAuthTokens {

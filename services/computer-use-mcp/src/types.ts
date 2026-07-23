@@ -620,10 +620,8 @@ export interface ComputerUseConfig {
   maxOperationUnits: number
   maxPendingActions: number
   allowedBounds?: Bounds
-  allowApps: string[]
   denyApps: string[]
   denyWindowTitles: string[]
-  openableApps: string[]
   timeoutMs: number
   sessionTag?: string
   launchHostProcess: string

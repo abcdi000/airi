@@ -1,7 +1,7 @@
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { Message } from '@xsai/shared-chat'
 
-import type { ChatHistoryItem, ContextMessage, StreamingAssistantMessage } from '../types/chat'
+import type { ChatHistoryItem, ChatInteractionContext, ContextMessage, StreamingAssistantMessage } from '../types/chat'
 import type { StreamEvent, StreamOptions } from '../types/llm'
 
 import { ContextUpdateStrategy } from '@proj-airi/server-shared/types'
@@ -16,7 +16,7 @@ const provider = {
 type Awaitable<T> = T | Promise<T>
 
 function createHarness(options: {
-  runtimeContextProviders?: Array<(event: { messageText: string, sessionId: string }) => Awaitable<ContextMessage | null | undefined>>
+  runtimeContextProviders?: Array<(event: { messageText: string, sessionId: string, interaction?: ChatInteractionContext }) => Awaitable<ContextMessage | null | undefined>>
   onUserTurnReady?: (event: { sessionId: string, messageText: string, sessionMessages: ChatHistoryItem[], hasAttachments: boolean }) => Awaitable<void>
 } = {}) {
   const sessionMessages: Record<string, ChatHistoryItem[]> = {
@@ -70,7 +70,13 @@ function createHarness(options: {
       getSessionGeneration: () => generation,
     },
     context: {
-      ingest: message => contextIngested.push(message),
+      ingest: (message) => {
+        contextIngested.push(message)
+        const sourceKey = (message as ContextMessage & { source?: string }).source ?? 'unknown'
+        contextSnapshot[sourceKey] = message.strategy === ContextUpdateStrategy.AppendSelf
+          ? [...(contextSnapshot[sourceKey] ?? []), structuredClone(message)]
+          : [structuredClone(message)]
+      },
       snapshot: () => structuredClone(contextSnapshot),
     },
     foregroundStream: {
@@ -271,6 +277,58 @@ describe('createChatOrchestratorRuntime', () => {
     ])
   })
 
+  /**
+   * @example
+   * A group turn retains its actor in storage while provider messages receive speaker labels only.
+   */
+  it('persists group actors and projects speaker labels without leaking internal metadata', async () => {
+    const seen: ChatInteractionContext[] = []
+    let composedMessages: Message[] = []
+    const harness = createHarness({
+      runtimeContextProviders: [
+        (event) => {
+          if (event.interaction)
+            seen.push(event.interaction)
+          return null
+        },
+      ],
+    })
+    harness.stream.mockImplementationOnce(async (_model, _chatProvider, messages, options) => {
+      composedMessages = messages
+      await options?.onStreamEvent?.({ type: 'text-delta', text: 'group reply' })
+      await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
+    })
+    const interaction: ChatInteractionContext = {
+      conversationId: 'session-1',
+      conversationType: 'group',
+      actorId: 'doggy-id',
+      actorDisplayName: 'Doggy',
+      participantIds: ['doggy-id', 'moussy-id'],
+    }
+
+    await harness.runtime.ingest('今晚一起玩吗？', {
+      model: 'gpt-test',
+      chatProvider: provider,
+      interaction,
+      assistantActorId: 'lumi',
+      assistantActorDisplayName: 'Lumi',
+    })
+
+    expect(seen).toEqual([interaction])
+    expect(harness.sessionMessages['session-1'][1]).toMatchObject({
+      role: 'user',
+      actorId: 'doggy-id',
+      actorDisplayName: 'Doggy',
+    })
+    expect(harness.sessionMessages['session-1'][2]).toMatchObject({
+      role: 'assistant',
+      actorId: 'lumi',
+      actorDisplayName: 'Lumi',
+    })
+    expect(composedMessages[1]?.content).toContain('[Speaker: Doggy]\n今晚一起玩吗？')
+    expect(JSON.stringify(composedMessages)).not.toContain('actorId')
+  })
+
   it('passes provider maxToolSteps to the LLM stream for long tool workflows', async () => {
     const harness = createHarness()
 
@@ -429,8 +487,8 @@ describe('createChatOrchestratorRuntime', () => {
     harness.runtime.hooks.onAssistantMessage(assistantMessageHook)
     harness.runtime.hooks.onChatTurnComplete(turnCompleteHook)
     harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
-      await options?.onStreamEvent?.({ type: 'text-delta', text: 'lumi\u62d2' })
-      await options?.onStreamEvent?.({ type: 'text-delta', text: '\u7edd\u56de\u590d' })
+      await options?.onStreamEvent?.({ type: 'text-delta', text: 'lumi\u62D2' })
+      await options?.onStreamEvent?.({ type: 'text-delta', text: '\u7EDD\u56DE\u590D' })
       await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
     })
 
@@ -438,7 +496,7 @@ describe('createChatOrchestratorRuntime', () => {
       model: 'gpt-test',
       chatProvider: provider,
       hiddenUserMessage: true,
-      suppressAssistantTexts: ['lumi\u62d2\u7edd\u56de\u590d'],
+      suppressAssistantTexts: ['lumi\u62D2\u7EDD\u56DE\u590D'],
       onAssistantSuppressed,
     })
 
@@ -446,7 +504,7 @@ describe('createChatOrchestratorRuntime', () => {
     expect(harness.assistantAppended).toHaveLength(0)
     expect(harness.assistantTurns).toHaveLength(0)
     expect(onAssistantSuppressed).toHaveBeenCalledOnce()
-    expect(onAssistantSuppressed).toHaveBeenCalledWith('lumi\u62d2\u7edd\u56de\u590d')
+    expect(onAssistantSuppressed).toHaveBeenCalledWith('lumi\u62D2\u7EDD\u56DE\u590D')
     expect(literalHook).not.toHaveBeenCalled()
     expect(assistantEndHook).not.toHaveBeenCalled()
     expect(assistantMessageHook).not.toHaveBeenCalled()
@@ -463,18 +521,18 @@ describe('createChatOrchestratorRuntime', () => {
       literals.push(literal)
     })
     harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
-      await options?.onStreamEvent?.({ type: 'text-delta', text: 'lumi\u62d2' })
-      await options?.onStreamEvent?.({ type: 'text-delta', text: '\u7edd\u56de\u4fe1\uff0c\u8fd9\u662f\u6b63\u5e38\u56de\u590d' })
+      await options?.onStreamEvent?.({ type: 'text-delta', text: 'lumi\u62D2' })
+      await options?.onStreamEvent?.({ type: 'text-delta', text: '\u7EDD\u56DE\u4FE1\uFF0C\u8FD9\u662F\u6B63\u5E38\u56DE\u590D' })
       await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
     })
 
     await harness.runtime.ingest('visible user message', {
       model: 'gpt-test',
       chatProvider: provider,
-      suppressAssistantTexts: ['lumi\u62d2\u7edd\u56de\u590d'],
+      suppressAssistantTexts: ['lumi\u62D2\u7EDD\u56DE\u590D'],
     })
 
-    expect(literals.join('')).toBe('lumi\u62d2\u7edd\u56de\u4fe1\uff0c\u8fd9\u662f\u6b63\u5e38\u56de\u590d')
+    expect(literals.join('')).toBe('lumi\u62D2\u7EDD\u56DE\u4FE1\uFF0C\u8FD9\u662F\u6B63\u5E38\u56DE\u590D')
     expect(harness.assistantAppended).toHaveLength(1)
   })
   it('applies assistant speech transform to final content and slices', async () => {
@@ -720,6 +778,124 @@ describe('createChatOrchestratorRuntime', () => {
 
   /**
    * @example
+   * Session A and session B may stream concurrently while each session keeps its own FIFO queue.
+   */
+  it('runs different sessions concurrently and remains sending until every active turn settles', async () => {
+    const harness = createHarness()
+    const releases: Array<() => void> = []
+    harness.stream.mockImplementation(async () => {
+      await new Promise<void>((resolve) => {
+        releases.push(resolve)
+      })
+    })
+
+    const firstSend = harness.runtime.ingest('session one', {
+      model: 'gpt-test',
+      chatProvider: provider,
+    }, 'session-1')
+    await vi.waitFor(() => {
+      expect(harness.stream).toHaveBeenCalledTimes(1)
+    })
+
+    const secondSend = harness.runtime.ingest('session two', {
+      model: 'gpt-test',
+      chatProvider: provider,
+    }, 'session-2')
+    await vi.waitFor(() => {
+      expect(harness.stream).toHaveBeenCalledTimes(2)
+    })
+
+    expect(harness.runtime.getPendingQueuedSendCount()).toBe(0)
+    expect(harness.runtime.getSending()).toBe(true)
+
+    releases[1]?.()
+    await secondSend
+    expect(harness.runtime.getSending()).toBe(true)
+
+    releases[0]?.()
+    await firstSend
+    expect(harness.runtime.getSending()).toBe(false)
+  })
+
+  /**
+   * @example
+   * Two sessions sharing a tool runtime use one explicit FIFO execution lane.
+   */
+  it('serializes different sessions assigned to the same execution lane', async () => {
+    const harness = createHarness()
+    let releaseFirstSend: (() => void) | undefined
+    harness.stream.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releaseFirstSend = resolve
+      })
+    })
+    const options = {
+      model: 'gpt-test',
+      chatProvider: provider,
+      executionLane: 'shared-consciousness',
+    }
+
+    const firstSend = harness.runtime.ingest('first', options, 'session-1')
+    const secondSend = harness.runtime.ingest('second', options, 'session-2')
+    await vi.waitFor(() => {
+      expect(harness.stream).toHaveBeenCalledTimes(1)
+      expect(harness.runtime.getPendingQueuedSendCount()).toBe(1)
+    })
+
+    releaseFirstSend?.()
+    await Promise.all([firstSend, secondSend])
+    expect(harness.stream).toHaveBeenCalledTimes(2)
+  })
+
+  /**
+   * @example
+   * Concurrent turns replace the same context source without reading each other's turn-local value.
+   */
+  it('keeps runtime context prompt snapshots isolated across concurrent sessions', async () => {
+    const harness = createHarness({
+      runtimeContextProviders: [event => ({
+        id: `context-${event.sessionId}`,
+        source: 'turn-context',
+        contextId: 'system:turn',
+        strategy: ContextUpdateStrategy.ReplaceSelf,
+        text: `private context for ${event.sessionId}`,
+        createdAt: 1,
+      })],
+    })
+    let hookArrivals = 0
+    let releaseHooks: (() => void) | undefined
+    const hooksReady = new Promise<void>((resolve) => {
+      releaseHooks = resolve
+    })
+    harness.runtime.hooks.onBeforeMessageComposed(async () => {
+      hookArrivals += 1
+      if (hookArrivals === 2)
+        releaseHooks?.()
+      await hooksReady
+    })
+
+    const firstSend = harness.runtime.ingest('first', {
+      model: 'gpt-test',
+      chatProvider: provider,
+    }, 'session-1')
+    const secondSend = harness.runtime.ingest('second', {
+      model: 'gpt-test',
+      chatProvider: provider,
+    }, 'session-2')
+    await Promise.all([firstSend, secondSend])
+
+    const promptBySession = new Map(harness.promptProjections.map((projection) => {
+      const record = projection as { sessionId: string, contexts: Record<string, ContextMessage[]> }
+      return [record.sessionId, JSON.stringify(record.contexts)]
+    }))
+    expect(promptBySession.get('session-1')).toContain('private context for session-1')
+    expect(promptBySession.get('session-1')).not.toContain('private context for session-2')
+    expect(promptBySession.get('session-2')).toContain('private context for session-2')
+    expect(promptBySession.get('session-2')).not.toContain('private context for session-1')
+  })
+
+  /**
+   * @example
    * runtime.setSending(true)
    * expect(runtime.getSending()).toBe(true)
    */
@@ -881,76 +1057,76 @@ describe('createChatOrchestratorRuntime', () => {
     ])
     expect(harness.assistantAppended).toHaveLength(1)
     expect(harness.foregroundResets).toHaveLength(1)
-    })
+  })
+})
+
+it('streams confirmed tool progress into the ordinary assistant message', async () => {
+  const harness = createHarness()
+  harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
+    await options?.onStreamEvent?.({
+      type: 'tool-call',
+      toolCallId: 'computer-use-1',
+      toolName: 'mcp_computer_use_desktop_focus_app',
+      args: { app: 'QQ' },
+    } as StreamEvent)
+    await options?.onStreamEvent?.({
+      type: 'tool-result',
+      toolCallId: 'computer-use-1',
+      result: { status: 'executed' },
+    } as StreamEvent)
+    await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
   })
 
-  it('streams confirmed tool progress into the ordinary assistant message', async () => {
-    const harness = createHarness()
-    harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
-      await options?.onStreamEvent?.({
-        type: 'tool-call',
-        toolCallId: 'computer-use-1',
-        toolName: 'mcp_computer_use_desktop_focus_app',
-        args: { app: 'QQ' },
-      } as StreamEvent)
-      await options?.onStreamEvent?.({
-        type: 'tool-result',
-        toolCallId: 'computer-use-1',
-        result: { status: 'executed' },
-      } as StreamEvent)
-      await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
-    })
-
-    await harness.runtime.ingest('focus QQ', {
-      model: 'gpt-test',
-      chatProvider: provider,
-      toolResultTextTransform: ({ toolName, isError }) => toolName === 'mcp_computer_use_desktop_focus_app' && !isError
-        ? '已完成：聚焦目标应用。'
-        : undefined,
-    })
-
-    expect(harness.foregroundPatches.some(message => message.content === '已完成：聚焦目标应用。')).toBe(true)
-    expect(harness.sessionMessages['session-1']?.at(-1)).toMatchObject({
-      role: 'assistant',
-      content: '已完成：聚焦目标应用。',
-    })
+  await harness.runtime.ingest('focus QQ', {
+    model: 'gpt-test',
+    chatProvider: provider,
+    toolResultTextTransform: ({ toolName, isError }) => toolName === 'mcp_computer_use_desktop_focus_app' && !isError
+      ? '已完成：聚焦目标应用。'
+      : undefined,
   })
 
-  it('keeps image attachments in chat history while sending text-only provider context', async () => {
-    const harness = createHarness()
-    let composedMessages: Message[] = []
-    harness.stream.mockImplementationOnce(async (_model, _chatProvider, messages, options) => {
-      composedMessages = messages
-      await options?.onStreamEvent?.({ type: 'text-delta', text: 'reply' })
-      await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
-    })
+  expect(harness.foregroundPatches.some(message => message.content === '已完成：聚焦目标应用。')).toBe(true)
+  expect(harness.sessionMessages['session-1']?.at(-1)).toMatchObject({
+    role: 'assistant',
+    content: '已完成：聚焦目标应用。',
+  })
+})
 
-    await harness.runtime.ingest('see image', {
-      model: 'gpt-test',
-      chatProvider: provider,
-      attachments: [
-        {
-          type: 'image',
-          data: 'aW1hZ2U=',
-          mimeType: 'image/png',
-        },
-      ],
-      providerUserContext: '[Current-turn image context]\nImage 1: description=a UI screenshot',
-      sendAttachmentsToProvider: false,
-    })
+it('keeps image attachments in chat history while sending text-only provider context', async () => {
+  const harness = createHarness()
+  let composedMessages: Message[] = []
+  harness.stream.mockImplementationOnce(async (_model, _chatProvider, messages, options) => {
+    composedMessages = messages
+    await options?.onStreamEvent?.({ type: 'text-delta', text: 'reply' })
+    await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
+  })
 
-    const userMessage = harness.sessionMessages['session-1']?.find(message => message.role === 'user')
-    expect(userMessage?.content).toEqual([
+  await harness.runtime.ingest('see image', {
+    model: 'gpt-test',
+    chatProvider: provider,
+    attachments: [
       {
-        type: 'text',
-        text: 'see image',
+        type: 'image',
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
       },
-      {
-        type: 'image_url',
-        image_url: {
-          url: 'data:image/png;base64,aW1hZ2U=',
-        },
-      },
-    ])
-    expect(composedMessages[1]?.content).toBe('[本地时间 2026-04-25 18:47:00]\nsee image\n\n[Current-turn image context]\nImage 1: description=a UI screenshot')
+    ],
+    providerUserContext: '[Current-turn image context]\nImage 1: description=a UI screenshot',
+    sendAttachmentsToProvider: false,
   })
+
+  const userMessage = harness.sessionMessages['session-1']?.find(message => message.role === 'user')
+  expect(userMessage?.content).toEqual([
+    {
+      type: 'text',
+      text: 'see image',
+    },
+    {
+      type: 'image_url',
+      image_url: {
+        url: 'data:image/png;base64,aW1hZ2U=',
+      },
+    },
+  ])
+  expect(composedMessages[1]?.content).toBe('[本地时间 2026-04-25 18:47:00]\nsee image\n\n[Current-turn image context]\nImage 1: description=a UI screenshot')
+})

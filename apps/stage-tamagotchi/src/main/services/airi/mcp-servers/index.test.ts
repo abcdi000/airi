@@ -238,6 +238,55 @@ describe('createMcpStdioManager', () => {
     })
   })
 
+  it('keeps a remote resource lease visible until operator termination closes the owning MCP call', async () => {
+    const { createMcpStdioManager } = await import('./index')
+    const userData = appMock.getPath()
+    await mkdir(userData, { recursive: true })
+    await writeFile(join(userData, 'mcp.json'), `${JSON.stringify({
+      mcpServers: {
+        playwright: {
+          command: 'playwright-mcp',
+          startupMode: 'on_startup',
+        },
+      },
+    })}\n`)
+
+    let rejectCall: ((error: Error) => void) | undefined
+    clientMocks.callTool.mockImplementationOnce(() => new Promise((_, reject) => {
+      rejectCall = reject
+    }))
+    clientMocks.close.mockImplementationOnce(async () => {
+      rejectCall?.(new Error('operator terminated MCP session'))
+    })
+
+    const manager = createMcpStdioManager()
+    await manager.applyAndRestart()
+    const call = manager.callTool({
+      name: 'playwright::browser_snapshot',
+      debug: {
+        modelToolCallId: 'model-call-resource-1',
+        lumiResourceLease: {
+          id: 'lease-playwright-1',
+          resource: 'browser',
+          actorId: 'moussy',
+          conversationId: 'room-doggy-moussy',
+          deviceId: 'lumi-device-1',
+        },
+      },
+    })
+    await vi.waitFor(() => expect(manager.listResourceLeases()).toHaveLength(1))
+
+    await manager.terminateResourceLease('lease-playwright-1')
+    await expect(call).rejects.toThrow('operator terminated MCP session')
+
+    expect(clientMocks.close).toHaveBeenCalled()
+    expect(manager.listResourceLeases()).toEqual([])
+    expect(manager.getRuntimeStatus().servers).toContainEqual(expect.objectContaining({
+      name: 'playwright',
+      state: 'running',
+    }))
+  })
+
   it('uses long-running MCP timeouts and exposes persistent metadata', async () => {
     const { createMcpStdioManager } = await import('./index')
     const userData = appMock.getPath()

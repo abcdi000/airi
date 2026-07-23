@@ -16,29 +16,21 @@ import { useI18n } from 'vue-i18n'
 
 import onboardingLogo from '../../../../assets/onboarding.avif'
 
-import { useAuthStore } from '../../../../stores/auth'
-import { useOnboardingStore } from '../../../../stores/onboarding'
 import { useSettingsGeneral } from '../../../../stores/settings'
 
 interface Props {
   onNext: OnboardingStepNextHandler
+  onlineSetup?: () => Promise<void> | void
 }
 
 const props = defineProps<Props>()
 const { t } = useI18n()
-const authStore = useAuthStore()
-const onboardingStore = useOnboardingStore()
 const settingsStore = useSettingsGeneral()
 const { language } = storeToRefs(settingsStore)
 
 const languages = computed(() => {
   return Object.entries(all).map(([value, label]) => ({ value, label }))
 })
-
-function handleLogin() {
-  onboardingStore.showingSetup = false
-  authStore.needsLogin = true
-}
 
 function handleLocalSetup() {
   props.onNext()
@@ -123,6 +115,7 @@ function handleLocalSetup() {
     </div>
     <div :class="['flex', 'flex-col', 'gap-3', 'md:flex-row']">
       <Button
+        v-if="props.onlineSetup"
         v-motion
         :initial="{ opacity: 0 }"
         :enter="{ opacity: 1 }"
@@ -130,7 +123,7 @@ function handleLocalSetup() {
         :delay="200"
         :label="t('settings.dialogs.onboarding.loginAction')"
         :class="['flex-1']"
-        @click="handleLogin"
+        @click="props.onlineSetup"
       />
       <Button
         v-motion

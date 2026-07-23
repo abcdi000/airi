@@ -1,30 +1,12 @@
-import type { BrowserContext, Page } from 'playwright'
-import type { BrowserBehaviorConfig, BrowserIdentityExpectation, LauncherConfig, LaunchPersistentContextOptions, PluginSpec } from './config'
+import type { BrowserBackendRequest, BrowserContextLike, BrowserPageLike } from './browser-contracts'
+import type { BrowserBehaviorConfig, BrowserIdentityExpectation, LauncherConfig } from './config'
 
 import { isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { chromium } from 'playwright-extra'
+import { BrowserFactory } from './browser-factory'
 
 type ImportModule = (specifier: string) => Promise<Record<string, unknown>>
-
-interface ExtraChromium {
-  use: (plugin: unknown) => ExtraChromium
-  launchPersistentContext: (
-    userDataDir: string,
-    options: LaunchPersistentContextOptions,
-  ) => Promise<BrowserContext>
-}
-
-export interface BrowserDependencies {
-  chromium: ExtraChromium
-  importModule: ImportModule
-}
-
-const defaultDependencies: BrowserDependencies = {
-  chromium: chromium as unknown as ExtraChromium,
-  importModule: specifier => import(specifier) as Promise<Record<string, unknown>>,
-}
 
 const NAVIGATOR_WEBDRIVER_HARDENING = `
 (() => {
@@ -70,23 +52,8 @@ function moduleCallable(module: Record<string, unknown>, exportName: string): (.
   return candidate as (...args: unknown[]) => unknown
 }
 
-export async function installPlugins(
-  specs: PluginSpec[],
-  configDir: string,
-  dependencies: BrowserDependencies = defaultDependencies,
-): Promise<string[]> {
-  const installed: string[] = []
-  for (const spec of specs) {
-    const imported = await dependencies.importModule(importSpecifier(spec.module, configDir))
-    const createPlugin = moduleCallable(imported, 'createPlugin')
-    dependencies.chromium.use(createPlugin(spec.options ?? {}))
-    installed.push(spec.module)
-  }
-  return installed
-}
-
 export async function waitForPageContentReady(
-  page: Page,
+  page: BrowserPageLike,
   behavior: Required<BrowserBehaviorConfig>,
 ): Promise<void> {
   const timeout = behavior.navigationReadyTimeoutMs
@@ -114,15 +81,22 @@ function describeNavigationUrl(url: string): string {
 }
 
 function logNavigationEvent(event: string, fields: Record<string, unknown> = {}): void {
-  console.error(`[lumi-playwright] navigation ${event}: ${JSON.stringify(fields)}`)
+  console.error(`[lumi-browser] navigation ${event}: ${JSON.stringify(fields)}`)
 }
 
 /**
- * Observe navigation outside the page so a reproduction can distinguish a
- * site-triggered redirect from a subsequent MCP action without exposing URLs'
- * query strings, cookies, or page content.
+ * Observes navigation without exposing query strings, cookies, or page content.
+ *
+ * Use when:
+ * - Diagnosing a platform redirect or browser-driver compatibility issue
+ *
+ * Expects:
+ * - `page` follows the shared browser contract
+ *
+ * Returns:
+ * - Installs idempotent event listeners on the page
  */
-export function installNavigationForensics(page: Page): void {
+export function installNavigationForensics(page: BrowserPageLike): void {
   if (navigationForensicsInstalledPages.has(page))
     return
 
@@ -132,7 +106,6 @@ export function installNavigationForensics(page: Page): void {
   page.on('framenavigated', (frame) => {
     if (frame !== page.mainFrame())
       return
-
     const nextUrl = describeNavigationUrl(frame.url())
     logNavigationEvent('main-frame-navigated', { from: lastMainFrameUrl, to: nextUrl })
     lastMainFrameUrl = nextUrl
@@ -140,7 +113,6 @@ export function installNavigationForensics(page: Page): void {
   page.on('requestfailed', (request) => {
     if (!request.isNavigationRequest() || request.frame() !== page.mainFrame())
       return
-
     logNavigationEvent('main-document-request-failed', {
       url: describeNavigationUrl(request.url()),
       failure: request.failure()?.errorText ?? 'unknown',
@@ -149,7 +121,6 @@ export function installNavigationForensics(page: Page): void {
   page.on('response', (response) => {
     if (response.request().resourceType() !== 'document' || response.frame() !== page.mainFrame() || response.status() < 400)
       return
-
     logNavigationEvent('main-document-http-error', {
       url: describeNavigationUrl(response.url()),
       status: response.status(),
@@ -160,23 +131,23 @@ export function installNavigationForensics(page: Page): void {
 }
 
 export function installNavigationReadinessPolicy(
-  context: BrowserContext,
+  context: BrowserContextLike,
   behavior: Required<BrowserBehaviorConfig>,
 ): void {
-  const attach = (page: Page) => {
+  const attach = (page: BrowserPageLike) => {
     if (instrumentedPages.has(page))
       return
 
     instrumentedPages.add(page)
     installNavigationForensics(page)
     const originalGoto = page.goto.bind(page)
-    page.goto = (async (...args: Parameters<Page['goto']>) => {
-      logNavigationEvent('mcp-goto-started', { url: describeNavigationUrl(String(args[0])) })
-      const response = await originalGoto(...args)
+    page.goto = async (url, options) => {
+      logNavigationEvent('mcp-goto-started', { url: describeNavigationUrl(url) })
+      const response = await originalGoto(url, options)
       await waitForPageContentReady(page, behavior)
       logNavigationEvent('mcp-goto-settled', { url: describeNavigationUrl(page.url()) })
       return response
-    }) as Page['goto']
+    }
   }
 
   for (const page of context.pages())
@@ -207,7 +178,7 @@ export function findIdentityMismatches(
 }
 
 export async function verifyBrowserIdentity(
-  context: BrowserContext,
+  context: BrowserContextLike,
   expected: BrowserIdentityExpectation | undefined,
 ): Promise<void> {
   if (!expected)
@@ -238,37 +209,50 @@ export async function verifyBrowserIdentity(
   }))
   const mismatches = findIdentityMismatches(expected, actual)
 
-  console.error(`[lumi-playwright] browser identity verified: ${JSON.stringify(actual)}`)
+  console.error(`[lumi-browser] browser identity verified: ${JSON.stringify(actual)}`)
   if (mismatches.length > 0)
-    console.warn(`[lumi-playwright] browser identity mismatch: ${mismatches.join('; ')}`)
+    console.warn(`[lumi-browser] browser identity mismatch: ${mismatches.join('; ')}`)
 }
 
-export async function createBrowserContext(
+export async function configureBrowserContext(
+  context: BrowserContextLike,
   config: LauncherConfig,
-  dependencies: BrowserDependencies = defaultDependencies,
-): Promise<BrowserContext> {
-  await installPlugins(config.plugins, config.configDir, dependencies)
-
-  const context = await dependencies.chromium.launchPersistentContext(config.userDataDir, {
-    ...config.browser.launchOptions,
-    channel: config.browser.channel,
-    headless: config.browser.headless,
-  })
-
+  importModule: ImportModule = specifier => import(specifier) as Promise<Record<string, unknown>>,
+): Promise<void> {
   await context.addInitScript({ content: NAVIGATOR_WEBDRIVER_HARDENING })
-
   for (const scriptPath of config.initScripts)
     await context.addInitScript({ path: scriptPath })
 
   installNavigationReadinessPolicy(context, config.behavior)
-
   for (const setupModule of config.setupModules) {
-    const imported = await dependencies.importModule(importSpecifier(setupModule, config.configDir))
+    const imported = await importModule(importSpecifier(setupModule, config.configDir))
     const setup = moduleCallable(imported, 'setup')
     await setup(context, config)
   }
-
   await verifyBrowserIdentity(context, config.identity)
+}
 
+/**
+ * Creates a configured context for diagnostics that still use the legacy API.
+ *
+ * Use when:
+ * - A package-local diagnostic command needs a single context
+ *
+ * Expects:
+ * - Backend selection follows the same factory policy as MCP
+ *
+ * Returns:
+ * - A context whose close event releases the backend and profile lease
+ */
+export async function createBrowserContext(
+  config: LauncherConfig,
+  request: BrowserBackendRequest = config.startupRequest,
+): Promise<BrowserContextLike> {
+  const backend = await new BrowserFactory(config).create(request)
+  const context = await backend.getContext()
+  await configureBrowserContext(context, config)
+  context.once('close', () => {
+    void backend.close()
+  })
   return context
 }

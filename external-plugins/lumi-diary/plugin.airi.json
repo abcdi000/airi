@@ -25,6 +25,7 @@
     "capabilities": []
   },
   "entrypoints": {
-    "electron": "./index.mjs"
+    "electron": "./index.mjs",
+    "server": "./index.mjs"
   }
 }

@@ -588,7 +588,7 @@ function observeOnce() {
     text: [
       '[Lumi manual screen observation request]',
       'This is not a user message. The user clicked the floating chat Observe once button.',
-      'If the `lumi_observe_screen` tool is available, call it now to look at the current screen, then reply naturally as Lumi in the normal chat.',
+      'If screen observation tools are available, first call `lumi_list_observation_sources`, choose the most relevant window or screen, then call `lumi_observe_screen` with that sourceId and reply naturally as Lumi.',
       'If screen observation fails or is unavailable, briefly tell the user what failed.',
       'Do not pretend the user sent an image. This is Lumi actively looking at the screen.',
       '[/Lumi manual screen observation request]',

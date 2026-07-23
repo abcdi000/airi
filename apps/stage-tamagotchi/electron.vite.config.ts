@@ -21,22 +21,6 @@ const sharedCacheDir = resolve(join(import.meta.dirname, '..', '..', '.cache'))
 
 export default defineConfig({
   main: {
-    build: {
-      externalizeDeps: {
-        exclude: [
-          // Lumi's Claude Code main-process service shares this pure TypeScript
-          // router with the renderer. Bundle it so installed Electron never tries
-          // to type-strip @proj-airi/stage-ui source files from node_modules.
-          '@proj-airi/stage-ui',
-        ],
-        include: [
-          // Native modules that have `__dirname` usages. Externalize to avoid bundling
-          // them into ESM and causing issues in runtime.
-          'electron-click-drag-plugin',
-          'uiohook-napi',
-        ],
-      },
-    },
     plugins: [
       {
         // To replace `build.rolldownOptions`, as electron-vite still uses the deprecated
@@ -75,6 +59,27 @@ export default defineConfig({
       Info(),
     ],
 
+    build: {
+      lib: {
+        entry: {
+          'index': resolve(join(import.meta.dirname, 'src', 'main', 'index.ts')),
+          'lumi-server-worker': resolve(join(import.meta.dirname, '..', 'lumi-server', 'src', 'cli.ts')),
+        },
+      },
+      externalizeDeps: {
+        exclude: [
+          '@proj-airi/stage-ui',
+          '@proj-airi/lumi-online',
+          '@proj-airi/lumi-server',
+          '@proj-airi/lumi-server-runtime',
+        ],
+        include: [
+          'electron-click-drag-plugin',
+          'uiohook-napi',
+        ],
+      },
+    },
+
     resolve: {
       alias: {
         '@proj-airi/i18n': resolve(join(import.meta.dirname, '..', '..', 'packages', 'i18n', 'src')),
@@ -108,6 +113,7 @@ export default defineConfig({
         input: {
           'main': resolve(join(import.meta.dirname, 'src', 'renderer', 'index.html')),
           'beat-sync': resolve(join(import.meta.dirname, 'src', 'renderer', 'beat-sync.html')),
+          'server-manager': resolve(join(import.meta.dirname, 'src', 'renderer', 'server-manager.html')),
         },
       },
     },
@@ -226,9 +232,14 @@ export default defineConfig({
             exclude: base => [
               ...base,
               '**/settings/account/index.vue',
+              '**/settings/account/account-settings-page.vue',
               '**/settings/connection/index.vue',
               '**/settings/data/index.vue',
+              '**/settings/flux.vue',
               '**/settings/models/index.vue',
+              '**/settings/providers/chat/official-provider.vue',
+              '**/settings/providers/speech/official-provider-speech.vue',
+              '**/settings/providers/speech/official-provider-speech-streaming.vue',
               '**/settings/system/general.vue',
               '**/settings/modules/mcp.vue',
               '**/devtools/index.vue',

@@ -1,5 +1,8 @@
 import type { Tool } from '@xsai/shared-chat'
 
+import type { ChatInteractionContext } from '../types/chat'
+
+import { errorMessageFrom } from '@moeru/std'
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
 import { tool } from '@xsai/tool'
 import { defineStore } from 'pinia'
@@ -52,8 +55,8 @@ export interface LumiToolPlanStep {
   optional?: boolean
 }
 
-export type LumiModelDecision =
-  | {
+export type LumiModelDecision
+  = | {
     mode: 'direct_answer'
     answer: string
   }
@@ -69,6 +72,14 @@ export interface LumiToolExecutionContext {
   source?: string
   allowCritical?: boolean
   maxSteps?: number
+  /** Immutable conversation ID captured for the turn executing this tool. */
+  conversationId?: string
+  /** Conversation privacy boundary used to deny direct-user tools in groups. */
+  conversationType?: ChatInteractionContext['conversationType']
+  /** Human actor that initiated the turn. */
+  actorId?: string
+  /** Complete human audience for the conversation. */
+  participantIds?: string[]
 }
 
 export interface LumiToolExecutionResult {
@@ -119,12 +130,43 @@ export interface LumiToolPlanLogEntry {
 export type LumiToolExecutor = (
   input: Record<string, unknown>,
   context: LumiToolExecutionContext,
-  definition: LumiToolDefinition
+  definition: LumiToolDefinition,
 ) => unknown | Promise<unknown>
 
 const PROVIDER = 'lumi-tool-mesh'
 const MAX_TOOL_STEPS = 5
 const MAX_LOGS = 120
+
+// Group conversations are shared timelines. These tools expose direct-user,
+// operator, or private runtime state and must never rely on prompt compliance.
+const CHAT_PRIVATE_TOOL_IDS = new Set([
+  'search_diary',
+  'read_diary_by_date',
+  'write_diary_entry',
+  'search_private_notes',
+  'write_private_note',
+  'get_runtime_logs',
+  'get_autonomous_decision_log',
+  'get_recent_tool_use_logs',
+])
+
+const GROUP_BLOCKED_TOOL_IDS = new Set([
+  ...CHAT_PRIVATE_TOOL_IDS,
+  'search_short_memory',
+  'read_current_state',
+  'update_current_state_candidate',
+  'read_user_profile',
+  'propose_user_profile_update',
+  'read_emotion_state',
+  'read_lumi_settings',
+  'adjust_lumi_settings',
+  'read_tool_permissions',
+  'set_operator_present_mode',
+])
+
+interface LumiToolMeshExecuteOptionsExtension {
+  lumiToolMeshInteraction?: ChatInteractionContext
+}
 
 function nowIso() {
   return new Date().toISOString()
@@ -142,10 +184,54 @@ function preview(value: unknown, max = 700) {
   return normalized.length > max ? `${normalized.slice(0, max - 3)}...` : normalized
 }
 
+function toolNameFrom(tool: Tool) {
+  const candidate = tool as Tool & { name?: string, function?: { name?: string } }
+  return candidate.function?.name ?? candidate.name ?? ''
+}
+
+/**
+ * Binds the Tool Mesh plan entrypoint to one immutable interaction.
+ *
+ * Use when:
+ * - Final model-facing tools have been merged for a Lumi turn.
+ * - Concurrent conversations must not read mutable foreground identity state.
+ *
+ * Expects:
+ * - `interaction` was captured from the target session before enqueue.
+ *
+ * Returns:
+ * - Tools with only the Tool Mesh plan entrypoint wrapped for this turn.
+ */
+export function bindLumiToolMeshToolsForTurn(
+  tools: Tool[],
+  interaction?: ChatInteractionContext,
+  options: { allowPrivateLumiTools?: boolean } = {},
+): Tool[] {
+  const visibleTools = options.allowPrivateLumiTools
+    ? tools
+    : tools.filter(candidate => !toolNameFrom(candidate).startsWith('lumi_diary_'))
+  if (!interaction)
+    return visibleTools
+
+  return visibleTools.flatMap((candidate) => {
+    if (toolNameFrom(candidate) !== 'lumi_tool_mesh_run_plan')
+      return [candidate]
+    return [{
+      ...candidate,
+      execute: async (input, options) => await candidate.execute(input, {
+        ...options,
+        lumiToolMeshInteraction: interaction,
+      } as typeof options & LumiToolMeshExecuteOptionsExtension),
+    }]
+  })
+}
+
 function extractJson(raw: string) {
-  const fenced = raw.match(/```(?:json|ts|typescript)?\s*([\s\S]*?)```/)
-  if (fenced?.[1])
-    return fenced[1].trim()
+  const fenceStart = raw.indexOf('```')
+  const fencedContentStart = fenceStart >= 0 ? raw.indexOf('\n', fenceStart + 3) : -1
+  const fenceEnd = fencedContentStart >= 0 ? raw.indexOf('```', fencedContentStart + 1) : -1
+  if (fencedContentStart >= 0 && fenceEnd > fencedContentStart)
+    return raw.slice(fencedContentStart + 1, fenceEnd).trim()
   const first = raw.indexOf('{')
   const last = raw.lastIndexOf('}')
   if (first < 0 || last <= first)
@@ -153,9 +239,7 @@ function extractJson(raw: string) {
   return raw.slice(first, last + 1)
 }
 
-function boolFlags(overrides: Partial<Pick<LumiToolDefinition,
-  'canRead' | 'canWrite' | 'canExecuteProcess' | 'canAccessNetwork' | 'canModifySettings' | 'canTouchUserFiles' | 'canTouchLumiCore'
->> = {}) {
+function boolFlags(overrides: Partial<Pick<LumiToolDefinition, 'canRead' | 'canWrite' | 'canExecuteProcess' | 'canAccessNetwork' | 'canModifySettings' | 'canTouchUserFiles' | 'canTouchLumiCore'>> = {}) {
   return {
     canRead: false,
     canWrite: false,
@@ -183,6 +267,7 @@ async function searchLongMemoryForToolMesh(store: ReturnType<typeof useLumiMemor
     userId: 'local',
     personaId: LUMI_AIRI_CARD_ID,
     limit,
+    conversationType: 'direct',
   })
   const rankedMemories = semantic.rankedMemories.slice(0, limit)
   const bestEvidence = rankedMemories[0]?.memory
@@ -196,6 +281,8 @@ async function searchLongMemoryForToolMesh(store: ReturnType<typeof useLumiMemor
           type: bestEvidence.type,
           content: bestEvidence.content,
           tags: bestEvidence.tags,
+          scope: bestEvidence.scope,
+          disclosureReason: bestEvidence.disclosureReason,
         }
       : null,
     memories: rankedMemories.map(item => ({
@@ -203,6 +290,8 @@ async function searchLongMemoryForToolMesh(store: ReturnType<typeof useLumiMemor
       type: item.memory.type,
       content: item.memory.content,
       tags: item.memory.tags,
+      scope: item.memory.scope,
+      disclosureReason: item.memory.disclosureReason,
       confidence: item.memory.confidence,
       importance: item.memory.importance,
       finalScore: item.finalScore,
@@ -231,7 +320,7 @@ const CORE_TOOL_DEFINITIONS: LumiToolDefinition[] = [
     inputSchema: { query: 'string', limit: 'number?' },
     outputSchema: { memories: 'array', status: 'string' },
     riskLevel: 'low',
-    accessScopes: ['chat', 'autonomous_life', 'proactive_vision'],
+    accessScopes: ['autonomous_life', 'proactive_vision'],
     executionMode: 'auto',
     status: 'implemented',
     implementationPath: 'packages/stage-ui/src/stores/lumi-memory.ts',
@@ -247,7 +336,7 @@ const CORE_TOOL_DEFINITIONS: LumiToolDefinition[] = [
     inputSchema: { content: 'string', type: 'string?', confidence: 'number?', importance: 'number?', tags: 'string[]?' },
     outputSchema: { stored: 'boolean', memory: 'object|null' },
     riskLevel: 'medium',
-    accessScopes: ['chat', 'autonomous_life', 'diary'],
+    accessScopes: ['autonomous_life', 'diary'],
     executionMode: 'operator_present_auto',
     status: 'implemented',
     implementationPath: 'packages/stage-ui/src/stores/lumi-memory.ts',
@@ -380,6 +469,7 @@ const PLACEHOLDER_TOOL_DEFINITIONS: LumiToolDefinition[] = [
   'get_runtime_logs',
   'get_autonomous_decision_log',
   'get_recent_tool_use_logs',
+  'list_observation_sources',
   'observe_screen',
   'analyze_chat_images',
   'get_environment_context',
@@ -493,7 +583,7 @@ export function buildToolMeshUsageGuidance(toolSummary: string) {
     '当你缺少信息时，先想：1. 我缺什么？2. 哪个工具能查到？3. 是否应该先查索引，再读详情？4. 是否需要先查记忆，再查项目或文件？5. 工具结果是否足够？6. 是否需要继续调用下一个工具？',
     '你拥有很多内部工具，包括记忆、画像、Self Todo、Idea Pool、Life Tick、LumiWorld、日记、私密笔记、Decision Log、Claude Code、MCP、屏幕观察和设置工具。',
     '当用户问你的项目、想法、Todo、最近做了什么、某个作品是什么、为什么刚才不说话、你研究到哪一步时，不要凭空回答，应该主动组合调用相关工具。',
-    '当用户提到当前可见对话未解释的具体人名、昵称、账号名、地点、项目、事件、共同经历或关系称谓，而你需要知道它是谁/是什么/和 Doggy 的关系时，先用 `search_long_memory` 查长期记忆；不要直接猜成朋友、同事或某个模糊对象。',
+    '当用户提到当前可见对话未解释的具体人名、昵称、账号名、地点、项目、事件、共同经历或关系称谓，而你需要知道它是谁、是什么或与当前用户及相关人物的关系时，先用 `search_long_memory` 查长期记忆；不要直接猜成朋友、同事或某个模糊对象。',
     '普通闲聊不需要调用工具；涉及事实、历史、项目、文件、行动状态时，优先用工具取证。',
     '可用内部 toolId 摘要：',
     toolSummary || '- Tool Mesh 尚未完成运行时注册。',
@@ -573,6 +663,10 @@ export const useLumiToolMeshStore = defineStore('lumi-tool-mesh', () => {
   function canExecute(definition: LumiToolDefinition, context: LumiToolExecutionContext): { ok: boolean, status?: LumiToolRunStatus, reason?: string } {
     if (definition.status === 'missing')
       return { ok: false, status: 'missing', reason: 'Tool is registered as missing.' }
+    if (context.scope === 'chat' && CHAT_PRIVATE_TOOL_IDS.has(definition.id))
+      return { ok: false, status: 'blocked', reason: 'Lumi-private diary, notes, and runtime records are unavailable in user-facing chat.' }
+    if (context.conversationType === 'group' && GROUP_BLOCKED_TOOL_IDS.has(definition.id))
+      return { ok: false, status: 'blocked', reason: 'Direct-user and private runtime tools are unavailable in group conversations.' }
     if (!definition.accessScopes.includes(context.scope))
       return { ok: false, status: 'blocked', reason: `Tool is not available in scope ${context.scope}.` }
     if (definition.executionMode === 'blocked')
@@ -665,7 +759,7 @@ export const useLumiToolMeshStore = defineStore('lumi-tool-mesh', () => {
       return result
     }
     catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = errorMessageFrom(error) ?? 'Unknown tool execution error.'
       const result: LumiToolExecutionResult = { toolId, status: 'failed', error: message }
       appendToolLog({
         scope: context.scope,
@@ -731,9 +825,11 @@ export const useLumiToolMeshStore = defineStore('lumi-tool-mesh', () => {
     return { goal: payload.goal, status, executed, skipped, summary }
   }
 
-  function buildToolSummary(scope?: LumiToolAccessScope) {
+  function buildToolSummary(scope?: LumiToolAccessScope, conversationType?: ChatInteractionContext['conversationType']) {
     const items = definitions.value
       .filter(item => !scope || item.accessScopes.includes(scope))
+      .filter(item => scope !== 'chat' || !CHAT_PRIVATE_TOOL_IDS.has(item.id))
+      .filter(item => conversationType !== 'group' || !GROUP_BLOCKED_TOOL_IDS.has(item.id))
       .sort((left, right) => {
         const statusScore = (value: LumiToolStatus) => value === 'implemented' ? 0 : value === 'partial' ? 1 : 2
         return statusScore(left.status) - statusScore(right.status) || left.id.localeCompare(right.id)
@@ -746,8 +842,11 @@ export const useLumiToolMeshStore = defineStore('lumi-tool-mesh', () => {
     ].filter(Boolean).join(' ')).join('\n')
   }
 
-  function buildPromptGuidance(scope: LumiToolAccessScope = 'chat') {
-    return buildToolMeshUsageGuidance(buildToolSummary(scope))
+  function buildPromptGuidance(scope: LumiToolAccessScope = 'chat', conversationType?: ChatInteractionContext['conversationType']) {
+    const guidance = buildToolMeshUsageGuidance(buildToolSummary(scope, conversationType))
+    return conversationType === 'group'
+      ? `${guidance}\n[Group Tool Boundary]\nDirect-user profiles, short-term state, diaries, private notes, and operator/runtime state are unavailable in group conversations. Use only group-visible conversation context and memories returned by the dedicated memory tool.\n[/Group Tool Boundary]`
+      : guidance
   }
 
   function createToolMeshPlanTool(): Promise<Tool> {
@@ -766,7 +865,8 @@ export const useLumiToolMeshStore = defineStore('lumi-tool-mesh', () => {
           optional: z.boolean().optional(),
         })).min(1).max(MAX_TOOL_STEPS),
       }).strict(),
-      execute: async (payload) => {
+      execute: async (payload, options) => {
+        const interaction = (options as typeof options & LumiToolMeshExecuteOptionsExtension)?.lumiToolMeshInteraction
         const result = await executeToolPlan({
           goal: payload.goal,
           reason: payload.reason,
@@ -777,6 +877,10 @@ export const useLumiToolMeshStore = defineStore('lumi-tool-mesh', () => {
         }, {
           scope: 'chat',
           source: 'llm_tool',
+          conversationId: interaction?.conversationId,
+          conversationType: interaction?.conversationType,
+          actorId: interaction?.actorId,
+          participantIds: interaction?.participantIds,
         })
         return JSON.stringify({
           ...result,
@@ -867,7 +971,7 @@ export const useLumiToolMeshStore = defineStore('lumi-tool-mesh', () => {
           gate: store.previewRelationshipGate(String(input.userText ?? '')),
         }
       },
-      get_recent_tool_use_logs: (input) => ({
+      get_recent_tool_use_logs: input => ({
         logs: toolUseLogs.value.slice(0, Math.max(1, Math.min(50, Number(input.limit) || 20))),
       }),
       read_tool_permissions: () => ({

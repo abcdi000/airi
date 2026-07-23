@@ -10,6 +10,19 @@ const LUMI_EXEC_PATH = '$' + '{LUMI_EXEC_PATH}'
 const LUMI_APP_PATH = '$' + '{LUMI_APP_PATH}'
 const LUMI_USER_DATA_PATH = '$' + '{LUMI_USER_DATA_PATH}'
 
+/** Sensitive applications blocked by a newly created Computer Use preset. */
+export const DEFAULT_COMPUTER_USE_DENY_APPS = [
+  '1password',
+  'bitwarden',
+  'keepass',
+  'keychain',
+  'system settings',
+  'windows security',
+  'activity monitor',
+  'lumi',
+  'airi',
+].join(',')
+
 /** Editable MCP server form state used by the settings page. */
 export interface ServerForm {
   rowId: string
@@ -33,6 +46,7 @@ export interface LoadedServerForms {
   servers: ServerForm[]
   savedIds: Set<string>
   selectedRowId: string
+  upgradedBrowserServers: string[]
 }
 
 /** One-click MCP preset shown by the desktop MCP settings page. */
@@ -62,6 +76,65 @@ function envToObject(entries: { key: string, value: string }[]) {
       out[normalizedKey] = value
   }
   return out
+}
+
+function isBundledLumiBrowserServer(server: ServerForm): boolean {
+  return splitArgsText(server.argsText).some((arg) => {
+    const normalized = arg.replaceAll('\\', '/')
+    return normalized.includes('@proj-airi/playwright-extra-mcp')
+      || normalized.includes('/services/playwright-extra-mcp/')
+  })
+}
+
+function legacyBundledBrowserArgumentIndex(server: ServerForm): number {
+  return splitArgsText(server.argsText).findIndex((arg) => {
+    const normalized = arg.replaceAll('\\', '/')
+    return normalized.includes('/services/playwright-extra-mcp/')
+  })
+}
+
+/**
+ * Adds dual-backend variables to a legacy bundled Lumi browser entry.
+ *
+ * Existing explicit values always win. The legacy Playwright profile path is
+ * promoted to the shared profile variable so browser identity remains intact.
+ */
+export function upgradeBundledBrowserServer(server: ServerForm): boolean {
+  if (!isBundledLumiBrowserServer(server))
+    return false
+
+  let changed = false
+  const args = splitArgsText(server.argsText)
+  const legacyArgumentIndex = legacyBundledBrowserArgumentIndex(server)
+  if (legacyArgumentIndex >= 0) {
+    args[legacyArgumentIndex] = `${LUMI_APP_PATH}/node_modules/@proj-airi/playwright-extra-mcp/dist/bin/run.mjs`
+    server.argsText = args.join('\n')
+    server.command = LUMI_EXEC_PATH
+    server.cwd = LUMI_USER_DATA_PATH
+    changed = true
+  }
+
+  const existing = new Map(server.envEntries.map(entry => [entry.key.trim(), entry.value]))
+  const legacyProfile = existing.get('LUMI_PLAYWRIGHT_USER_DATA_DIR')
+  const defaults = new Map<string, string>([
+    ['ELECTRON_RUN_AS_NODE', '1'],
+    ['LUMI_BROWSER_DEFAULT_BACKEND', 'patchright'],
+    ['LUMI_BROWSER_FALLBACK_BACKEND', 'playwright'],
+    ['LUMI_PATCHRIGHT_CHANNEL', 'chrome'],
+    ['LUMI_PATCHRIGHT_HEADLESS', 'false'],
+    ['LUMI_PATCHRIGHT_PERSISTENT_CONTEXT', 'true'],
+    ['LUMI_PATCHRIGHT_NO_VIEWPORT', 'true'],
+  ])
+  if (legacyProfile)
+    defaults.set('LUMI_BROWSER_PROFILE_PATH', legacyProfile)
+
+  for (const [key, value] of defaults) {
+    if (existing.has(key))
+      continue
+    server.envEntries.push({ key, value })
+    changed = true
+  }
+  return changed
 }
 
 /** Creates a blank MCP server row for new entries. */
@@ -133,6 +206,8 @@ export function createWindowsComputerUseMcpServerForm(): ServerForm {
       { key: 'COMPUTER_USE_MAX_OPERATIONS', value: '16' },
       { key: 'COMPUTER_USE_MAX_OPERATION_UNITS', value: '96' },
       { key: 'COMPUTER_USE_INTERRUPT_SHORTCUT', value: 'End' },
+      { key: 'COMPUTER_USE_DENY_APPS', value: DEFAULT_COMPUTER_USE_DENY_APPS },
+      { key: 'COMPUTER_USE_DENY_WINDOW_TITLES', value: '' },
       // Playwright is already the dedicated browser route for Lumi. Keeping this
       // bridge off prevents a second browser-control surface from competing with it.
       { key: 'COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED', value: 'false' },
@@ -147,7 +222,7 @@ export function createWindowsComputerUseMcpServerForm(): ServerForm {
   }
 }
 
-/** Creates Lumi's bundled Playwright MCP row for browser inspection and actions. */
+/** Creates Lumi's bundled dual-backend browser MCP row for browser inspection and actions. */
 export function createPlaywrightMcpServerForm(): ServerForm {
   return {
     rowId: makeRowId(),
@@ -160,6 +235,15 @@ export function createPlaywrightMcpServerForm(): ServerForm {
     ].join('\n'),
     envEntries: [
       { key: 'ELECTRON_RUN_AS_NODE', value: '1' },
+      { key: 'LUMI_BROWSER_DEFAULT_BACKEND', value: 'patchright' },
+      { key: 'LUMI_BROWSER_FALLBACK_BACKEND', value: 'playwright' },
+      { key: 'LUMI_BROWSER_PROFILE_PATH', value: `${LUMI_USER_DATA_PATH}/playwright-profile` },
+      { key: 'LUMI_PATCHRIGHT_CHANNEL', value: 'chrome' },
+      { key: 'LUMI_PATCHRIGHT_HEADLESS', value: 'false' },
+      { key: 'LUMI_PATCHRIGHT_PERSISTENT_CONTEXT', value: 'true' },
+      { key: 'LUMI_PATCHRIGHT_NO_VIEWPORT', value: 'true' },
+      // Keep the legacy variable during this transition so existing profiles
+      // remain at the same path when users switch between old and new builds.
       { key: 'LUMI_PLAYWRIGHT_USER_DATA_DIR', value: `${LUMI_USER_DATA_PATH}/playwright-profile` },
     ],
     cwd: LUMI_USER_DATA_PATH,
@@ -307,22 +391,28 @@ export function loadServerForms(
   config: ElectronMcpStdioConfigFile,
   options: { selectedIdentifier?: string } = {},
 ): LoadedServerForms {
-  const servers = Object.entries(config.mcpServers ?? {}).map(([identifier, server]) => ({
-    rowId: makeRowId(),
-    identifier,
-    command: server.command ?? '',
-    url: server.url ?? '',
-    headersEntries: Object.entries(server.headers ?? {}).map(([key, value]) => ({ key, value })),
-    argsText: (server.args ?? []).join('\n'),
-    envEntries: Object.entries(server.env ?? {}).map(([key, value]) => ({ key, value })),
-    cwd: server.cwd ?? '',
-    enabled: server.enabled !== false,
-    startupMode: server.startupMode ?? 'on_startup',
-    longRunning: server.longRunning === true,
-    persistent: server.persistent === true,
-    requestTimeoutMs: server.requestTimeoutMs ? String(server.requestTimeoutMs) : '',
-    maxTotalTimeoutMs: server.maxTotalTimeoutMs ? String(server.maxTotalTimeoutMs) : '',
-  }))
+  const upgradedBrowserServers: string[] = []
+  const servers = Object.entries(config.mcpServers ?? {}).map(([identifier, server]) => {
+    const form: ServerForm = {
+      rowId: makeRowId(),
+      identifier,
+      command: server.command ?? '',
+      url: server.url ?? '',
+      headersEntries: Object.entries(server.headers ?? {}).map(([key, value]) => ({ key, value })),
+      argsText: (server.args ?? []).join('\n'),
+      envEntries: Object.entries(server.env ?? {}).map(([key, value]) => ({ key, value })),
+      cwd: server.cwd ?? '',
+      enabled: server.enabled !== false,
+      startupMode: server.startupMode ?? 'on_startup',
+      longRunning: server.longRunning === true,
+      persistent: server.persistent === true,
+      requestTimeoutMs: server.requestTimeoutMs ? String(server.requestTimeoutMs) : '',
+      maxTotalTimeoutMs: server.maxTotalTimeoutMs ? String(server.maxTotalTimeoutMs) : '',
+    }
+    if (upgradeBundledBrowserServer(form))
+      upgradedBrowserServers.push(identifier)
+    return form
+  })
 
   const selectedRowId = options.selectedIdentifier
     ? (servers.find(server => server.identifier === options.selectedIdentifier)?.rowId ?? servers[0]?.rowId ?? '')
@@ -332,6 +422,7 @@ export function loadServerForms(
     servers,
     savedIds: new Set(servers.map(server => server.rowId)),
     selectedRowId,
+    upgradedBrowserServers,
   }
 }
 

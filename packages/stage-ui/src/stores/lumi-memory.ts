@@ -1,10 +1,13 @@
-import type { LumiMemoryCandidate, LumiMemoryFragment, LumiMemoryRetrievalResult, LumiMemorySearchRequest, LumiMemoryStatus } from '../../../lumi-runtime/src'
+import type { LumiMemoryCandidate, LumiMemoryFragment, LumiMemoryRetrievalResult, LumiMemoryScope, LumiMemorySearchRequest, LumiMemorySensitivity, LumiMemorySourceConversationType, LumiMemoryStatus, LumiMemoryVisibility } from '../../../lumi-runtime/src'
 
+import { errorMessageFrom } from '@moeru/std'
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
-import { defineStore } from 'pinia'
+import { defineStore, storeToRefs } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 
 import {
+  canInspectLumiMemory,
+  classifyLumiMemoryCandidate,
   decideLumiMemoryStatus,
   extractLumiMemoryCandidates,
   migratedLumiAllMemories,
@@ -13,6 +16,7 @@ import {
   parseLumiMemoryCuratorOutput,
   retrieveLumiMemories,
 } from '../../../lumi-runtime/src'
+import { LUMI_DOGGY_USER_ID, useLumiIdentityStore } from './lumi-identity'
 
 export type { LumiMemoryFragment, LumiMemoryStatus, LumiMemoryType } from '../../../lumi-runtime/src'
 
@@ -39,17 +43,32 @@ export interface LumiMemoryStatusCount {
   count: number
 }
 
+/** A historical memory that can safely move to a wider host-authorized scope. */
+export interface LumiMemoryPromotionCandidate {
+  memory: LumiMemoryFragment
+  fromScope: LumiMemoryScope
+  toScope: Extract<LumiMemoryScope, 'global' | 'shared'>
+  classificationReason: string
+  disclosureReason: string
+}
+
 export interface LumiRememberCandidateOptions {
   userId?: string
   personaId?: string
   conversationId?: string
   sourceMessageId?: string
   now?: string
+  scope?: LumiMemoryScope
+  visibility?: LumiMemoryVisibility
+  participantUserIds?: string[]
+  subjectUserIds?: string[]
+  sensitivity?: LumiMemorySensitivity
+  conversationType?: LumiMemorySourceConversationType
 }
 
 export interface LumiMemoryEvent {
   id: string
-  kind: 'search' | 'save' | 'update' | 'forget' | 'delete' | 'reject_duplicate' | 'merge'
+  kind: 'search' | 'save' | 'update' | 'promote' | 'forget' | 'delete' | 'reject_duplicate' | 'merge'
   memoryId?: string
   relatedMemoryIds?: string[]
   query?: string
@@ -84,6 +103,8 @@ export interface LumiMemoryPersistenceSnapshot {
   events: LumiMemoryEvent[]
   seedId: string
   dbPath?: string
+  /** Persisted semantic vectors included in complete archives and server migrations. */
+  vectors?: LumiMemoryVectorRecord[]
 }
 
 export interface LumiMemoryVectorRecord {
@@ -113,20 +134,20 @@ export interface LumiMemoryBackendVectorStatus {
 }
 
 export interface LumiMemoryPersistenceBridge {
-  getSnapshot: () => Promise<LumiMemoryPersistenceSnapshot>
-  replaceSnapshot: (snapshot: LumiMemoryPersistenceSnapshot) => Promise<LumiMemoryPersistenceSnapshot>
+  getSnapshot: (payload: { userId: string }) => Promise<LumiMemoryPersistenceSnapshot>
+  replaceSnapshot: (payload: { userId: string, snapshot: LumiMemoryPersistenceSnapshot }) => Promise<LumiMemoryPersistenceSnapshot>
   upsertMemory: (memory: LumiMemoryFragment) => Promise<void>
-  deleteMemory: (payload: { id: string }) => Promise<void>
-  getVectors?: (payload: { model: string }) => Promise<LumiMemoryVectorRecord[]>
+  deleteMemory: (payload: { id: string, userId: string }) => Promise<void>
+  getVectors?: (payload: { model: string, userId: string }) => Promise<LumiMemoryVectorRecord[]>
   upsertVector?: (record: LumiMemoryVectorRecord) => Promise<void>
   deleteVector?: (payload: { memoryId: string, model?: string }) => Promise<void>
-  vectorStatus?: () => Promise<LumiMemoryBackendVectorStatus>
-  backfillVectors?: (payload?: { limit?: number }) => Promise<LumiMemoryBackendVectorStatus>
-  searchVectors?: (payload: { query: string, limit?: number }) => Promise<{ scores: Record<string, number>, status: LumiMemoryBackendVectorStatus }>
+  vectorStatus?: (payload: { userId: string }) => Promise<LumiMemoryBackendVectorStatus>
+  backfillVectors?: (payload: { userId: string, limit?: number }) => Promise<LumiMemoryBackendVectorStatus>
+  searchVectors?: (payload: { userId: string, query: string, limit?: number }) => Promise<{ scores: Record<string, number>, status: LumiMemoryBackendVectorStatus }>
   syncVector?: (memory: LumiMemoryFragment) => Promise<LumiMemoryBackendVectorStatus>
-  saveEvent: (event: LumiMemoryEvent) => Promise<void>
-  setSeedId: (payload: { seedId: string }) => Promise<void>
-  clear: () => Promise<void>
+  saveEvent: (payload: { userId: string, event: LumiMemoryEvent }) => Promise<void>
+  setSeedId: (payload: { userId: string, seedId: string }) => Promise<void>
+  clear: (payload: { userId: string }) => Promise<void>
 }
 
 export interface LumiAlayaMemoryDriver {
@@ -139,6 +160,7 @@ export interface LumiAlayaMemoryDriver {
 }
 
 export const useLumiMemoryStore = defineStore('lumi-memory', () => {
+  const { activeUserId } = storeToRefs(useLumiIdentityStore())
   const fragments = useLocalStorageManualReset<LumiMemoryFragment[]>(LUMI_MEMORY_STORAGE_KEY, [])
   const seedId = useLocalStorageManualReset<string>(LUMI_MEMORY_SEED_STORAGE_KEY, '')
   const events = useLocalStorageManualReset<LumiMemoryEvent[]>(LUMI_MEMORY_EVENTS_STORAGE_KEY, [])
@@ -157,13 +179,72 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
   const semanticDownloadPercent = ref<number | null>(null)
   const semanticIndexedCount = ref(0)
   const semanticSearchPoolSize = ref(0)
+  const detachedSnapshots = new Map<string, LumiMemoryPersistenceSnapshot>()
+  const detachedLoadPromises = new Map<string, Promise<LumiMemoryPersistenceSnapshot>>()
+  const detachedWriteQueues = new Map<string, Promise<void>>()
   let persistenceInitPromise: Promise<void> | null = null
   let semanticPrewarmPromise: Promise<void> | null = null
   let semanticVectorWriteQueue: Promise<void> = Promise.resolve()
   let semanticInteractiveSearches = 0
   let semanticBackendPollTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
+  function currentUserId() {
+    return activeUserId.value || LUMI_DOGGY_USER_ID
+  }
+
+  function resolveRequestViewer(request: LumiMemorySearchRequest) {
+    const requested = request.viewerUserId || request.userId
+    return !requested || requested === 'local' ? currentUserId() : requested
+  }
+
+  /** Loads the memories visible to one actor without switching the desktop identity. */
+  async function ensureUserMemoryLoaded(userId: string) {
+    if (userId === currentUserId() && persistenceReady.value)
+      return currentMemorySnapshot()
+
+    const cached = detachedSnapshots.get(userId)
+    if (cached)
+      return cached
+
+    const pending = detachedLoadPromises.get(userId)
+    if (pending)
+      return pending
+
+    const bridge = persistenceBridge.value
+    if (!bridge)
+      return { fragments: [], events: [], seedId: '' }
+
+    const load = bridge.getSnapshot({ userId })
+      .then((snapshot) => {
+        const normalized = normalizeMemorySnapshot(snapshot)
+        detachedSnapshots.set(userId, normalized)
+        return normalized
+      })
+      .finally(() => detachedLoadPromises.delete(userId))
+    detachedLoadPromises.set(userId, load)
+    return load
+  }
+
+  function currentMemorySnapshot(): LumiMemoryPersistenceSnapshot {
+    return {
+      fragments: fragments.value.map(fragment => normalizeMemoryScores(fragment)),
+      events: [...events.value],
+      seedId: seedId.value,
+      dbPath: persistenceDbPath.value || undefined,
+    }
+  }
+
+  function fragmentsForUser(userId: string) {
+    return userId === currentUserId()
+      ? fragments.value
+      : detachedSnapshots.get(userId)?.fragments ?? []
+  }
+
   const allMemories = computed(() => fragments.value)
+  const inspectableMemories = computed(() => fragments.value.filter(memory => canInspectLumiMemory(memory, currentUserId())))
+  const promotionCandidates = computed(() => fragments.value
+    .map(memory => promotionCandidateFor(memory))
+    .filter((candidate): candidate is LumiMemoryPromotionCandidate => candidate !== null))
   const activeMemories = computed(() => fragments.value.filter(fragment => fragment.status === 'active'))
   const candidateMemories = computed(() => fragments.value.filter(fragment => fragment.status === 'candidate'))
   const recentMemoryEvents = computed(() => events.value.slice(0, 80))
@@ -205,7 +286,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     persistenceInitPromise = withTimeout(hydrateFromPersistence(), LUMI_MEMORY_PERSISTENCE_TIMEOUT_MS, 'Lumi memory persistence')
       .catch((error) => {
         console.warn('[lumi-memory] SQLite persistence unavailable, falling back to localStorage', error)
-        persistenceLastError.value = error instanceof Error ? error.message : String(error)
+        persistenceLastError.value = errorMessageFrom(error) ?? String(error)
         persistenceMode.value = persistenceBridge.value ? 'sqlite' : 'local-storage'
         persistenceDbPath.value = ''
         initialize()
@@ -224,7 +305,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       return
     }
 
-    const snapshot = await bridge.getSnapshot()
+    const snapshot = await bridge.getSnapshot({ userId: currentUserId() })
     persistenceDbPath.value = snapshot.dbPath ?? ''
     persistenceMode.value = 'sqlite'
     persistenceLastError.value = ''
@@ -243,9 +324,12 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       resetToMigratedSnapshot()
 
     const replaced = await bridge.replaceSnapshot({
-      fragments: fragments.value,
-      events: events.value,
-      seedId: seedId.value,
+      userId: currentUserId(),
+      snapshot: {
+        fragments: fragments.value.map(fragment => memoryForCurrentUserSnapshot(fragment)),
+        events: events.value,
+        seedId: seedId.value,
+      },
     })
     persistenceDbPath.value = replaced.dbPath ?? persistenceDbPath.value
     persistenceLastError.value = ''
@@ -254,8 +338,26 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     void prewarmSemanticIndex().catch(() => {})
   }
 
+  /** Reloads the active user's memory without deleting another user's persisted data. */
+  async function reloadForActiveUser() {
+    fragments.value = []
+    events.value = []
+    seedId.value = ''
+    topicCache.value = {}
+    semanticMemoryVectors.clear()
+    semanticIndexReady.value = false
+    semanticIndexLoading.value = false
+    semanticIndexStatus.value = 'idle'
+    semanticIndexedCount.value = 0
+    semanticSearchPoolSize.value = 0
+    semanticPrewarmPromise = null
+    persistenceInitPromise = null
+    persistenceReady.value = false
+    await initializePersistence()
+  }
+
   function resetToMigratedSnapshot() {
-    fragments.value = migratedLumiAllMemories.map(fragment => normalizeMemoryScores(fragment))
+    fragments.value = migratedLumiAllMemories.map(fragment => normalizeMemoryScores({ ...fragment, userId: currentUserId() }))
     seedId.value = MIGRATION_SEED_ID
     persistSeedId()
     persistSnapshot()
@@ -268,8 +370,10 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
 
   function retrieve(request: LumiMemorySearchRequest): LumiMemoryRetrievalResult {
     initialize()
-    const result = retrieveLumiMemories(fragments.value, request, { includeMigratedUsersForLocal: true })
-    recordMemoryEvent({
+    const viewerUserId = resolveRequestViewer(request)
+    const scopedRequest = { ...request, userId: viewerUserId, viewerUserId }
+    const result = retrieveLumiMemories(fragmentsForUser(viewerUserId), scopedRequest)
+    recordMemoryEventForUser(viewerUserId, {
       kind: 'search',
       query: request.query,
       route: result.route.queryIntent,
@@ -281,6 +385,8 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
 
   async function retrieveSemantic(request: LumiMemorySearchRequest): Promise<LumiMemoryRetrievalResult> {
     initialize()
+    const viewerUserId = resolveRequestViewer(request)
+    await ensureUserMemoryLoaded(viewerUserId)
 
     try {
       const bridge = persistenceBridge.value
@@ -292,16 +398,15 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
           ? LUMI_SEMANTIC_SEARCH_TIMEOUT_MS
           : LUMI_SEMANTIC_COLD_SEARCH_TIMEOUT_MS
         const backendResult = await withTimeout(
-          bridge.searchVectors({ query: request.query, limit: searchLimit }),
+          bridge.searchVectors({ userId: viewerUserId, query: request.query, limit: searchLimit }),
           timeoutMs,
           'Lumi backend semantic memory search',
         )
         applyBackendVectorStatus(backendResult.status)
-        const result = retrieveLumiMemories(fragments.value, request, {
-          includeMigratedUsersForLocal: true,
+        const result = retrieveLumiMemories(fragmentsForUser(viewerUserId), { ...request, userId: viewerUserId, viewerUserId }, {
           externalVectorScores: backendResult.scores,
         })
-        recordMemoryEvent({
+        recordMemoryEventForUser(viewerUserId, {
           kind: 'search',
           query: request.query,
           route: result.route.queryIntent,
@@ -321,7 +426,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     }
     catch (error) {
       semanticIndexStatus.value = 'fallback'
-      semanticIndexError.value = error instanceof Error ? error.message : String(error)
+      semanticIndexError.value = errorMessageFrom(error) ?? String(error)
       console.warn('[lumi-memory] semantic vector search unavailable, falling back to lexical retrieval', error)
       return retrieve(request)
     }
@@ -344,7 +449,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
           semanticIndexDevice.value = 'backend'
           semanticIndexProgress.value = '正在请求后端补向量'
           const status = await pollBackendVectorProgress(
-            bridge.backfillVectors({ limit }),
+            bridge.backfillVectors({ userId: currentUserId(), limit }),
             'Lumi backend semantic memory index prewarm',
           )
           applyBackendVectorStatus(status)
@@ -364,7 +469,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       catch (error) {
         semanticIndexReady.value = false
         semanticIndexStatus.value = 'fallback'
-        semanticIndexError.value = error instanceof Error ? error.message : String(error)
+        semanticIndexError.value = errorMessageFrom(error) ?? String(error)
         console.warn('[lumi-memory] failed to prewarm semantic memory index', error)
         throw error
       }
@@ -397,29 +502,12 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       return null
     }
 
-    const now = options.now ?? new Date().toISOString()
-    const decision = decideLumiMemoryStatus(candidate, activeMemories.value)
-    const memory = normalizeMemoryScores({
-      id: createMemoryId(),
-      userId: options.userId ?? 'local',
-      personaId: options.personaId ?? 'lumi',
-      conversationId: options.conversationId,
-      type: candidate.type,
-      content: candidate.content,
-      sourceMessageId: candidate.sourceMessageId ?? options.sourceMessageId,
-      confidence: candidate.confidence,
-      importance: candidate.importance,
-      emotionalIntensity: candidate.emotionalIntensity,
-      relationshipRelevance: candidate.relationshipRelevance,
-      createdAt: now,
-      updatedAt: now,
-      decay: candidate.decay,
-      tags: [...candidate.tags, decision.status === 'candidate' ? 'needs_review' : 'auto_memory'].filter(Boolean),
-      status: decision.status,
-    })
+    const memoryUserId = !options.userId || options.userId === 'local'
+      ? currentUserId()
+      : options.userId
+    const memory = createMemoryFromCandidate(candidate, { ...options, userId: memoryUserId }, activeMemories.value)
 
-    const next = fragments.value.filter(existing => existing.id !== memory.id)
-    fragments.value = [memory, ...next]
+    propagateMemoryToLoadedUsers(memory)
     persistMemory(memory)
     syncSemanticVectorForMemory(memory)
     recordMemoryEvent({
@@ -444,28 +532,144 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     return stored
   }
 
+  /** Stores memories for an explicit actor without changing the desktop identity. */
+  async function rememberCandidatesForUser(
+    userId: string,
+    candidates: LumiMemoryCandidate[],
+    options: LumiRememberCandidateOptions = {},
+  ) {
+    if (userId === currentUserId())
+      return rememberCandidates(candidates, { ...options, userId })
+
+    return enqueueDetachedWrite(userId, async () => {
+      const snapshot = await ensureUserMemoryLoaded(userId)
+      const stored: LumiMemoryFragment[] = []
+      for (const candidate of candidates) {
+        const visibleActive = snapshot.fragments.filter(fragment => fragment.status === 'active')
+        if (isEchoOfExistingMemory(candidate.content, visibleActive)) {
+          recordMemoryEventForUser(userId, {
+            kind: 'reject_duplicate',
+            preview: candidate.content,
+          })
+          continue
+        }
+
+        const memory = createMemoryFromCandidate(candidate, {
+          ...options,
+          userId,
+        }, visibleActive)
+        propagateMemoryToLoadedUsers(memory)
+        const bridge = persistenceBridge.value
+        if (bridge) {
+          await bridge.upsertMemory(memory)
+          if (bridge.syncVector)
+            void bridge.syncVector(memory).then(applyBackendVectorStatus).catch(error => console.warn('[lumi-memory] failed to sync explicit-user vector', error))
+        }
+        recordMemoryEventForUser(userId, {
+          kind: 'save',
+          memoryId: memory.id,
+          afterStatus: memory.status,
+          preview: memory.content,
+        })
+        if (memory.status !== 'rejected')
+          stored.push(memory)
+      }
+      return stored
+    })
+  }
+
+  function createMemoryFromCandidate(
+    candidate: LumiMemoryCandidate,
+    options: LumiRememberCandidateOptions,
+    visibleActive: LumiMemoryFragment[],
+  ) {
+    const now = options.now ?? new Date().toISOString()
+    const memoryUserId = options.userId || currentUserId()
+    const decision = decideLumiMemoryStatus(candidate, visibleActive)
+    const personaId = options.personaId ?? 'lumi'
+    const classification = classifyLumiMemoryCandidate(candidate, {
+      actorId: memoryUserId,
+      personaId,
+      conversationId: options.conversationId,
+      conversationType: options.conversationType,
+      participantUserIds: options.participantUserIds,
+      requestedScope: options.scope ?? candidate.scope,
+      requestedVisibility: options.visibility ?? candidate.visibility,
+      requestedSensitivity: options.sensitivity ?? candidate.sensitivity,
+      requestedSubjectUserIds: options.subjectUserIds ?? candidate.subjectUserIds,
+    })
+    return normalizeMemoryScores({
+      id: createMemoryId(),
+      userId: memoryUserId,
+      personaId,
+      conversationId: options.conversationId,
+      type: candidate.type,
+      content: candidate.content,
+      sourceMessageId: candidate.sourceMessageId ?? options.sourceMessageId,
+      confidence: candidate.confidence,
+      importance: candidate.importance,
+      emotionalIntensity: candidate.emotionalIntensity,
+      relationshipRelevance: candidate.relationshipRelevance,
+      createdAt: now,
+      updatedAt: now,
+      decay: candidate.decay,
+      tags: [...candidate.tags, decision.status === 'candidate' ? 'needs_review' : 'auto_memory'].filter(Boolean),
+      status: decision.status,
+      ...classification,
+    })
+  }
+
+  function propagateMemoryToLoadedUsers(memory: LumiMemoryFragment) {
+    const currentWithoutMemory = fragments.value.filter(existing => existing.id !== memory.id)
+    fragments.value = memoryVisibleToUser(memory, currentUserId())
+      ? [memory, ...currentWithoutMemory]
+      : currentWithoutMemory
+
+    for (const [userId, snapshot] of detachedSnapshots) {
+      const withoutMemory = snapshot.fragments.filter(existing => existing.id !== memory.id)
+      snapshot.fragments = memoryVisibleToUser(memory, userId)
+        ? [memory, ...withoutMemory]
+        : withoutMemory
+    }
+  }
+
+  function enqueueDetachedWrite<Result>(userId: string, operation: () => Promise<Result>) {
+    const previous = detachedWriteQueues.get(userId) ?? Promise.resolve()
+    const run = previous.catch(() => {}).then(operation)
+    const settled = run.then(() => {}, () => {})
+    detachedWriteQueues.set(userId, settled)
+    return run.finally(() => {
+      if (detachedWriteQueues.get(userId) === settled)
+        detachedWriteQueues.delete(userId)
+    })
+  }
+
   function updateMemoryStatus(memoryId: string, status: LumiMemoryStatus) {
     return updateMemory(memoryId, { status })
   }
 
-  function updateMemory(memoryId: string, patch: Partial<LumiMemoryFragment>) {
+  function updateMemory(memoryId: string, patch: Partial<LumiMemoryFragment>, eventKind: LumiMemoryEvent['kind'] = 'update') {
     const index = fragments.value.findIndex(fragment => fragment.id === memoryId)
     if (index < 0)
       return false
 
     const before = fragments.value[index]
+    if (before.userId !== currentUserId())
+      return false
+
     const next = [...fragments.value]
     next[index] = normalizeMemoryScores({
       ...next[index],
       ...patch,
       id: memoryId,
+      userId: before.userId,
       updatedAt: new Date().toISOString(),
     })
-    fragments.value = next
+    propagateMemoryToLoadedUsers(next[index])
     persistMemory(next[index])
     syncSemanticVectorForMemory(next[index])
     recordMemoryEvent({
-      kind: 'update',
+      kind: eventKind,
       memoryId,
       beforeStatus: before.status,
       afterStatus: next[index].status,
@@ -474,9 +678,74 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     return true
   }
 
+  function promotionCandidateFor(memory: LumiMemoryFragment): LumiMemoryPromotionCandidate | null {
+    const classification = classifyPromotion(memory)
+    const toScope = promotionTargetScope(memory)
+    if (!classification || !toScope || classification.scope !== toScope)
+      return null
+    return {
+      memory,
+      fromScope: memory.scope ?? 'relationship',
+      toScope,
+      classificationReason: classification.classificationReason,
+      disclosureReason: classification.disclosureReason,
+    }
+  }
+
+  function classifyPromotion(memory: LumiMemoryFragment) {
+    const requestedScope = promotionTargetScope(memory)
+    if (!requestedScope)
+      return null
+    return classifyLumiMemoryCandidate(memoryCandidateFromFragment(memory, requestedScope), {
+      actorId: currentUserId(),
+      personaId: memory.personaId,
+      conversationId: memory.conversationId,
+      conversationType: memory.sourceConversationType,
+      participantUserIds: memory.participantUserIds,
+      requestedScope,
+      requestedVisibility: requestedScope === 'global' ? 'global' : 'shared',
+      requestedSensitivity: memory.sensitivity,
+      requestedSubjectUserIds: memory.subjectUserIds,
+    })
+  }
+
+  function promotionTargetScope(memory: LumiMemoryFragment): LumiMemoryPromotionCandidate['toScope'] | null {
+    if (memory.userId !== currentUserId() || memory.status !== 'active' || memory.scope !== 'relationship')
+      return null
+    if (memory.sourceConversationType === 'group')
+      return null
+    if ((memory.type === 'persona_fact' || memory.type === 'persona_preference') && memory.tags.includes('lumi_self'))
+      return 'global'
+    if (memory.type === 'shared_event' || memory.type === 'emotional_echo')
+      return 'shared'
+    return null
+  }
+
+  /** Promotes one reviewed historical memory after re-running host policy. */
+  function promoteMemoryScope(memoryId: string) {
+    const memory = fragments.value.find(fragment => fragment.id === memoryId)
+    const classification = memory ? classifyPromotion(memory) : null
+    const requestedScope = memory ? promotionTargetScope(memory) : null
+    if (!memory || !classification || !requestedScope || classification.scope !== requestedScope)
+      return false
+    return updateMemory(memoryId, {
+      ...classification,
+      tags: mergeTags(memory.tags, ['scope_reviewed', `promoted_from:${memory.scope}`]),
+    }, 'promote')
+  }
+
+  /** Promotes only memories that still satisfy policy when the batch executes. */
+  function promoteMemoryScopes(memoryIds: string[]) {
+    return [...new Set(memoryIds)].reduce((count, memoryId) => promoteMemoryScope(memoryId) ? count + 1 : count, 0)
+  }
+
   function remember(fragment: LumiMemoryFragment) {
     initialize()
-    const normalized = normalizeMemoryScores(fragment)
+    const normalized = normalizeMemoryScores({
+      ...fragment,
+      userId: currentUserId(),
+      ownerId: fragment.ownerId || (fragment.scope === 'global' ? fragment.personaId : currentUserId()),
+    })
     const next = fragments.value.filter(existing => existing.id !== normalized.id)
     fragments.value = [normalized, ...next]
     persistMemory(normalized)
@@ -505,7 +774,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
 
   function deleteMemory(memoryId: string) {
     const memory = fragments.value.find(fragment => fragment.id === memoryId)
-    if (!memory)
+    if (!memory || memory.userId !== currentUserId())
       return false
 
     fragments.value = fragments.value.filter(fragment => fragment.id !== memoryId)
@@ -525,7 +794,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     const uniqueIds = [...new Set(memoryIds)].filter(Boolean)
     const memories = uniqueIds
       .map(id => fragments.value.find(fragment => fragment.id === id))
-      .filter((memory): memory is LumiMemoryFragment => Boolean(memory))
+      .filter((memory): memory is LumiMemoryFragment => memory !== undefined && memory.userId === currentUserId())
 
     if (memories.length < 2)
       return null
@@ -537,7 +806,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       ...primary,
       ...patch,
       id: createMemoryId(),
-      userId: patch.userId ?? primary.userId,
+      userId: currentUserId(),
       personaId: patch.personaId ?? primary.personaId,
       type: patch.type ?? primary.type,
       content: (patch.content?.trim() || pickMergedContent(memories)),
@@ -617,6 +886,24 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     persistEvent(event)
   }
 
+  function recordMemoryEventForUser(userId: string, input: Omit<LumiMemoryEvent, 'id' | 'createdAt'>) {
+    if (userId === currentUserId()) {
+      recordMemoryEvent(input)
+      return
+    }
+
+    const event: LumiMemoryEvent = {
+      id: createMemoryEventId(),
+      createdAt: new Date().toISOString(),
+      ...input,
+      preview: input.preview ? previewText(input.preview, 160) : undefined,
+    }
+    const snapshot = detachedSnapshots.get(userId)
+    if (snapshot)
+      snapshot.events = [event, ...snapshot.events].slice(0, 200)
+    void persistenceBridge.value?.saveEvent({ userId, event }).catch(error => console.warn('[lumi-memory] failed to persist explicit-user event', error))
+  }
+
   function resetState() {
     fragments.reset()
     seedId.reset()
@@ -633,19 +920,23 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     semanticSearchPoolSize.value = 0
     persistenceReady.value = false
     persistenceInitPromise = null
-    void persistenceBridge.value?.clear().catch(error => console.warn('[lumi-memory] failed to clear SQLite persistence', error))
+    void persistenceBridge.value?.clear({ userId: currentUserId() }).catch(error => console.warn('[lumi-memory] failed to clear SQLite persistence', error))
   }
 
   async function exportSnapshot(): Promise<LumiMemoryPersistenceSnapshot> {
     await initializePersistence()
     const bridge = persistenceBridge.value
     if (bridge) {
-      const snapshot = await bridge.getSnapshot()
+      const snapshot = await bridge.getSnapshot({ userId: currentUserId() })
+      const vectors = bridge.getVectors
+        ? await bridge.getVectors({ model: LUMI_MEMORY_EMBEDDING_MODEL, userId: currentUserId() })
+        : []
       return {
         fragments: snapshot.fragments.map(fragment => normalizeMemoryScores(fragment)),
         events: snapshot.events,
         seedId: snapshot.seedId,
         dbPath: snapshot.dbPath,
+        vectors,
       }
     }
     return {
@@ -653,6 +944,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       events: events.value,
       seedId: seedId.value,
       dbPath: persistenceDbPath.value || undefined,
+      vectors: [],
     }
   }
 
@@ -664,19 +956,26 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       events: Array.isArray(snapshot.events) ? snapshot.events.slice(0, 200) : [],
       seedId: typeof snapshot.seedId === 'string' ? snapshot.seedId : '',
       dbPath: snapshot.dbPath,
+      vectors: Array.isArray(snapshot.vectors) ? snapshot.vectors : [],
     }
 
     const bridge = persistenceBridge.value
     if (bridge) {
       try {
-        const persisted = await bridge.replaceSnapshot(nextSnapshot)
+        const persisted = await bridge.replaceSnapshot({
+          userId: currentUserId(),
+          snapshot: {
+            ...nextSnapshot,
+            fragments: nextSnapshot.fragments.map(fragment => memoryForCurrentUserSnapshot(fragment)),
+          },
+        })
         fragments.value = persisted.fragments.map(fragment => normalizeMemoryScores(fragment))
         events.value = persisted.events
         seedId.value = persisted.seedId
         persistenceDbPath.value = persisted.dbPath ?? persistenceDbPath.value
       }
       catch (error) {
-        persistenceLastError.value = error instanceof Error ? error.message : String(error)
+        persistenceLastError.value = errorMessageFrom(error) ?? String(error)
         throw error
       }
     }
@@ -703,18 +1002,18 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     const bridge = persistenceBridge.value
     if (!bridge)
       return
-    void bridge.deleteMemory({ id: memoryId }).catch(error => console.warn('[lumi-memory] failed to delete persisted memory', error))
+    void bridge.deleteMemory({ id: memoryId, userId: currentUserId() }).catch(error => console.warn('[lumi-memory] failed to delete persisted memory', error))
   }
 
   async function loadPersistedSemanticVectors() {
     const bridge = persistenceBridge.value
     if (bridge?.vectorStatus) {
       try {
-        applyBackendVectorStatus(await bridge.vectorStatus())
+        applyBackendVectorStatus(await bridge.vectorStatus({ userId: currentUserId() }))
       }
       catch (error) {
         console.warn('[lumi-memory] failed to load backend vector status', error)
-        semanticIndexProgress.value = `加载后端向量状态失败: ${error instanceof Error ? error.message : String(error)}`
+        semanticIndexProgress.value = `加载后端向量状态失败: ${errorMessageFrom(error) ?? String(error)}`
       }
       return
     }
@@ -724,7 +1023,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
 
     try {
       const validIds = new Set(fragments.value.map(memory => memory.id))
-      const records = await bridge.getVectors({ model: LUMI_MEMORY_EMBEDDING_MODEL })
+      const records = await bridge.getVectors({ model: LUMI_MEMORY_EMBEDDING_MODEL, userId: currentUserId() })
       let loaded = 0
       for (const record of records) {
         if (!validIds.has(record.memoryId) || !isFiniteVector(record.vector))
@@ -744,7 +1043,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     }
     catch (error) {
       console.warn('[lumi-memory] failed to load persisted memory vectors', error)
-      semanticIndexProgress.value = `加载已保存向量失败: ${error instanceof Error ? error.message : String(error)}`
+      semanticIndexProgress.value = `加载已保存向量失败: ${errorMessageFrom(error) ?? String(error)}`
     }
   }
 
@@ -808,10 +1107,10 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       globalThis.clearInterval(semanticBackendPollTimer)
 
     semanticBackendPollTimer = globalThis.setInterval(() => {
-      void bridge?.vectorStatus?.()
+      void bridge?.vectorStatus?.({ userId: currentUserId() })
         .then(status => applyBackendVectorStatus(status))
         .catch((error) => {
-          semanticIndexProgress.value = `${label}: 閻樿埖鈧礁鍩涢弬鏉裤亼鐠? ${error instanceof Error ? error.message : String(error)}`
+          semanticIndexProgress.value = `${label}: 閻樿埖鈧礁鍩涢弬鏉裤亼鐠? ${errorMessageFrom(error) ?? String(error)}`
         })
     }, 1000)
 
@@ -829,14 +1128,27 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     const bridge = persistenceBridge.value
     if (!bridge)
       return
-    void bridge.saveEvent(event).catch(error => console.warn('[lumi-memory] failed to persist memory event', error))
+    void bridge.saveEvent({ userId: currentUserId(), event }).catch(error => console.warn('[lumi-memory] failed to persist memory event', error))
   }
 
   function persistSeedId() {
     const bridge = persistenceBridge.value
     if (!bridge)
       return
-    void bridge.setSeedId({ seedId: seedId.value }).catch(error => console.warn('[lumi-memory] failed to persist seed id', error))
+    void bridge.setSeedId({ userId: currentUserId(), seedId: seedId.value }).catch(error => console.warn('[lumi-memory] failed to persist seed id', error))
+  }
+
+  function memoryForCurrentUserSnapshot(fragment: LumiMemoryFragment) {
+    if (fragment.scope === 'global' || fragment.scope === 'shared' || fragment.scope === 'group')
+      return fragment
+    return normalizeMemoryScores({
+      ...fragment,
+      userId: currentUserId(),
+      ownerType: 'user',
+      ownerId: currentUserId(),
+      participantUserIds: [currentUserId()],
+      sourceActorId: currentUserId(),
+    })
   }
 
   function persistSnapshot() {
@@ -844,9 +1156,12 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     if (!bridge)
       return
     void bridge.replaceSnapshot({
-      fragments: fragments.value,
-      events: events.value,
-      seedId: seedId.value,
+      userId: currentUserId(),
+      snapshot: {
+        fragments: fragments.value.map(fragment => memoryForCurrentUserSnapshot(fragment)),
+        events: events.value,
+        seedId: seedId.value,
+      },
     }).catch(error => console.warn('[lumi-memory] failed to persist memory snapshot', error))
   }
 
@@ -864,6 +1179,8 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     seedId,
 
     allMemories,
+    inspectableMemories,
+    promotionCandidates,
     activeMemories,
     candidateMemories,
     recentMemoryEvents,
@@ -885,15 +1202,20 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
 
     initialize,
     initializePersistence,
+    reloadForActiveUser,
     prewarmSemanticIndex,
     setPersistenceBridge,
     resetToMigratedSnapshot,
     search,
     updateMemory,
     updateMemoryStatus,
+    promoteMemoryScope,
+    promoteMemoryScopes,
     remember,
     rememberCandidate,
     rememberCandidates,
+    rememberCandidatesForUser,
+    ensureUserMemoryLoaded,
     extractCandidates,
     parseCuratedCandidates,
     retrieve,
@@ -909,6 +1231,46 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     resetState,
   }
 })
+
+function normalizeMemorySnapshot(snapshot: LumiMemoryPersistenceSnapshot): LumiMemoryPersistenceSnapshot {
+  return {
+    ...snapshot,
+    fragments: Array.isArray(snapshot.fragments)
+      ? snapshot.fragments.map(fragment => normalizeMemoryScores(fragment))
+      : [],
+    events: Array.isArray(snapshot.events) ? snapshot.events.slice(0, 200) : [],
+    seedId: typeof snapshot.seedId === 'string' ? snapshot.seedId : '',
+  }
+}
+
+function memoryCandidateFromFragment(memory: LumiMemoryFragment, scope: LumiMemoryScope): LumiMemoryCandidate {
+  return {
+    type: memory.type,
+    content: memory.content,
+    sourceMessageId: memory.sourceMessageId,
+    confidence: memory.confidence,
+    importance: memory.importance,
+    emotionalIntensity: memory.emotionalIntensity,
+    relationshipRelevance: memory.relationshipRelevance,
+    decay: memory.decay,
+    tags: memory.tags,
+    status: 'candidate',
+    reason: 'Operator review of historical memory scope.',
+    scope,
+    visibility: memory.visibility,
+    participantUserIds: memory.participantUserIds,
+    subjectUserIds: memory.subjectUserIds,
+    sensitivity: memory.sensitivity,
+  }
+}
+
+function memoryVisibleToUser(memory: LumiMemoryFragment, userId: string) {
+  if (memory.scope === 'global' || memory.scope === 'shared')
+    return memory.sensitivity !== 'private'
+  return memory.userId === userId
+    || memory.ownerId === userId
+    || memory.participantUserIds?.includes(userId) === true
+}
 
 function normalizeVector(vector: number[]) {
   const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1
@@ -1025,7 +1387,7 @@ function findDuplicateMemoryGroups(memories: LumiMemoryFragment[]): LumiMemoryDu
     for (let rightIndex = leftIndex + 1; rightIndex < candidates.length; rightIndex += 1) {
       const left = candidates[leftIndex]
       const right = candidates[rightIndex]
-      if (left.userId !== right.userId || left.personaId !== right.personaId)
+      if (left.personaId !== right.personaId || left.scope !== right.scope || left.ownerId !== right.ownerId)
         continue
 
       const { score, sharedTokens } = memoryDuplicateScore(left, right)
@@ -1066,8 +1428,8 @@ function memoryDuplicateScore(left: LumiMemoryFragment, right: LumiMemoryFragmen
   const rightTokens = memoryTokens(right.content)
   const sharedTokens = [...leftTokens].filter(token => rightTokens.has(token))
   const overlap = memoryOverlap(leftTokens, rightTokens)
-  const contained = leftNormalized.length > 32 && rightNormalized.includes(leftNormalized)
-    || rightNormalized.length > 32 && leftNormalized.includes(rightNormalized)
+  const contained = (leftNormalized.length > 32 && rightNormalized.includes(leftNormalized))
+    || (rightNormalized.length > 32 && leftNormalized.includes(rightNormalized))
   const sameTypeBonus = left.type === right.type ? 0.08 : -0.12
   const sameStatusBonus = left.status === right.status ? 0.03 : 0
   const containmentBonus = contained ? 0.18 : 0

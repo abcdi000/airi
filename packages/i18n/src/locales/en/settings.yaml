@@ -11,8 +11,8 @@ animations:
 dialogs:
   onboarding:
     official:
-      title: AIRI Official Provider
-    title: Welcome to AIRI!
+      title: Lumi Official Provider
+    title: Welcome to Lumi!
     description: Let's set up your first AI provider to get started.
     selectProvider: Choose an AI Provider
     configureProvider: Configure {provider}
@@ -36,18 +36,18 @@ dialogs:
     retry: Retry
     credentialsSafeLabel: Keep your API keys and credentials safe!
     credentialsSafeLocal: >-
-      AIRI is running pure locally in your PC, and we will never steal your
+      Lumi is running pure locally in your PC, and we will never steal your
       credentials for AI / LLM providers. But keep in mind that your API keys
       are sensitive information. Make sure to keep them safe and do not share
       them with anyone.
     credentialsSafeOpenSource: >-
-      AIRI is open sourced at {github}, if you want to check how we handle your
+      Lumi is open sourced at {github}, if you want to check how we handle your
       credentials, feel free to inspect our code.
     enableChatCheck: >-
-      Allow airi to send a "ping" message to the first available chat model to
+      Allow Lumi to send a "ping" message to the first available chat model to
       check availability
     start: Let's do it!
-    loginPrompt: Sign in to use the official AIRI provider for the best experience.
+    loginPrompt: Sign in to use the official Lumi provider for the best experience.
     loginAction: Sign in
     setupWithoutSigningIn: Setup with your provider
     flux: Flux
@@ -103,7 +103,7 @@ analytics:
   notice:
     title: Usage analytics
     description: >-
-      AIRI collects anonymous usage analytics to help us understand how the app
+      Lumi collects anonymous usage analytics to help us understand how the app
       is used and improve stability. No personal data is collected.
     privacyPrefix: Read the
     privacyLink: privacy policy
@@ -156,7 +156,7 @@ live2d:
     title: Extract colors from model
     description: >
       Extract prominent colors from current rendering canvas.
-      Click on the color to apply it to AIRI.
+      Click on the color to apply it to Lumi.
       Try to extract multiple times, with the model in different poses,
       if the colors are not desirable.
     button-extract:
@@ -181,7 +181,7 @@ live2d:
       description: Force blinking animation with external timer
     blink-mode:
       title: Blink mode
-      description: Choose the model built-in blink or AIRI's forced blink timer.
+      description: Choose the model built-in blink or Lumi's forced blink timer.
     idle-motion:
       title: Idle animation
       no-motion: No animation available
@@ -245,7 +245,7 @@ pages:
     connections:
       tab: Connected accounts
       title: Connected accounts
-      description: Sign in to AIRI through these providers. Unlink to revoke access, then link again to switch to a different account.
+      description: Sign in to Lumi through these providers. Unlink to revoke access, then link again to switch to a different account.
       status:
         linked: Linked
         notLinked: Not linked
@@ -327,7 +327,7 @@ pages:
     delete: Delete
     delete_card: Delete Card
     delete_confirmation: Are you sure you want to delete this card?
-    description: Use AIRI character card presets
+    description: Use Lumi character card presets
     description_label: Description
     drop_here: Drop to upload
     create_card: Create a new Card
@@ -402,7 +402,7 @@ pages:
       model: Speech / Model
       voice: Speech / Voice
     systemprompt: System Prompt
-    title: AIRI Card
+    title: Lumi Card
     try_different_search: Try a different search term
     upload: Upload
     upload_desc: Click or drag file to upload
@@ -411,7 +411,7 @@ pages:
     title: Memory
   data:
     title: Data
-    description: Manage stored AIRI data, exports, and resets
+    description: Manage stored Lumi data, exports, and resets
     sections:
       chats:
         title: Chat sessions
@@ -440,11 +440,11 @@ pages:
         delete: Delete all data
       desktop-folder:
         title: Open app data folder
-        description: Open AIRI's data folder in your file manager.
+        description: Open Lumi's data folder in your file manager.
         open: Open folder
       desktop:
         title: Reset desktop settings & states
-        description: Clear AIRI desktop settings and runtime state.
+        description: Clear Lumi desktop settings and runtime state.
         center: Move desktop window to center
         reset: Reset desktop data
     confirmations:
@@ -548,7 +548,7 @@ pages:
           name: Nano Banana (Preview)
           description: Use Google AI Studio for image preview and reactions.
       card:
-        description: Configure how AIRI generates images and visual content.
+        description: Configure how Lumi generates images and visual content.
         comfyui_empty: No ComfyUI workflows configured. Go to Settings → Providers → ComfyUI to upload a workflow template.
         exposed_fields: '{count} exposed fields'
         open_on_replicate: Open on Replicate
@@ -625,7 +625,7 @@ pages:
       description: Playing Factorio!
       title: Factorio
       enable: Enable Factorio Integration
-      enable-description: Allow AIRI to interact with Factorio game
+      enable-description: Allow Lumi to interact with Factorio game
       server-address: Server Address
       server-address-description: The IP address or hostname of the Factorio server
       server-address-placeholder: Enter server address (e.g., localhost or 192.168.1.100)
@@ -701,7 +701,7 @@ pages:
       description: Chat & voice chat over Discord
       title: Discord
       enable: Enable Discord Integration
-      enable-description: Allow AIRI to interact through Discord
+      enable-description: Allow Lumi to interact through Discord
       token: Bot Token
       token-description: Your Discord bot token
       token-placeholder: Enter your Discord bot token
@@ -737,7 +737,7 @@ pages:
               Try a different model or provider. We are working on supporting
               all the voice for this model as quickly as possible. If you need
               it urgently, please let us know on GitHub at
-              https://github.com/moeru-ai/airi/issues.
+              https://github.com/moeru-ai/Lumi/issues.
             show_less: Show less
             show_more: Show more
             title: Provider
@@ -756,7 +756,7 @@ pages:
       description: X / Twitter browsing and usage
       title: X / Twitter
       enable: Enable X / Twitter Integration
-      enable-description: Allow AIRI to interact with X / Twitter
+      enable-description: Allow Lumi to interact with X / Twitter
       api-key: API Key
       api-key-description: Your X / Twitter API key
       api-key-placeholder: Enter your X / Twitter API key
@@ -772,7 +772,7 @@ pages:
       configured: X / Twitter is properly configured!
     mcp-server:
       title: MCP servers
-      description: Configure MCP servers and bring their tools into AIRI.
+      description: Configure MCP servers and bring their tools into Lumi.
       config-path: Config file
       runtime-title: Runtime status
       empty: No MCP servers yet — click "Add server" below to create one, or paste a config via "Edit JSON".
@@ -787,11 +787,11 @@ pages:
         description: "Fill in a new server, then click \"Save and restart\" — it'll move into \"Configured\" above."
         pending-badge: Unsaved
         presets-title: Quick presets
-        minecraft-preset-description: Add a persistent Minecraft MCP. Open your Minecraft Java world to LAN first; the preset connects to localhost:25565 and AIRI starts it on first use, then keeps it alive until AIRI exits.
+        minecraft-preset-description: Add a persistent Minecraft MCP. Open your Minecraft Java world to LAN first; the preset connects to localhost:25565 and Lumi starts it on first use, then keeps it alive until Lumi exits.
         computer-use-preset-title: Windows Computer Use preset
         computer-use-preset-description: Add Lumi's local Windows control MCP. Installed builds use the bundled service; Playwright remains the browser route, while native window actions observe first and ask for confirmation before execution.
-        playwright-preset-title: Playwright Browser preset
-        playwright-preset-description: Add Lumi's bundled Playwright MCP for opening pages, clicking, typing, screenshots, tabs, and page-state inspection.
+        playwright-preset-title: Lumi Browser preset
+        playwright-preset-description: Add Lumi's Patchright-first, Playwright-compatible MCP for opening pages, clicking, typing, screenshots, tabs, and page-state inspection.
       status:
         unknown: not loaded
       actions:
@@ -801,7 +801,7 @@ pages:
         add-server: Add server
         add-minecraft-preset: Add Minecraft MCP preset
         add-computer-use-preset: Add Windows Computer Use preset
-        add-playwright-preset: Add Playwright MCP preset
+        add-playwright-preset: Add Lumi Browser MCP preset
         add-env: Add var
         add-header: Add header
         remove: Remove
@@ -838,11 +838,48 @@ pages:
         computer-use-interrupt-shortcut:
           label: Computer Use stop shortcut
           description: 'Global key that immediately stops the active Computer Use session. Default: End.'
+        computer-use-policy:
+          title: Application blacklist
+          description: Computer Use may operate any desktop application except entries blocked here. This replaces the previous application allow list.
+          apps:
+            label: Blocked applications
+            description: One application or process-name fragment per line. Leave empty to allow every application.
+            placeholder: "1password\nwindows security\nlumi"
+          window-titles:
+            label: Blocked window titles
+            description: One sensitive window-title fragment per line. This also protects allowed applications.
+            placeholder: "Payment confirmation\nPrivate document"
+          matching-note: Matching ignores letter case and blocks names containing the configured text. Restart the MCP service after saving.
+        browser-backend:
+          title: Browser backend
+          description: Patchright is preferred for persistent Chrome sessions. Playwright remains available for compatibility and diagnostics.
+          disabled: Disabled
+          default:
+            label: Default backend
+            description: Backend used unless a task or platform explicitly overrides it.
+          fallback:
+            label: Compatibility fallback
+            description: Used only after a classified Patchright startup or driver compatibility failure.
+          channel:
+            label: Patchright browser channel
+            description: Chrome is recommended for Lumi's persistent browser identity.
+          profile:
+            label: Persistent profile
+            description: Shared browser profile containing Lumi's browser identity and login state. Blank keeps the JSON configuration or built-in default.
+          headless:
+            label: Headless Patchright
+            description: Supported but not recommended for Lumi's persistent browser.
+          persistent:
+            label: Persistent context
+            description: Reuse the same browser identity between sessions.
+          no-viewport:
+            label: Use native window size
+            description: Do not emulate a fixed automation viewport.
         startup-mode:
           label: Startup mode
-          description: Choose when AIRI should start and keep this MCP server alive.
+          description: Choose when Lumi should start and keep this MCP server alive.
           options:
-            on-startup: Start with AIRI
+            on-startup: Start with Lumi
             on-first-use: Start when tools are first used
             manual: Manual only
         long-running:
@@ -850,7 +887,7 @@ pages:
           description: Gives games and automation tools longer request timeouts without limiting the MCP process lifetime.
         persistent:
           label: Persistent session
-          description: Marks this MCP as an external stateful world, login, or task session that AIRI should reuse until exit.
+          description: Marks this MCP as an external stateful world, login, or task session that Lumi should reuse until exit.
         request-timeout:
           label: Request timeout (ms)
           description: Leave empty for the default. Long-running services default to 60000.
@@ -896,9 +933,10 @@ pages:
         opened: Opened {path} in your file manager
         json-applied: JSON applied to the form. Click "Save and restart" to persist it to disk.
         restarted: All restarted! {started} started, {failed} failed, {skipped} skipped.
-        minecraft-preset-added: Minecraft MCP preset added. After saving and restarting, AIRI will start it automatically when the tool is first used.
+        minecraft-preset-added: Minecraft MCP preset added. After saving and restarting, Lumi will start it automatically when the tool is first used.
         computer-use-preset-added: Windows Computer Use MCP preset added. After saving and restarting, Lumi will use it through the existing MCP pipeline.
-        playwright-preset-added: Playwright MCP preset added. After saving and restarting, Lumi will use the bundled browser automation service.
+        playwright-preset-added: Lumi Browser MCP preset added. After saving and restarting, Patchright is used by default with Playwright available for compatibility.
+        browser-config-upgraded: 'Upgraded legacy Lumi Browser entry "{name}" to dual-backend settings. Save and restart to write the migration.'
   flux:
     title: Flux
     buy: Charge
@@ -1008,7 +1046,7 @@ pages:
                       <code>OLLAMA_HOST</code> explicitly when start the Ollama
                       application or Ollama CLI server, for detailed
                       information, check <a
-                      href="https://airi.moeru.ai/docs/en/docs/manual/integrations/providers/chat/ollama">Ollama
+                      href="https://Lumi.moeru.ai/docs/en/docs/manual/integrations/providers/chat/ollama">Ollama
                       integration guide</a>.
     common:
       continueAnyway: Continue Anyway
@@ -1070,9 +1108,9 @@ pages:
     helpinfo:
       title: First time here?
       description: >
-        AIRI requires at least one {chat} provider to be configured to think,
+        Lumi requires at least one {chat} provider to be configured to think,
         and behave properly. You could think of it as the brain of the
-        characters living in AIRI system.
+        characters living in Lumi system.
     explained:
       chat: Text generation model providers. e.g. OpenRouter, OpenAI, Ollama.
       Speech: Speech (text-to-speech) model providers. e.g. ElevenLabs, Azure Speech.
@@ -1196,7 +1234,7 @@ pages:
               placeholder: http://localhost:8188
           cors:
             title: CORS Block Detected
-            description: ComfyUI blocks requests from other applications by default. To allow AIRI to connect, you must start ComfyUI with the `--enable-cors-header "*"` flag.
+            description: ComfyUI blocks requests from other applications by default. To allow Lumi to connect, you must start ComfyUI with the `--enable-cors-header "*"` flag.
             command: python main.py --enable-cors-header "*"
           workflows:
             title: Workflow Templates
@@ -1208,7 +1246,7 @@ pages:
             remove: Remove
             config_snippet: Artistry Config Snippet
             copy_json: Copy JSON
-            paste_hint: Paste this into your AIRI Card artistry config to override these nodes.
+            paste_hint: Paste this into your Lumi Card artistry config to override these nodes.
           upload:
             prompt: Drop or select a workflow_api.json file
             invalid_json: Invalid JSON
@@ -1457,13 +1495,13 @@ pages:
         title: Web Speech API
       official:
         title: Official Provider
-        description: Official AI provider by AIRI.
+        description: Official AI provider by Lumi.
         speech-title: Official Speech Provider
-        speech-description: Official text-to-speech provider by AIRI.
+        speech-description: Official text-to-speech provider by Lumi.
         speech-streaming-title: Official Streaming Speech Provider
-        speech-streaming-description: Official low-latency text-to-speech provider by AIRI (bidirectional WebSocket).
+        speech-streaming-description: Official low-latency text-to-speech provider by Lumi (bidirectional WebSocket).
         transcription-title: Official Transcription Provider
-        transcription-description: Official speech-to-text provider by AIRI.
+        transcription-description: Official speech-to-text provider by Lumi.
       transcriptions:
         playground:
           title: Transcription Playground
@@ -1471,6 +1509,9 @@ pages:
         title: AIHubMix
         description: https://aihubmix.com (10% off)
     title: Providers
+  online:
+    title: Online
+    description: Configure Lumi multiplayer, device pLuming, and shared rooms
   connection:
     description: Configure WebSocket server connection
     title: Connection
@@ -1481,7 +1522,7 @@ pages:
     server-hostname:
       label: Expose On Network
       description: >-
-        Choose whether the AIRI gateway only listens on this device or can be
+        Choose whether the Lumi gateway only listens on this device or can be
         reached from your local network.
       advanced-label: Bind Hostname
       advanced-description: >-
@@ -1495,7 +1536,7 @@ pages:
       label: Auth Token
       description: >-
         Security token required by remote clients that connect to this gateway.
-        When left empty, AIRI generates a new token automatically.
+        When left empty, Lumi generates a new token automatically.
       placeholder: Auto-generate
     qr:
       title: Connect from Stage Pocket
@@ -1503,7 +1544,7 @@ pages:
         Scan this QR code from Stage Pocket to try all reachable local network
         addresses and save the first working one.
       refresh: Refresh
-      image-alt: AIRI server channel connection QR code
+      image-alt: Lumi server channel connection QR code
       candidates: Candidate addresses
       token-hint: >-
         The QR code includes the auth token so Stage Pocket can authenticate
@@ -1511,14 +1552,93 @@ pages:
       errors:
         title: QR code unavailable
         unavailable: Failed to prepare the connection QR code.
+    lumi-devices:
+      title: Lumi LAN devices
+      description: Create revocable credentials bound to one Lumi user. Device tokens are shown only once.
+      name: Device name
+      name-placeholder: Moussy's laptop
+      user: Lumi user
+      room: Shared room
+      untitled-room: Untitled Lumi room
+      create-room: Create shared room
+      no-room-title: No shared room available
+      no-room-description: Create a room containing Doggy, Moussy, and Lumi before issuing this device credential.
+      permissions:
+        title: Device tool permissions
+        description: Unknown and newly added tools stay blocked until assigned to an explicit permission.
+        memory: Long-term memory
+        memory-description: Always available through Lumi's per-user, shared, and group memory access rules.
+        memory-short: memory
+        web: Web and Playwright
+        web-description: Allow browser navigation and web interaction through approved MCP tools.
+        web-short: web
+        minecraft: Minecraft
+        minecraft-description: Allow this device to control the shared persistent Minecraft session.
+        minecraft-short: Minecraft
+        computer-use: Windows computer control
+        computer-use-description: Allow native desktop observation and actions. Concurrent control is rejected while busy.
+        computer-use-short: Windows control
+      create: Create device credential
+      pLuming-title: Device pLuming code
+      pLuming-once: Scan or copy this credential now. Lumi stores only its hash and cannot show it again.
+      pLuming-alt: Lumi device pLuming QR code
+      copy: Copy pLuming payload
+      active: active
+      revoked: revoked
+      revoke: Revoke
+      confirm-revoke: Confirm revoke
+      cancel: Cancel
+      empty: No Lumi LAN devices have been created.
+      resources:
+        title: Active remote tool resources
+        description: Browser, Minecraft, and Windows control calls are exclusive. Termination closes the owning MCP session and never exposes tool arguments or chat content.
+        refresh: Refresh active resources
+        empty: No exclusive remote tool resource is active.
+        local: Local host
+        stopping: termination requested
+        terminate: Terminate
+        confirm-terminate: Stop MCP session
+        types:
+          browser: Browser
+          minecraft: Minecraft
+          computer-use: Windows control
+      audit:
+        title: Device activity
+        description: Recent connection and room operations. Message content and credentials are never recorded.
+        clear: Clear activity
+        confirm-clear: Confirm clear
+        empty: No device activity has been recorded.
+        unknown-device: Unknown device
+        no-details: No additional details
+        kinds:
+          device-created: Device created
+          device-revoked: Device revoked
+          authenticated: Connected
+          authentication-failed: Authentication rejected
+          disconnected: Disconnected
+          event-accepted: Room operation accepted
+          event-rejected: Room operation rejected
+          tool-resource-started: Remote tool started
+          tool-resource-finished: Remote tool finished
+          tool-resource-terminated: Remote tool terminated
+      errors:
+        title: Device operation failed
+        load: Failed to load Lumi LAN devices.
+        create: Failed to create the device credential.
+        create-room: Failed to create the shared Lumi room.
+        revoke: Failed to revoke the device credential.
+        audit-load: Failed to load device activity.
+        audit-clear: Failed to clear device activity.
+        resources-load: Failed to load active remote tool resources.
+        resource-terminate: Failed to terminate the active MCP resource.
     qr-scan:
       title: Quick Connect
-      description: Scan the QR code from Tamagotchi to quick connect
-      instructions: Point the camera at the AIRI connection QR code.
+      description: Scan a Lumi device pLuming code to connect to its assigned shared room.
+      instructions: Point the camera at the Lumi device pLuming QR code.
       action: Scan
       success:
-        title: Connected address saved
-        description: 'URL been used: {url}'
+        title: Lumi room paired
+        description: 'Connected to {room} through {url}'
       errors:
         title: QR scan failed
         failed: Failed to scan or connect with the QR code.
@@ -1599,8 +1719,8 @@ pages:
           presets:
             default:
               colors:
-                color-1: AIRI Green
-              description: The default greenish theme color, brought by AIRI to you!
+                color-1: Lumi Green
+              description: The default greenish theme color, brought by Lumi to you!
               title: Default Color
             morandi:
               colors:
@@ -1706,7 +1826,7 @@ sections:
 theme:
   title: Theme
   description: |
-    Switch the base theme of AIRI, Light mode or Dark mode.
+    Switch the base theme of Lumi, Light mode or Dark mode.
 title: Settings
 voices: Voice
 vrm:

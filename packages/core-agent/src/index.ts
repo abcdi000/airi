@@ -46,8 +46,10 @@ export type {
 } from './runtime/response-categoriser'
 export { mergeLoadedSessionMessages } from './session/merge-loaded-session-messages'
 export type {
+  ChatActorMetadata,
   ChatAssistantMessage,
   ChatHistoryItem,
+  ChatInteractionContext,
   ChatMessage,
   ChatSlices,
   ChatSlicesText,

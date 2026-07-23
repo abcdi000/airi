@@ -521,6 +521,88 @@ export interface InputMessageOverrides {
   messagePrefix?: string
 }
 
+/** External actor claim resolved to an internal user only by the host. */
+export interface InputActorIdentity {
+  /** Channel family, for example `lumi-lan`, `qq`, or `discord`. */
+  provider: string
+  /** Stable installation, bot, or server instance within the provider. */
+  providerInstanceId: string
+  /** Provider-owned account identifier. Never a Lumi internal user ID. */
+  externalUserId: string
+}
+
+/** Server-authenticated connection identity that clients cannot self-assert in event metadata. */
+export interface ConnectionAuthIdentity {
+  /** Stable server-owned credential subject, such as a device identifier. */
+  subject: string
+  /** Capabilities granted to this connection. */
+  scopes: string[]
+  /** Bounded string claims used to bind a credential to a channel identity. */
+  claims?: Record<string, string>
+}
+
+/** Client-owned identifiers used by Lumi's host-authoritative room delivery protocol. */
+export interface LumiRoomInputDelivery {
+  /** Stable message identifier reused when a client retries the same send. */
+  messageId: string
+  /** Stable operation identifier used by the host for exactly-once ingestion. */
+  idempotencyKey: string
+}
+
+/** One persisted room event returned during cursor-based replay. */
+export interface LumiRoomEvent {
+  conversationId: string
+  sequence: number
+  messageId: string
+  role: 'user' | 'assistant'
+  actorId: string
+  actorDisplayName?: string
+  content: string
+  createdAt: number
+}
+
+export interface LumiRoomAckEvent {
+  conversationId: string
+  messageId: string
+  idempotencyKey: string
+  status: 'transcribing' | 'accepted' | 'duplicate' | 'completed' | 'failed' | 'rejected' | 'cancelled'
+  /** Host sequence assigned to the accepted user input. */
+  inputSequence?: number
+  /** Host sequence assigned to Lumi's completed reply. */
+  outputSequence?: number
+  latestSequence: number
+  reason?: string
+  acknowledgedAt: number
+}
+
+export interface LumiRoomSyncRequestEvent {
+  conversationId: string
+  afterSequence: number
+  actor: InputActorIdentity
+}
+
+/** Cancels a host-owned voice transcription before it becomes a chat turn. */
+export interface LumiRoomVoiceCancelEvent extends LumiRoomInputDelivery {
+  conversationId: string
+  actor: InputActorIdentity
+}
+
+export interface LumiRoomSyncEvent {
+  conversationId: string
+  afterSequence: number
+  latestSequence: number
+  retainedFromSequence: number
+  truncated: boolean
+  events: LumiRoomEvent[]
+}
+
+/** Host-authoritative notice that a device actor no longer belongs to a room. */
+export interface LumiRoomAccessRevokedEvent {
+  conversationId: string
+  reason: string
+  revokedAt: number
+}
+
 export type InputContextUpdate
   = Omit<ContextUpdate<Record<string, unknown>, string | CommonContentPart[]>, 'id' | 'contextId'>
     & Partial<Pick<ContextUpdate<Record<string, unknown>, string | CommonContentPart[]>, 'id' | 'contextId'>>
@@ -530,6 +612,10 @@ export interface WebSocketEventInputTextBase {
   textRaw?: string
   overrides?: InputMessageOverrides
   contextUpdates?: InputContextUpdate[]
+  /** Optional remote actor claim. The host must reject unknown mappings. */
+  actor?: InputActorIdentity
+  /** Optional reliable room delivery metadata. Requires an external actor claim. */
+  room?: LumiRoomInputDelivery
 }
 
 export type WebSocketEventInputText = WebSocketEventInputTextBase & Partial<WithInputSource<'stage-web' | 'stage-tamagotchi' | 'discord'>>
@@ -539,14 +625,28 @@ export interface WebSocketEventInputTextVoiceBase {
   textRaw?: string
   overrides?: InputMessageOverrides
   contextUpdates?: InputContextUpdate[]
+  /** Optional remote actor claim. The host must reject unknown mappings. */
+  actor?: InputActorIdentity
+  /** Optional reliable room delivery metadata. Requires an external actor claim. */
+  room?: LumiRoomInputDelivery
 }
 
 export type WebSocketEventInputTextVoice = WebSocketEventInputTextVoiceBase & Partial<WithInputSource<'stage-web' | 'stage-tamagotchi' | 'discord'>>
 
 export interface WebSocketEventInputVoiceBase {
   audio: ArrayBuffer
+  /** Exact media type emitted by the recorder. Lumi room clients currently use WAV. */
+  mimeType: string
+  /** Original binary size, repeated for early validation after transport decoding. */
+  byteLength: number
+  /** Client-observed recording duration used for host-side policy limits. */
+  durationMs: number
   overrides?: InputMessageOverrides
   contextUpdates?: InputContextUpdate[]
+  /** Optional remote actor claim. The host must reject unknown mappings. */
+  actor?: InputActorIdentity
+  /** Optional reliable room delivery metadata. Requires an external actor claim. */
+  room?: LumiRoomInputDelivery
 }
 
 export type WebSocketEventInputVoice = WebSocketEventInputVoiceBase & Partial<WithInputSource<'stage-web' | 'stage-tamagotchi' | 'discord'>>
@@ -560,6 +660,8 @@ export type InputEventEnvelope
 
 export interface EventBaseMetadata {
   source?: ModuleIdentity
+  /** Authentication identity overwritten by the server before event routing. */
+  auth?: ConnectionAuthIdentity
   event?: {
     id?: string
     parentId?: string
@@ -620,6 +722,10 @@ export interface RegistryModulesSyncEvent {
 
 interface ErrorEvent {
   message: string
+  /** Stable machine-readable reason for protocol-aware clients. */
+  code?: string
+  /** Delay suggested by the host before retrying the rejected operation. */
+  retryAfterMs?: number
 }
 
 interface ErrorPermissionEvent {
@@ -1132,6 +1238,28 @@ export const inputVoice = defineProtocolEventa<WebSocketEventInputVoice>('input:
   },
 })
 
+export const lumiRoomSyncRequest = defineProtocolEventa<LumiRoomSyncRequestEvent>('lumi:room:sync:request', {
+  metadata: {
+    delivery: {
+      mode: 'consumer-group',
+      group: 'chat-ingestion',
+      selection: 'first',
+    },
+  },
+})
+export const lumiRoomVoiceCancel = defineProtocolEventa<LumiRoomVoiceCancelEvent>('lumi:room:voice:cancel', {
+  metadata: {
+    delivery: {
+      mode: 'consumer-group',
+      group: 'chat-ingestion',
+      selection: 'first',
+    },
+  },
+})
+export const lumiRoomAck = defineProtocolEventa<LumiRoomAckEvent>('lumi:room:ack')
+export const lumiRoomSync = defineProtocolEventa<LumiRoomSyncEvent>('lumi:room:sync')
+export const lumiRoomAccessRevoked = defineProtocolEventa<LumiRoomAccessRevokedEvent>('lumi:room:access-revoked')
+
 export const outputGenAiChatToolCall = defineProtocolEventa<OutputGenAiChatToolCallEvent>('output:gen-ai:chat:tool-call')
 export const outputGenAiChatMessage = defineProtocolEventa<OutputGenAiChatMessageEvent>('output:gen-ai:chat:message')
 export const outputGenAiChatComplete = defineProtocolEventa<OutputGenAiChatCompleteEvent>('output:gen-ai:chat:complete')
@@ -1147,6 +1275,8 @@ export const protocolEventMetadataByType = {
   [inputText.id]: inputText.metadata,
   [inputTextVoice.id]: inputTextVoice.metadata,
   [inputVoice.id]: inputVoice.metadata,
+  [lumiRoomSyncRequest.id]: lumiRoomSyncRequest.metadata,
+  [lumiRoomVoiceCancel.id]: lumiRoomVoiceCancel.metadata,
 } satisfies Partial<Record<keyof ProtocolEvents, ProtocolEventaMetadata | undefined>>
 
 export function getProtocolEventMetadata(eventType: keyof ProtocolEvents | string) {
@@ -1301,6 +1431,12 @@ export interface ProtocolEvents<C = undefined> {
   'input:text': WebSocketEventInputText
   'input:text:voice': WebSocketEventInputTextVoice
   'input:voice': WebSocketEventInputVoice
+
+  'lumi:room:sync:request': LumiRoomSyncRequestEvent
+  'lumi:room:voice:cancel': LumiRoomVoiceCancelEvent
+  'lumi:room:ack': LumiRoomAckEvent
+  'lumi:room:sync': LumiRoomSyncEvent
+  'lumi:room:access-revoked': LumiRoomAccessRevokedEvent
 
   'output:gen-ai:chat:tool-call': OutputGenAiChatToolCallEvent
   'output:gen-ai:chat:message': OutputGenAiChatMessageEvent

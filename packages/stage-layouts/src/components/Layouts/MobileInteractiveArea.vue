@@ -13,6 +13,7 @@ import { useChatMaintenanceStore } from '@proj-airi/stage-ui/stores/chat/mainten
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
 import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store'
 import { useLumiAgentStore } from '@proj-airi/stage-ui/stores/lumi-agent'
+import { useLumiOnlineStore } from '@proj-airi/stage-ui/stores/lumi-online'
 import { useL2dViewControl } from '@proj-airi/stage-ui/stores/live2d'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
@@ -37,6 +38,7 @@ const chatOrchestrator = useChatOrchestratorStore()
 const chatSession = useChatSessionStore()
 const chatStream = useChatStreamStore()
 const lumiAgentStore = useLumiAgentStore()
+const lumiOnlineStore = useLumiOnlineStore()
 const ttsDebugStore = useTtsDebugStore()
 const { cleanupMessages } = useChatMaintenanceStore()
 const { messages, visibleMessages, visibleMessageStartIndex } = storeToRefs(chatSession)
@@ -98,6 +100,10 @@ async function handleSend() {
   messageInput.value = ''
 
   try {
+    if (lumiOnlineStore.runtimeMode === 'online-client') {
+      await lumiOnlineStore.sendText(chatSession.activeSessionId, textToSend)
+      return
+    }
     const providerConfig = providersStore.getProviderConfig(activeProvider.value)
 
     await ingest(textToSend, {
@@ -205,6 +211,7 @@ onMounted(() => {
           </button>
           <ChatSessionsDrawer v-model="sessionsDrawerOpen" />
           <HearingConfigDialog
+            v-if="lumiOnlineStore.runtimeMode !== 'online-client'"
             v-model:enabled="enabled"
             :transcription="isListening"
             :toggle-transcription="toggleTranscription"

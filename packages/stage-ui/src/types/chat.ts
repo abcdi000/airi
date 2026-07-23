@@ -1,6 +1,8 @@
 export type {
+  ChatActorMetadata,
   ChatAssistantMessage,
   ChatHistoryItem,
+  ChatInteractionContext,
   ChatMessage,
   ChatSlices,
   ChatSlicesText,

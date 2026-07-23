@@ -1,17 +1,20 @@
-import { createHash } from 'node:crypto'
-import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { promisify } from 'node:util'
+
+import { Buffer } from 'node:buffer'
+import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 
 const pluginDir = path.dirname(fileURLToPath(import.meta.url))
 const configPath = path.join(pluginDir, 'config.json')
 const DEFAULT_DIARY_DIR = path.join(os.homedir(), 'Documents', 'LumiDiary')
 const VECTOR_DIMS = 256
 const execFileAsync = promisify(execFile)
+let runtimeConfig = {}
 
 function todayDate() {
   return new Date().toISOString().slice(0, 10)
@@ -80,6 +83,8 @@ function keywordScore(query, text) {
 }
 
 async function loadConfig() {
+  if (typeof runtimeConfig.diaryDir === 'string' && runtimeConfig.diaryDir.trim())
+    return { diaryDir: path.resolve(runtimeConfig.diaryDir.trim()) }
   try {
     const raw = await readFile(configPath, 'utf8')
     const config = JSON.parse(raw)
@@ -288,14 +293,34 @@ async function listRecentDiary(input) {
   }
 }
 
-const strictObject = properties => ({
-  type: 'object',
-  properties,
-  required: Object.keys(properties),
-  additionalProperties: false,
-})
+async function exportAllDiary() {
+  const files = await listDiaryFiles()
+  const entries = await Promise.all(files.map(async (file) => {
+    const entry = await readDiaryFile(file)
+    return {
+      id: `legacy-diary:${entry.date}`,
+      entryDate: entry.date,
+      title: `${entry.date} 的日记`,
+      content: entry.content,
+      sourceSummary: `Imported from ${entry.path}`,
+      createdAt: entry.mtimeMs,
+      updatedAt: entry.mtimeMs,
+    }
+  }))
+  return { status: 'ok', diaryDir: (await loadConfig()).diaryDir, entries }
+}
 
-export async function init() {
+function strictObject(properties) {
+  return {
+    type: 'object',
+    properties,
+    required: Object.keys(properties),
+    additionalProperties: false,
+  }
+}
+
+export async function init(context = {}) {
+  runtimeConfig = context && typeof context.config === 'object' ? context.config : {}
   await ensureDiaryDir()
   console.info('[lumi-diary] initialized')
 }
@@ -389,6 +414,17 @@ export async function setupModules({ apis }) {
       }),
     },
     execute: listRecentDiary,
+  })
+
+  await apis.tools.register({
+    tool: {
+      id: 'lumi_diary_export_all',
+      title: 'Export All Lumi Diary Entries',
+      description: 'Read every Markdown diary file for a complete Lumi Server migration package.',
+      activation: { keywords: [], patterns: [] },
+      parameters: strictObject({}),
+    },
+    execute: exportAllDiary,
   })
 
   await apis.tools.registerToolsetPrompt?.({

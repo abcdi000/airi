@@ -6,6 +6,7 @@ import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 
 import { extractMessageText } from '../libs/chat-sync'
+import { LUMI_DOGGY_USER_ID } from './lumi-identity'
 
 export interface LumiCurrentState {
   recentTopics: string[]
@@ -32,8 +33,8 @@ export interface LumiCurrentStateExportSnapshot extends LumiCurrentStatePersiste
 }
 
 export interface LumiCurrentStatePersistenceBridge {
-  loadCurrentStateFromDatabase: () => Promise<LumiCurrentStatePersistenceSnapshot>
-  saveCurrentState: (snapshot: LumiCurrentStatePersistenceSnapshot) => Promise<LumiCurrentStatePersistenceSnapshot>
+  loadCurrentStateFromDatabase: (userId?: string) => Promise<LumiCurrentStatePersistenceSnapshot>
+  saveCurrentState: (snapshot: LumiCurrentStatePersistenceSnapshot, userId?: string) => Promise<LumiCurrentStatePersistenceSnapshot>
   clearCurrentState: () => Promise<void>
 }
 
@@ -76,10 +77,22 @@ function normalizeState(value: Partial<LumiCurrentState> | null | undefined): Lu
   }
 }
 
+function normalizePersistenceSnapshot(snapshot: LumiCurrentStatePersistenceSnapshot): LumiCurrentStatePersistenceSnapshot {
+  return {
+    ...snapshot,
+    state: snapshot.state ? normalizeState(snapshot.state) : null,
+  }
+}
+
 function parseJsonObject(text: string): Record<string, any> {
   const trimmed = text.trim()
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)
-  const raw = fenced?.[1]?.trim() ?? trimmed
+  let raw = trimmed
+  if (trimmed.startsWith('```')) {
+    const contentStart = trimmed.indexOf('\n')
+    const contentEnd = trimmed.lastIndexOf('```')
+    if (contentStart >= 0 && contentEnd > contentStart)
+      raw = trimmed.slice(contentStart + 1, contentEnd).trim()
+  }
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
   if (start < 0 || end < start)
@@ -104,12 +117,14 @@ export function buildLumiCurrentStateUpdateUserPayload(params: {
   previousState: LumiCurrentState
   profileContext: string
   recentMessages: ChatHistoryItem[]
+  userDisplayName?: string
 }) {
+  const userDisplayName = params.userDisplayName?.trim() || 'Doggy'
   const recent = params.recentMessages
     .filter(message => message.role === 'user' || message.role === 'assistant')
     .slice(-16)
     .map((message) => {
-      const who = message.role === 'user' ? 'Doggy' : 'Lumi'
+      const who = message.role === 'user' ? userDisplayName : 'Lumi'
       return `${who}: ${extractMessageText(message).slice(0, 800)}`
     })
     .join('\n')
@@ -146,6 +161,10 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
   const persistenceReady = ref(false)
   const persistenceDbPath = ref('')
   const persistenceLastError = ref('')
+  const activeStateUserId = ref(LUMI_DOGGY_USER_ID)
+  const detachedStates = new Map<string, LumiCurrentStatePersistenceSnapshot>()
+  const detachedLoadPromises = new Map<string, Promise<LumiCurrentStatePersistenceSnapshot>>()
+  const detachedWriteQueues = new Map<string, Promise<void>>()
   let initializePromise: Promise<void> | null = null
 
   const hasState = computed(() => !!currentState.value.updatedAt)
@@ -153,6 +172,44 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
 
   function setPersistenceBridge(bridge: LumiCurrentStatePersistenceBridge | null) {
     persistenceBridge.value = bridge
+  }
+
+  function setActiveStateUser(userId: string) {
+    activeStateUserId.value = userId
+  }
+
+  /** Loads one user's short-term state without changing the settings UI identity. */
+  async function ensureUserStateLoaded(userId: string) {
+    if (userId === activeStateUserId.value && persistenceReady.value)
+      return { state: currentState.value, dbPath: persistenceDbPath.value || undefined }
+
+    const cached = detachedStates.get(userId)
+    if (cached)
+      return cached
+
+    const pending = detachedLoadPromises.get(userId)
+    if (pending)
+      return pending
+
+    const bridge = persistenceBridge.value
+    if (!bridge)
+      return { state: null }
+
+    const load = bridge.loadCurrentStateFromDatabase(userId)
+      .then((snapshot) => {
+        const normalized = normalizePersistenceSnapshot(snapshot)
+        detachedStates.set(userId, normalized)
+        return normalized
+      })
+      .finally(() => detachedLoadPromises.delete(userId))
+    detachedLoadPromises.set(userId, load)
+    return load
+  }
+
+  function getStateForUser(userId: string) {
+    if (userId === activeStateUserId.value)
+      return currentState.value
+    return normalizeState(detachedStates.get(userId)?.state ?? DEFAULT_STATE)
   }
 
   async function initializePersistence() {
@@ -180,7 +237,27 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     return initializePromise
   }
 
-  async function saveCurrentState(next: Partial<LumiCurrentState>) {
+  async function reloadForActiveUser() {
+    initializePromise = null
+    persistenceReady.value = false
+    currentState.value = normalizeState(DEFAULT_STATE)
+    await initializePersistence()
+  }
+
+  async function saveCurrentState(next: Partial<LumiCurrentState>, userId = activeStateUserId.value) {
+    if (userId !== activeStateUserId.value) {
+      return enqueueDetachedWrite(userId, async () => {
+        const previous = (await ensureUserStateLoaded(userId)).state
+        const state = normalizeState({ ...previous, ...next })
+        const bridge = persistenceBridge.value
+        const snapshot = bridge
+          ? normalizePersistenceSnapshot(await bridge.saveCurrentState({ state }, userId))
+          : { state }
+        detachedStates.set(userId, snapshot)
+        return snapshot.state ? normalizeState(snapshot.state) : state
+      })
+    }
+
     currentState.value = normalizeState({ ...currentState.value, ...next })
     const bridge = persistenceBridge.value
     if (!bridge)
@@ -197,6 +274,17 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     }
   }
 
+  function enqueueDetachedWrite<Result>(userId: string, operation: () => Promise<Result>) {
+    const previous = detachedWriteQueues.get(userId) ?? Promise.resolve()
+    const run = previous.catch(() => {}).then(operation)
+    const settled = run.then(() => {}, () => {})
+    detachedWriteQueues.set(userId, settled)
+    return run.finally(() => {
+      if (detachedWriteQueues.get(userId) === settled)
+        detachedWriteQueues.delete(userId)
+    })
+  }
+
   async function clearCurrentState() {
     currentState.value = normalizeState(DEFAULT_STATE)
     const bridge = persistenceBridge.value
@@ -210,8 +298,8 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     }
   }
 
-  function buildPromptContext() {
-    const state = currentState.value
+  function buildPromptContext(userId = activeStateUserId.value) {
+    const state = getStateForUser(userId)
     const sections: string[] = []
     if (state.recentTopics.length)
       sections.push(`最近话题：${state.recentTopics.join('；')}`)
@@ -232,8 +320,8 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     return sections.join('\n')
   }
 
-  function buildProfileCandidatesFromState(): LumiUserProfileCandidate[] {
-    const state = currentState.value
+  function buildProfileCandidatesFromState(userId = activeStateUserId.value): LumiUserProfileCandidate[] {
+    const state = getStateForUser(userId)
     const candidates: LumiUserProfileCandidate[] = []
     const evidence = `current_state ${state.updatedAt || new Date().toISOString()}`
     if (state.recentTopics[0]) {
@@ -308,7 +396,11 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     hasState,
 
     setPersistenceBridge,
+    setActiveStateUser,
+    ensureUserStateLoaded,
+    getStateForUser,
     initializePersistence,
+    reloadForActiveUser,
     saveCurrentState,
     clearCurrentState,
     buildPromptContext,

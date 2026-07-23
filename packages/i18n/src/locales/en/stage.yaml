@@ -14,6 +14,21 @@ chat:
     cloud-badge: Synced to cloud
     new-chat-fallback: New chat
     delete: Delete conversation
+    new-group: New group
+    group-create-title: Create a Lumi group
+    group-create-description: Choose who shares this conversation and its group memories.
+    group-edit-title: Edit Lumi group
+    group-edit-description: Add or remove participants. Removed devices lose access to this conversation.
+    group-name: Group name
+    participants: Participants
+    current-user: Current user
+    cancel: Cancel
+    create-group: Create group
+    save-group: Save group
+    group-create-failed: Could not create the group conversation
+    group-edit-failed: Could not update the group conversation
+    edit-group: Edit group participants
+    group-badge: Group
 message: Say something...
 send-mode:
   title: Send key
@@ -97,3 +112,27 @@ websocket-status:
   connected: Connected
   disconnected: No connection
   open-settings: Open connection settings
+lumi-room:
+  title: Lumi shared room
+  back: Back
+  connected: Connected to host
+  reconnecting: Reconnecting
+  waiting: '{count} pending'
+  sync: Sync room
+  empty: This shared room has no messages yet.
+  participant: Participant
+  composer-placeholder: Message Lumi and everyone in this room
+  send: Send
+  start-voice: Record voice
+  send-voice: Stop and send voice
+  cancel-voice: Cancel voice
+  uploading-voice: Uploading voice message
+  transcribing-voice: Lumi is transcribing this voice message
+  voice-message: Voice message
+  voice-failed: Voice recording could not be sent.
+  retry: Retry
+  not-paired-title: Room pairing is unavailable
+  not-paired-description: Scan a device pairing code from the Lumi desktop host before opening this room.
+  open-pairing: Open connection settings
+  history-truncated: Earlier history is unavailable
+  history-truncated-description: The host retained room events starting at sequence {sequence}.

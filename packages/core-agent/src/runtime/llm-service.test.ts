@@ -110,6 +110,43 @@ describe('streamFrom step budget', () => {
   })
 })
 
+describe('streamFrom final tool policy', () => {
+  /**
+   * @example
+   * await streamFrom({ options: { toolTransform: () => [] }, builtinToolsResolver })
+   */
+  it('filters builtin tools after merging so an empty caller tool list cannot bypass a per-turn denial', async () => {
+    // ROOT CAUSE:
+    //
+    // AIRI merges builtin tools independently from options.tools. Passing []
+    // therefore did not disable the builtin MCP proxy for chat-only devices.
+    // The final transform now sees and filters the complete merged tool set.
+    const builtinTool = {
+      type: 'function',
+      function: {
+        name: 'builtIn_mcpCallTool',
+        description: 'Call any MCP tool.',
+        parameters: { type: 'object', properties: {} },
+      },
+      execute: vi.fn(),
+    } satisfies Tool
+    streamTextMock.mockReturnValueOnce(createMockStreamResult())
+
+    await streamFrom({
+      model: 'model-a',
+      chatProvider: provider,
+      messages: [{ role: 'user', content: 'hello' }] as Message[],
+      builtinToolsResolver: async () => [builtinTool],
+      options: {
+        tools: [],
+        toolTransform: tools => tools.filter(tool => tool.function.name === 'lumi_memory_search'),
+      },
+    })
+
+    expect(streamTextMock.mock.calls[0]?.[0].tools).toBeUndefined()
+  })
+})
+
 describe('streamFrom tool error capture', () => {
   /**
    * @example

@@ -1,6 +1,6 @@
 import type { ActionInvocation, ComputerUseConfig, ForegroundContext, PolicyDecision } from './types'
 
-import { resolveConfiguredOpenableApp } from './app-aliases'
+import { canonicalizeKnownAppName } from './app-aliases'
 
 function includesPattern(value: string | undefined, patterns: string[]) {
   const normalizedValue = value?.trim().toLowerCase()
@@ -158,13 +158,9 @@ export function evaluateActionPolicy(params: {
       allowed = false
     }
 
-    const resolvedApp = resolveConfiguredOpenableApp(params.action.input.app, params.config.openableApps)
-    if (!resolvedApp) {
-      reasons.push(`app is not in COMPUTER_USE_OPENABLE_APPS: ${params.action.input.app}`)
-      allowed = false
-    }
-    if (includesPattern(resolvedApp || params.action.input.app, params.config.denyApps)) {
-      reasons.push(`app denied by policy: ${resolvedApp || params.action.input.app}`)
+    const requestedApp = canonicalizeKnownAppName(params.action.input.app)
+    if (includesPattern(requestedApp, params.config.denyApps)) {
+      reasons.push(`app denied by COMPUTER_USE_DENY_APPS: ${requestedApp}`)
       allowed = false
     }
     requiresApproval = true

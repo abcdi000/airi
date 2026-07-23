@@ -2,7 +2,7 @@ import type { WebSocketBaseEvent, WebSocketEvents } from '@proj-airi/server-shar
 
 import { describe, expect, it } from 'vitest'
 
-import { heartbeatFrameFrom, resolveEventDelivery, selectConsumerPeerId } from './index'
+import { heartbeatFrameFrom, resolveEventAuthorizationDecision, resolveEventDelivery, selectConsumerPeerId } from './index'
 
 function createInputTextEvent(
   overrides: Partial<WebSocketBaseEvent<'input:text', WebSocketEvents['input:text']>> = {},
@@ -206,5 +206,23 @@ describe('heartbeatFrameFrom', () => {
     expect(heartbeatFrameFrom('')).toBeUndefined()
     expect(heartbeatFrameFrom('🩵')).toBeUndefined()
     expect(heartbeatFrameFrom('{"type":"transport:connection:heartbeat"}')).toBeUndefined()
+  })
+})
+
+describe('resolveEventAuthorizationDecision', () => {
+  it('preserves structured rate-limit details while accepting legacy booleans', () => {
+    expect(resolveEventAuthorizationDecision(true)).toEqual({ authorized: true })
+    expect(resolveEventAuthorizationDecision(false)).toEqual({ authorized: false })
+    expect(resolveEventAuthorizationDecision({
+      authorized: false,
+      reason: 'Too many messages.',
+      code: 'rate-limited',
+      retryAfterMs: 2_500,
+    })).toEqual({
+      authorized: false,
+      reason: 'Too many messages.',
+      code: 'rate-limited',
+      retryAfterMs: 2_500,
+    })
   })
 })

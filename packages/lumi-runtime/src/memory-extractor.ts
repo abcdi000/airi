@@ -6,10 +6,10 @@ const LOW_VALUE_PATTERNS = new Set([
   'hey',
   'thanks',
   'ok',
-  '\u597d\u7684',
-  '\u8c22\u8c22',
-  '\u55ef',
-  '\u65e0\u804a',
+  '\u597D\u7684',
+  '\u8C22\u8C22',
+  '\u55EF',
+  '\u65E0\u804A',
 ])
 
 export interface LumiMemoryExtractionOptions {
@@ -25,6 +25,7 @@ export function extractLumiMemoryCandidates(
     return []
 
   return [
+    ...extractPersonaFacts(stripped, options.sourceMessageId),
     ...extractUserPreferences(stripped, options.sourceMessageId),
     ...extractUserFacts(stripped, options.sourceMessageId),
     ...extractProjectContext(stripped, options.sourceMessageId),
@@ -32,11 +33,28 @@ export function extractLumiMemoryCandidates(
   ]
 }
 
+function extractPersonaFacts(message: string, sourceMessageId?: string): LumiMemoryCandidate[] {
+  const patterns = [
+    /Lumi\s*的生日(?:是|为)\s*(\d{1,2}\s*月\s*\d{1,2}\s*日)/gi,
+    /你的生日(?:是|为)\s*(\d{1,2}\s*月\s*\d{1,2}\s*日)/g,
+  ]
+  return patterns.flatMap(pattern => [...message.matchAll(pattern)].map(match => ({
+    ...candidate('persona_fact', `Lumi 的生日是${match[1].replace(/\s+/g, '')}。`, sourceMessageId, 'explicit Lumi self fact', {
+      relationshipRelevance: 0.35,
+      tags: ['lumi_self', 'birthday'],
+    }),
+    scope: 'global' as const,
+    visibility: 'global' as const,
+    subjectUserIds: ['lumi'],
+    sensitivity: 'normal' as const,
+  })))
+}
+
 function extractUserPreferences(message: string, sourceMessageId?: string): LumiMemoryCandidate[] {
-  if (/[?\uff1f]$/.test(message))
+  if (/[?\uFF1F]$/.test(message))
     return []
 
-  const contextualFavorites = [...message.matchAll(/\u6211\u6700\u559c\u6b22\u7684([^=\uff1d:：\u662f\u3002\uff01\uff1f]{1,20})(?:\u662f|=|\uff1d|:|：)\s*([^.\u3002\uff01\uff1f]{1,80})/g)]
+  const contextualFavorites = [...message.matchAll(/\u6211\u6700\u559C\u6B22\u7684([^=\uFF1D:：\u662F\u3002\uFF01\uFF1F]{1,20})[\u662F=\uFF1D:：]\s*([^.\u3002\uFF01\uFF1F]{1,80})/g)]
     .map(match =>
       candidate(
         'user_preference',
@@ -51,31 +69,31 @@ function extractUserPreferences(message: string, sourceMessageId?: string): Lumi
     )
 
   const patterns: Array<[RegExp, string, LumiMemoryType, string[]]> = [
-    [/\bI (?:really )?like ([^.\u3002\uff01\uff1f]{2,80})/gi, 'The user likes {value}.', 'user_preference', ['preference']],
-    [/\bI (?:really )?(?:dislike|hate) ([^.\u3002\uff01\uff1f]{2,80})/gi, 'The user dislikes {value}.', 'user_preference', ['preference']],
-    [/\u6211(?:\u5f88|\u975e\u5e38|\u771f\u7684|\u6700)?\u559c\u6b22(?!\u7684)([^.\u3002\uff01\uff1f]{2,80})/g, 'The user likes {value}.', 'user_preference', ['preference']],
-    [/\u6211(?:\u4e0d\u559c\u6b22|\u8ba8\u538c)([^.\u3002\uff01\uff1f]{2,80})/g, 'The user dislikes {value}.', 'user_preference', ['preference']],
+    [/\bI (?:really )?like ([^.\u3002\uFF01\uFF1F]{2,80})/gi, 'The user likes {value}.', 'user_preference', ['preference']],
+    [/\bI (?:really )?(?:dislike|hate) ([^.\u3002\uFF01\uFF1F]{2,80})/gi, 'The user dislikes {value}.', 'user_preference', ['preference']],
+    [/\u6211(?:\u5F88|\u975E\u5E38|\u771F\u7684|\u6700)?\u559C\u6B22(?!\u7684)([^.\u3002\uFF01\uFF1F]{2,80})/g, 'The user likes {value}.', 'user_preference', ['preference']],
+    [/\u6211(?:\u4E0D\u559C\u6B22|\u8BA8\u538C)([^.\u3002\uFF01\uFF1F]{2,80})/g, 'The user dislikes {value}.', 'user_preference', ['preference']],
   ]
 
   return [
     ...contextualFavorites,
     ...patterns.flatMap(([pattern, template, type, tags]) =>
-    [...message.matchAll(pattern)].map(match =>
-      candidate(type, template.replace('{value}', match[1].trim()), sourceMessageId, 'stable preference', {
-        relationshipRelevance: 0.5,
-        tags,
-      }),
-    ),
+      [...message.matchAll(pattern)].map(match =>
+        candidate(type, template.replace('{value}', match[1].trim()), sourceMessageId, 'stable preference', {
+          relationshipRelevance: 0.5,
+          tags,
+        }),
+      ),
     ),
   ]
 }
 
 function extractUserFacts(message: string, sourceMessageId?: string): LumiMemoryCandidate[] {
   const patterns: Array<[RegExp, string, LumiMemoryType, string[]]> = [
-    [/\bmy name is ([A-Za-z][A-Za-z0-9 _-]{1,60})/gi, "The user's name is {value}.", 'user_fact', ['fact']],
-    [/\bI live in ([^.\u3002\uff01\uff1f]{2,80})/gi, 'The user lives in {value}.', 'user_fact', ['fact']],
-    [/\u6211\u53eb([^.\u3002\uff01\uff1f]{1,40})/g, "The user's name is {value}.", 'user_fact', ['fact']],
-    [/\u6211\u4f4f\u5728([^.\u3002\uff01\uff1f]{2,80})/g, 'The user lives in {value}.', 'user_fact', ['fact']],
+    [/\bmy name is ([A-Z][\w -]{1,60})/gi, 'The user\'s name is {value}.', 'user_fact', ['fact']],
+    [/\bI live in ([^.\u3002\uFF01\uFF1F]{2,80})/gi, 'The user lives in {value}.', 'user_fact', ['fact']],
+    [/\u6211\u53EB([^.\u3002\uFF01\uFF1F]{1,40})/g, 'The user\'s name is {value}.', 'user_fact', ['fact']],
+    [/\u6211\u4F4F\u5728([^.\u3002\uFF01\uFF1F]{2,80})/g, 'The user lives in {value}.', 'user_fact', ['fact']],
   ]
 
   return patterns.flatMap(([pattern, template, type, tags]) =>
@@ -89,7 +107,7 @@ function extractUserFacts(message: string, sourceMessageId?: string): LumiMemory
 }
 
 function extractProjectContext(message: string, sourceMessageId?: string): LumiMemoryCandidate[] {
-  if (!/\b(project|repo|backend|frontend|api|sqlite|fastapi|airi|lumi)\b|\u9879\u76ee|\u540e\u7aef|\u524d\u7aef|\u63a5\u53e3|\u8fc1\u79fb/i.test(message))
+  if (!/\b(?:project|repo|backend|frontend|api|sqlite|fastapi|airi|lumi)\b|\u9879\u76EE|\u540E\u7AEF|\u524D\u7AEF|\u63A5\u53E3|\u8FC1\u79FB/i.test(message))
     return []
   if (message.length < 18)
     return []
@@ -110,7 +128,7 @@ function extractProjectContext(message: string, sourceMessageId?: string): LumiM
 }
 
 function extractPromise(message: string, sourceMessageId?: string): LumiMemoryCandidate[] {
-  if (!/\bremember that\b|\u8bb0\u4f4f|\u522b\u5fd8\u4e86|\u5e2e\u6211\u8bb0/i.test(message))
+  if (!/\bremember that\b|\u8BB0\u4F4F|\u522B\u5FD8\u4E86|\u5E2E\u6211\u8BB0/i.test(message))
     return []
 
   return [{
@@ -155,13 +173,13 @@ function candidate(
 }
 
 function normalizeFavoriteSubject(subject: string): string {
-  if (/\u5b9e\u4f53/.test(subject))
+  if (/\u5B9E\u4F53/.test(subject))
     return 'entity'
-  if (/\u5c42\u7ea7|\u5c42/.test(subject))
+  if (/\u5C42\u7EA7|\u5C42/.test(subject))
     return 'level'
-  if (/\u89d2\u8272/.test(subject))
+  if (/\u89D2\u8272/.test(subject))
     return 'character'
-  if (/\u7535\u5f71/.test(subject))
+  if (/\u7535\u5F71/.test(subject))
     return 'movie'
   return subject.replace(/\s+/g, ' ').slice(0, 40)
 }

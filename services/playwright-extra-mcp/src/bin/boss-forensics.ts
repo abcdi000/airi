@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 
-import type { ConsoleMessage, Page, Request, Response } from 'playwright'
+import type {
+  BrowserConsoleMessageLike,
+  BrowserPageLike,
+  BrowserRequestLike,
+  BrowserResponseLike,
+} from '../browser-contracts'
 
 import { createBrowserContext, loadLauncherConfig } from '../index'
 
@@ -18,11 +23,11 @@ function report(event: string, fields: Record<string, unknown> = {}) {
   console.log(JSON.stringify({ elapsedMs: Math.round(performance.now() - startedAt), event, ...fields }))
 }
 
-function isRelevantRequest(request: Request): boolean {
+function isRelevantRequest(request: BrowserRequestLike): boolean {
   return ['document', 'script', 'xhr', 'fetch'].includes(request.resourceType())
 }
 
-function describeConsole(message: ConsoleMessage) {
+function describeConsole(message: BrowserConsoleMessageLike) {
   const location = message.location().url
   return {
     level: message.type(),
@@ -31,7 +36,7 @@ function describeConsole(message: ConsoleMessage) {
   }
 }
 
-function observePage(page: Page, captureConsole: boolean): void {
+function observePage(page: BrowserPageLike, captureConsole: boolean): void {
   page.on('framenavigated', (frame) => {
     if (frame === page.mainFrame())
       report('main-frame-navigated', { url: safeUrl(frame.url()) })
@@ -43,7 +48,7 @@ function observePage(page: Page, captureConsole: boolean): void {
     if (isRelevantRequest(request))
       report('request', { resource: request.resourceType(), url: safeUrl(request.url()) })
   })
-  page.on('response', (response: Response) => {
+  page.on('response', (response: BrowserResponseLike) => {
     const request = response.request()
     if (isRelevantRequest(request)) {
       report('response', {
@@ -65,7 +70,10 @@ const startedAt = performance.now()
 const config = await loadLauncherConfig(process.argv.slice(2))
 const observationMs = Number.parseInt(process.env.LUMI_FORENSICS_OBSERVATION_MS ?? '6000', 10)
 const captureConsole = process.env.LUMI_FORENSICS_CAPTURE_CONSOLE !== '0'
-const context = await createBrowserContext(config)
+const context = await createBrowserContext(config, {
+  backend: 'playwright',
+  requiredCapabilities: ['console'],
+})
 const page = context.pages()[0] ?? await context.newPage()
 
 try {

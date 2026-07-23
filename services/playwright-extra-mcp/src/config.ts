@@ -1,4 +1,6 @@
-import type { BrowserType } from 'playwright'
+import type { BrowserBackendName, BrowserLaunchSettings, BrowserName } from './browser-contracts'
+
+import process from 'node:process'
 
 import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
@@ -8,8 +10,6 @@ export interface PluginSpec {
   enabled?: boolean
   options?: Record<string, unknown>
 }
-
-export type LaunchPersistentContextOptions = Parameters<BrowserType['launchPersistentContext']>[1]
 
 export interface BrowserIdentityExpectation {
   userAgent?: string
@@ -35,12 +35,23 @@ export interface BrowserBehaviorConfig {
   postNavigationSettleMs?: number
 }
 
+export interface BrowserBackendFileConfig {
+  browserName?: BrowserName
+  channel?: string
+  headless?: boolean
+  persistentContext?: boolean
+  noViewport?: boolean
+  launchOptions?: Record<string, unknown>
+}
+
 export interface LauncherFileConfig {
   userDataDir?: string
   browser?: {
-    channel?: string
-    headless?: boolean
-    launchOptions?: LaunchPersistentContextOptions
+    defaultBackend?: BrowserBackendName
+    fallbackBackend?: BrowserBackendName | null
+    platformOverrides?: Record<string, BrowserBackendName>
+    patchright?: BrowserBackendFileConfig
+    playwright?: BrowserBackendFileConfig
   }
   plugins?: PluginSpec[]
   identity?: BrowserIdentityExpectation
@@ -54,9 +65,10 @@ export interface LauncherConfig {
   configDir: string
   userDataDir: string
   browser: {
-    channel: string
-    headless: boolean
-    launchOptions: LaunchPersistentContextOptions
+    defaultBackend: BrowserBackendName
+    fallbackBackend?: BrowserBackendName
+    platformOverrides: Record<string, BrowserBackendName>
+    backends: Record<BrowserBackendName, BrowserLaunchSettings>
   }
   plugins: PluginSpec[]
   identity?: BrowserIdentityExpectation
@@ -64,11 +76,19 @@ export interface LauncherConfig {
   initScripts: string[]
   setupModules: string[]
   mcp: Record<string, unknown>
+  startupRequest: {
+    backend?: BrowserBackendName
+    platform?: string
+    browserName?: BrowserName
+  }
 }
 
 interface CliOverrides {
   configPath?: string
   userDataDir?: string
+  backend?: BrowserBackendName
+  platform?: string
+  browserName?: BrowserName
   channel?: string
   headless?: boolean
   stealth?: boolean
@@ -87,8 +107,19 @@ function takeValue(args: string[], index: number, name: string): string {
   const value = args[index + 1]
   if (!value || value.startsWith('--'))
     throw new Error(`${name} requires a value`)
-
   return value
+}
+
+function parseBackend(value: string, source: string): BrowserBackendName {
+  if (value === 'patchright' || value === 'playwright')
+    return value
+  throw new Error(`${source} must be "patchright" or "playwright"`)
+}
+
+function parseBrowserName(value: string, source: string): BrowserName {
+  if (value === 'chromium' || value === 'firefox' || value === 'webkit')
+    return value
+  throw new Error(`${source} must be "chromium", "firefox", or "webkit"`)
 }
 
 export function parseCliArgs(args: string[]): CliOverrides {
@@ -107,6 +138,18 @@ export function parseCliArgs(args: string[]): CliOverrides {
         break
       case '--user-data-dir':
         result.userDataDir = takeValue(args, index, arg)
+        index += 1
+        break
+      case '--backend':
+        result.backend = parseBackend(takeValue(args, index, arg), arg)
+        index += 1
+        break
+      case '--platform':
+        result.platform = takeValue(args, index, arg)
+        index += 1
+        break
+      case '--browser':
+        result.browserName = parseBrowserName(takeValue(args, index, arg), arg)
         index += 1
         break
       case '--channel':
@@ -141,7 +184,6 @@ export function parseCliArgs(args: string[]): CliOverrides {
         throw new Error(`Unknown argument: ${arg}`)
     }
   }
-
   return result
 }
 
@@ -159,6 +201,42 @@ function parseEnvironmentBoolean(value: string | undefined): boolean | undefined
   throw new Error(`Invalid boolean environment value: ${value}`)
 }
 
+function resolvedBackendConfig(
+  backend: BrowserBackendName,
+  fileConfig: BrowserBackendFileConfig | undefined,
+  profilePath: string,
+  cli: CliOverrides,
+  env: NodeJS.ProcessEnv,
+): BrowserLaunchSettings {
+  const envPrefix = backend === 'patchright' ? 'LUMI_PATCHRIGHT' : 'LUMI_PLAYWRIGHT'
+  const envHeadless = parseEnvironmentBoolean(env[`${envPrefix}_HEADLESS`])
+  const envPersistent = parseEnvironmentBoolean(env[`${envPrefix}_PERSISTENT_CONTEXT`])
+  const envNoViewport = parseEnvironmentBoolean(env[`${envPrefix}_NO_VIEWPORT`])
+
+  return {
+    browserName: cli.browserName
+      ?? (env[`${envPrefix}_BROWSER`] ? parseBrowserName(env[`${envPrefix}_BROWSER`]!, `${envPrefix}_BROWSER`) : undefined)
+      ?? fileConfig?.browserName
+      ?? 'chromium',
+    channel: cli.channel
+      ?? env[`${envPrefix}_CHANNEL`]
+      ?? fileConfig?.channel
+      ?? 'chrome',
+    headless: cli.headless
+      ?? envHeadless
+      ?? fileConfig?.headless
+      ?? false,
+    persistentContext: envPersistent
+      ?? fileConfig?.persistentContext
+      ?? true,
+    noViewport: envNoViewport
+      ?? fileConfig?.noViewport
+      ?? true,
+    profilePath,
+    launchOptions: fileConfig?.launchOptions ?? {},
+  }
+}
+
 export async function loadLauncherConfig(
   args: string[],
   env: NodeJS.ProcessEnv = process.env,
@@ -171,8 +249,24 @@ export async function loadLauncherConfig(
     ? JSON.parse(await readFile(configPath, 'utf8')) as LauncherFileConfig
     : {}
 
-  const envHeadless = parseEnvironmentBoolean(env.LUMI_PLAYWRIGHT_HEADLESS)
-  const configuredPlugins = fileConfig.plugins ?? [{ module: DEFAULT_STEALTH_PLUGIN }]
+  const defaultBackend = env.LUMI_BROWSER_DEFAULT_BACKEND
+    ? parseBackend(env.LUMI_BROWSER_DEFAULT_BACKEND, 'LUMI_BROWSER_DEFAULT_BACKEND')
+    : fileConfig.browser?.defaultBackend ?? 'patchright'
+  const fallbackValue = env.LUMI_BROWSER_FALLBACK_BACKEND
+  const fallbackBackend = fallbackValue === 'none'
+    ? undefined
+    : fallbackValue
+      ? parseBackend(fallbackValue, 'LUMI_BROWSER_FALLBACK_BACKEND')
+      : fileConfig.browser?.fallbackBackend === null
+        ? undefined
+        : fileConfig.browser?.fallbackBackend ?? 'playwright'
+  const profileValue = cli.userDataDir
+    ?? env.LUMI_BROWSER_PROFILE_PATH
+    ?? env.LUMI_PLAYWRIGHT_USER_DATA_DIR
+    ?? fileConfig.userDataDir
+    ?? resolve(cwd, 'data', 'browser_profiles', 'lumi')
+  const userDataDir = resolveFrom(configDir, profileValue)
+  const configuredPlugins = fileConfig.plugins ?? []
   const stealthEnabled = cli.stealth ?? true
   const plugins = configuredPlugins
     .filter(plugin => plugin.enabled !== false)
@@ -182,24 +276,17 @@ export async function loadLauncherConfig(
   if (stealthEnabled && !plugins.some(plugin => plugin.module === DEFAULT_STEALTH_PLUGIN))
     plugins.unshift({ module: DEFAULT_STEALTH_PLUGIN })
 
-  const userDataDirValue = cli.userDataDir
-    ?? env.LUMI_PLAYWRIGHT_USER_DATA_DIR
-    ?? fileConfig.userDataDir
-    ?? resolve(cwd, '.playwright-mcp', 'profile')
-
   return {
     configDir,
-    userDataDir: resolveFrom(configDir, userDataDirValue),
+    userDataDir,
     browser: {
-      channel: cli.channel
-        ?? env.LUMI_PLAYWRIGHT_CHANNEL
-        ?? fileConfig.browser?.channel
-        ?? 'chrome',
-      headless: cli.headless
-        ?? envHeadless
-        ?? fileConfig.browser?.headless
-        ?? false,
-      launchOptions: fileConfig.browser?.launchOptions ?? {},
+      defaultBackend,
+      fallbackBackend,
+      platformOverrides: fileConfig.browser?.platformOverrides ?? {},
+      backends: {
+        patchright: resolvedBackendConfig('patchright', fileConfig.browser?.patchright, userDataDir, cli, env),
+        playwright: resolvedBackendConfig('playwright', fileConfig.browser?.playwright, userDataDir, cli, env),
+      },
     },
     plugins,
     identity: fileConfig.identity,
@@ -218,5 +305,10 @@ export async function loadLauncherConfig(
       ...cli.setupModules,
     ],
     mcp: fileConfig.mcp ?? {},
+    startupRequest: {
+      backend: cli.backend ?? (env.LUMI_BROWSER_BACKEND ? parseBackend(env.LUMI_BROWSER_BACKEND, 'LUMI_BROWSER_BACKEND') : undefined),
+      platform: cli.platform ?? env.LUMI_BROWSER_PLATFORM,
+      browserName: cli.browserName,
+    },
   }
 }

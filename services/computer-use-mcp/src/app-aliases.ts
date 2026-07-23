@@ -73,17 +73,8 @@ export function appNamesMatch(left: string | undefined, right: string | undefine
   return normalizeAppNameKey(leftCanonical) === normalizeAppNameKey(rightCanonical)
 }
 
-export function resolveConfiguredOpenableApp(requested: string, openableApps: string[]) {
-  return openableApps.find(candidate => appNamesMatch(candidate, requested))
-}
-
-export function normalizeConfiguredAppAction(action: ActionInvocation, openableApps: string[]): ActionInvocation {
+export function normalizeAppAction(action: ActionInvocation): ActionInvocation {
   if (action.kind !== 'open_app' && action.kind !== 'focus_app') {
-    return action
-  }
-
-  const resolvedApp = resolveConfiguredOpenableApp(action.input.app, openableApps)
-  if (!resolvedApp) {
     return action
   }
 
@@ -91,7 +82,7 @@ export function normalizeConfiguredAppAction(action: ActionInvocation, openableA
     ...action,
     input: {
       ...action.input,
-      app: resolvedApp,
+      app: canonicalizeKnownAppName(action.input.app),
     },
   }
 }

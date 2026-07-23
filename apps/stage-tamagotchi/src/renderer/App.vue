@@ -7,10 +7,17 @@ import { ToasterRoot } from '@proj-airi/stage-ui/components'
 import { useInferencePreload } from '@proj-airi/stage-ui/composables'
 import { useSharedAnalyticsStore } from '@proj-airi/stage-ui/stores/analytics'
 import { useCharacterOrchestratorStore } from '@proj-airi/stage-ui/stores/character'
+import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
 import { usePluginHostInspectorStore } from '@proj-airi/stage-ui/stores/devtools/plugin-host-debug'
 import { useDisplayModelsStore } from '@proj-airi/stage-ui/stores/display-models'
 import { useLumiAgentStore } from '@proj-airi/stage-ui/stores/lumi-agent'
+import { useLumiChannelDevicesStore } from '@proj-airi/stage-ui/stores/lumi-channel-devices'
+import { useLumiCurrentStateStore } from '@proj-airi/stage-ui/stores/lumi-current-state'
+import { useLumiIdentityStore } from '@proj-airi/stage-ui/stores/lumi-identity'
+import { useLumiMemoryStore } from '@proj-airi/stage-ui/stores/lumi-memory'
+import { useLumiOnlineStore } from '@proj-airi/stage-ui/stores/lumi-online'
+import { useLumiUserProfileStore } from '@proj-airi/stage-ui/stores/lumi-user-profile'
 import { useModsServerChannelStore } from '@proj-airi/stage-ui/stores/mods/api/channel-server'
 import { useContextBridgeStore } from '@proj-airi/stage-ui/stores/mods/api/context-bridge'
 import { useAiriCardStore } from '@proj-airi/stage-ui/stores/modules/airi-card'
@@ -18,9 +25,6 @@ import { useArtistryStore } from '@proj-airi/stage-ui/stores/modules/artistry'
 import { usePerfTracerBridgeStore } from '@proj-airi/stage-ui/stores/perf-tracer-bridge'
 import { listProvidersForPluginHost, shouldPublishPluginHostCapabilities } from '@proj-airi/stage-ui/stores/plugin-host-capabilities'
 import { useSettings, useSettingsAudioDevice } from '@proj-airi/stage-ui/stores/settings'
-import { useLumiCurrentStateStore } from '@proj-airi/stage-ui/stores/lumi-current-state'
-import { useLumiMemoryStore } from '@proj-airi/stage-ui/stores/lumi-memory'
-import { useLumiUserProfileStore } from '@proj-airi/stage-ui/stores/lumi-user-profile'
 import { useTheme } from '@proj-airi/ui'
 import { useLocalStorage } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
@@ -28,12 +32,10 @@ import { onMounted, onUnmounted, watch } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import { toast, Toaster } from 'vue-sonner'
 
+import MinecraftMcpMonitorLauncher from './components/MinecraftMcpMonitorLauncher.vue'
 import ResizeHandler from './components/ResizeHandler.vue'
 
 import {
-  electronGetServerChannelConfig,
-  electronGodotStageGetStatus,
-  electronGodotStageStatusChanged,
   electronClaudeCodeAgentCancelTask,
   electronClaudeCodeAgentGetLog,
   electronClaudeCodeAgentListLogs,
@@ -41,12 +43,29 @@ import {
   electronClaudeCodeAgentPickCommand,
   electronClaudeCodeAgentRunTask,
   electronClaudeCodeAgentSearchCommand,
+  electronClearLumiChannelDevices,
+  electronExportLumiChannelDeviceArchive,
+  electronGetServerChannelConfig,
+  electronGodotStageGetStatus,
+  electronGodotStageStatusChanged,
+  electronImportLumiChannelDeviceArchive,
+  electronLumiCurrentStateClear,
+  electronLumiCurrentStateGetSnapshot,
+  electronLumiCurrentStateSaveSnapshot,
+  electronLumiIdentityChanged,
+  electronLumiIdentityCreateUser,
+  electronLumiIdentityGetSnapshot,
+  electronLumiIdentityLinkExternalIdentity,
+  electronLumiIdentityReplaceSnapshot,
+  electronLumiIdentitySetActiveUser,
+  electronLumiIdentitySetRuntimeBusy,
+  electronLumiIdentityUpdateUser,
   electronLumiMemoryBackfillVectors,
   electronLumiMemoryClear,
   electronLumiMemoryDeleteMemory,
   electronLumiMemoryDeleteVector,
-  electronLumiMemoryGetVectors,
   electronLumiMemoryGetSnapshot,
+  electronLumiMemoryGetVectors,
   electronLumiMemoryReplaceSnapshot,
   electronLumiMemorySaveEvent,
   electronLumiMemorySearchVectors,
@@ -55,9 +74,6 @@ import {
   electronLumiMemoryUpsertMemory,
   electronLumiMemoryUpsertVector,
   electronLumiMemoryVectorStatus,
-  electronLumiCurrentStateClear,
-  electronLumiCurrentStateGetSnapshot,
-  electronLumiCurrentStateSaveSnapshot,
   electronLumiUserProfileApprovePendingUpdate,
   electronLumiUserProfileArchiveEntry,
   electronLumiUserProfileClear,
@@ -83,8 +99,8 @@ import {
   pluginProtocolListProvidersEventName,
 } from '../shared/eventa/plugin/capabilities'
 import {
-  electronPluginInspect,
   electronPluginAddFromDirectory,
+  electronPluginInspect,
   electronPluginList,
   electronPluginLoad,
   electronPluginLoadEnabled,
@@ -94,17 +110,16 @@ import {
   electronPluginSetEnabled,
   electronPluginUnload,
 } from '../shared/eventa/plugin/host'
-import { initializeElectronAuthCallbackBridge } from './bridges/electron-auth-callback'
+import { initializeLumiOnlineDesktopBridge } from './bridges/lumi-online'
 import { initializeStageThreeRuntimeTraceBridge } from './bridges/stage-three-runtime-trace'
-import MinecraftMcpMonitorLauncher from './components/MinecraftMcpMonitorLauncher.vue'
 import { useLanguage } from './composables/use-language'
 import { createChatSyncWindowLifecycle } from './stores/chat-sync-lifecycle'
 import { useLumiAutonomousLifeStore } from './stores/lumi-autonomous-life'
 import { useLumiDiarySchedulerStore } from './stores/lumi-diary-scheduler'
-import { useTamagotchiMcpToolsStore } from './stores/mcp-tools'
 import { useLumiProactiveVisionStore } from './stores/lumi-proactive-vision'
 import { useLumiSelfAdjustmentStore } from './stores/lumi-self-adjustment'
 import { initializeLumiToolMeshRuntime } from './stores/lumi-tool-mesh-registration'
+import { useTamagotchiMcpToolsStore } from './stores/mcp-tools'
 import { useTamagotchiPluginToolsStore } from './stores/plugin-tools'
 import { useServerChannelSettingsStore } from './stores/settings/server-channel'
 import { useStageWindowLifecycleStore } from './stores/stage-window-lifecycle'
@@ -119,6 +134,7 @@ const router = useRouter()
 const route = useRoute()
 const cardStore = useAiriCardStore()
 const chatSessionStore = useChatSessionStore()
+const chatOrchestratorStore = useChatOrchestratorStore()
 const serverChannelStore = useModsServerChannelStore()
 const characterOrchestratorStore = useCharacterOrchestratorStore()
 const analyticsStore = useSharedAnalyticsStore()
@@ -133,8 +149,11 @@ const pluginToolsStore = useTamagotchiPluginToolsStore()
 const stageWindowLifecycleStore = useStageWindowLifecycleStore()
 const settingsAudioDeviceStore = useSettingsAudioDevice()
 const lumiAgentStore = useLumiAgentStore()
+const lumiChannelDevicesStore = useLumiChannelDevicesStore()
+const lumiIdentityStore = useLumiIdentityStore()
 const lumiCurrentStateStore = useLumiCurrentStateStore()
 const lumiMemoryStore = useLumiMemoryStore()
+const lumiOnlineStore = useLumiOnlineStore()
 const lumiUserProfileStore = useLumiUserProfileStore()
 const miniChatEnabled = useLocalStorage('settings/plugins/lumi-chat-mini/enabled', false)
 const artistryStore = useArtistryStore()
@@ -142,7 +161,7 @@ const { activeProvider, artistryGlobals, activeModel, defaultPromptPrefix, provi
 const context = useElectronEventaContext()
 usePerfTracerBridgeStore()
 initializeStageThreeRuntimeTraceBridge()
-initializeElectronAuthCallbackBridge()
+const disposeLumiOnlineDesktopBridge = initializeLumiOnlineDesktopBridge()
 void stageWindowLifecycleStore.initializeWindowLifecycleBridge()
 const getServerChannelConfig = useElectronEventaInvoke(electronGetServerChannelConfig)
 const listPlugins = useElectronEventaInvoke(electronPluginList)
@@ -169,6 +188,16 @@ const listClaudeCodeAgentLogs = useElectronEventaInvoke(electronClaudeCodeAgentL
 const openClaudeCodeAgentTaskWindow = useElectronEventaInvoke(electronClaudeCodeAgentOpenTaskWindow)
 const pickClaudeCodeAgentCommand = useElectronEventaInvoke(electronClaudeCodeAgentPickCommand)
 const searchClaudeCodeAgentCommand = useElectronEventaInvoke(electronClaudeCodeAgentSearchCommand)
+const getLumiIdentitySnapshot = useElectronEventaInvoke(electronLumiIdentityGetSnapshot)
+const createLumiIdentityUser = useElectronEventaInvoke(electronLumiIdentityCreateUser)
+const updateLumiIdentityUser = useElectronEventaInvoke(electronLumiIdentityUpdateUser)
+const setActiveLumiIdentityUser = useElectronEventaInvoke(electronLumiIdentitySetActiveUser)
+const linkLumiExternalIdentity = useElectronEventaInvoke(electronLumiIdentityLinkExternalIdentity)
+const replaceLumiIdentitySnapshot = useElectronEventaInvoke(electronLumiIdentityReplaceSnapshot)
+const setLumiIdentityRuntimeBusy = useElectronEventaInvoke(electronLumiIdentitySetRuntimeBusy)
+const exportLumiChannelDeviceArchive = useElectronEventaInvoke(electronExportLumiChannelDeviceArchive)
+const importLumiChannelDeviceArchive = useElectronEventaInvoke(electronImportLumiChannelDeviceArchive)
+const clearLumiChannelDevices = useElectronEventaInvoke(electronClearLumiChannelDevices)
 const getLumiMemorySnapshot = useElectronEventaInvoke(electronLumiMemoryGetSnapshot)
 const replaceLumiMemorySnapshot = useElectronEventaInvoke(electronLumiMemoryReplaceSnapshot)
 const upsertLumiMemory = useElectronEventaInvoke(electronLumiMemoryUpsertMemory)
@@ -208,27 +237,90 @@ function toIpcPayload<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
+lumiIdentityStore.setBridge({
+  getSnapshot: () => getLumiIdentitySnapshot(),
+  createUser: payload => createLumiIdentityUser(payload),
+  updateUser: payload => updateLumiIdentityUser(payload),
+  setActiveUser: payload => setActiveLumiIdentityUser(payload),
+  linkExternalIdentity: payload => linkLumiExternalIdentity(payload),
+  replaceSnapshot: snapshot => replaceLumiIdentitySnapshot(toIpcPayload(snapshot)),
+})
+
+lumiChannelDevicesStore.setArchiveBridge({
+  exportSnapshot: () => exportLumiChannelDeviceArchive(),
+  importSnapshot: snapshot => importLumiChannelDeviceArchive(toIpcPayload(snapshot)),
+  clear: () => clearLumiChannelDevices(),
+})
+
+lumiIdentityStore.setSwitchPolicy({
+  canSwitch: () => !chatOrchestratorStore.sending
+    && chatOrchestratorStore.pendingQueuedSendCount === 0
+    && !autonomousLifeStore.processing
+    && !proactiveVisionStore.processing
+    && !diarySchedulerStore.writing,
+  afterSwitch: async () => {
+    lumiUserProfileStore.setActiveProfileUser(lumiIdentityStore.activeUserId)
+    lumiCurrentStateStore.setActiveStateUser(lumiIdentityStore.activeUserId)
+    await Promise.all([
+      chatSessionStore.reloadForActiveUser(),
+      lumiMemoryStore.reloadForActiveUser(),
+      lumiUserProfileStore.reloadFromDatabase(),
+      lumiCurrentStateStore.reloadForActiveUser(),
+    ])
+    lumiUserProfileStore.ensureKnownUserProfile(lumiIdentityStore.activeUserId)
+  },
+})
+
+const disposeLumiIdentityChanged = context.value.on(electronLumiIdentityChanged, (event) => {
+  if (!event.body)
+    return
+  void lumiIdentityStore.synchronizeSnapshot(event.body).catch((error) => {
+    console.error('[App] Failed to synchronize Lumi identity across windows:', error)
+  })
+})
+
+const stopLumiIdentityBusyWatch = watch(
+  [
+    () => chatOrchestratorStore.sending,
+    () => chatOrchestratorStore.pendingQueuedSendCount,
+    () => autonomousLifeStore.processing,
+    () => proactiveVisionStore.processing,
+    () => diarySchedulerStore.writing,
+  ],
+  ([sending, pendingQueuedSendCount, autonomousLifeProcessing, proactiveVisionProcessing, diaryWriting]) => {
+    const busy = sending
+      || pendingQueuedSendCount > 0
+      || autonomousLifeProcessing
+      || proactiveVisionProcessing
+      || diaryWriting
+    void setLumiIdentityRuntimeBusy({ busy }).catch((error) => {
+      console.warn('[App] Failed to report Lumi identity switch availability:', error)
+    })
+  },
+  { immediate: true },
+)
+
 lumiMemoryStore.setPersistenceBridge({
-  getSnapshot: () => getLumiMemorySnapshot() as any,
-  replaceSnapshot: snapshot => replaceLumiMemorySnapshot(toIpcPayload(snapshot) as any) as any,
+  getSnapshot: payload => getLumiMemorySnapshot(payload) as any,
+  replaceSnapshot: payload => replaceLumiMemorySnapshot(toIpcPayload(payload) as any) as any,
   upsertMemory: memory => upsertLumiMemory(toIpcPayload(memory) as any),
   deleteMemory: payload => deleteLumiMemory(payload),
   getVectors: payload => getLumiMemoryVectors(payload),
   upsertVector: record => upsertLumiMemoryVector(toIpcPayload(record) as any),
   deleteVector: payload => deleteLumiMemoryVector(payload),
-  vectorStatus: () => getLumiMemoryVectorStatus() as any,
-  backfillVectors: payload => backfillLumiMemoryVectors(payload ?? {}) as any,
+  vectorStatus: payload => getLumiMemoryVectorStatus(payload) as any,
+  backfillVectors: payload => backfillLumiMemoryVectors(payload) as any,
   searchVectors: payload => searchLumiMemoryVectors(payload) as any,
   syncVector: memory => syncLumiMemoryVector(toIpcPayload(memory) as any) as any,
-  saveEvent: event => saveLumiMemoryEvent(toIpcPayload(event) as any),
+  saveEvent: payload => saveLumiMemoryEvent(toIpcPayload(payload) as any),
   setSeedId: payload => setLumiMemorySeedId(payload),
-  clear: () => clearLumiMemory(),
+  clear: payload => clearLumiMemory(payload),
 })
 
 lumiCurrentStateStore.setPersistenceBridge({
-  loadCurrentStateFromDatabase: () => loadLumiCurrentStateFromDatabase() as any,
-  saveCurrentState: snapshot => saveLumiCurrentStateSnapshot(toIpcPayload(snapshot) as any) as any,
-  clearCurrentState: () => clearLumiCurrentStateDatabase(),
+  loadCurrentStateFromDatabase: userId => loadLumiCurrentStateFromDatabase({ userId: userId ?? lumiIdentityStore.activeUserId }) as any,
+  saveCurrentState: (snapshot, userId) => saveLumiCurrentStateSnapshot({ userId: userId ?? lumiIdentityStore.activeUserId, snapshot: toIpcPayload(snapshot) as any }) as any,
+  clearCurrentState: () => clearLumiCurrentStateDatabase({ userId: lumiIdentityStore.activeUserId }),
 })
 
 lumiAgentStore.setBridge({
@@ -242,20 +334,20 @@ lumiAgentStore.setBridge({
 })
 
 lumiUserProfileStore.setPersistenceBridge({
-  loadProfileFromDatabase: () => loadLumiUserProfileFromDatabase() as any,
-  replaceSnapshot: snapshot => replaceLumiUserProfileSnapshot(toIpcPayload(snapshot) as any) as any,
-  saveProfileEntry: entry => saveLumiUserProfileEntry(toIpcPayload(entry) as any),
-  updateProfileEntry: entry => updateLumiUserProfileEntry(toIpcPayload(entry) as any),
-  archiveProfileEntry: payload => archiveLumiUserProfileEntry(payload),
-  deleteProfileEntry: payload => deleteLumiUserProfileEntry(payload),
-  saveEvidence: payload => saveLumiUserProfileEvidence(toIpcPayload(payload) as any),
-  saveHistory: payload => saveLumiUserProfileHistory(toIpcPayload(payload) as any),
-  loadPendingUpdates: async () => (await loadLumiUserProfileFromDatabase() as any).pendingUpdates ?? [],
-  savePendingUpdate: pending => saveLumiUserProfilePendingUpdate(toIpcPayload(pending) as any),
-  approvePendingUpdate: payload => approveLumiUserProfilePendingUpdate(toIpcPayload(payload) as any),
-  rejectPendingUpdate: payload => rejectLumiUserProfilePendingUpdate(payload),
-  setMeta: payload => setLumiUserProfileMeta(toIpcPayload(payload) as any),
-  clear: () => clearLumiUserProfile(),
+  loadProfileFromDatabase: userId => loadLumiUserProfileFromDatabase({ userId: userId ?? lumiIdentityStore.activeUserId }) as any,
+  replaceSnapshot: (snapshot, userId) => replaceLumiUserProfileSnapshot({ userId: userId ?? lumiIdentityStore.activeUserId, snapshot: toIpcPayload(snapshot) as any }) as any,
+  saveProfileEntry: entry => saveLumiUserProfileEntry({ userId: lumiIdentityStore.activeUserId, entry: toIpcPayload(entry) as any }),
+  updateProfileEntry: entry => updateLumiUserProfileEntry({ userId: lumiIdentityStore.activeUserId, entry: toIpcPayload(entry) as any }),
+  archiveProfileEntry: payload => archiveLumiUserProfileEntry({ userId: lumiIdentityStore.activeUserId, ...payload }),
+  deleteProfileEntry: payload => deleteLumiUserProfileEntry({ userId: lumiIdentityStore.activeUserId, ...payload }),
+  saveEvidence: payload => saveLumiUserProfileEvidence({ userId: lumiIdentityStore.activeUserId, ...toIpcPayload(payload) as any }),
+  saveHistory: payload => saveLumiUserProfileHistory({ userId: lumiIdentityStore.activeUserId, ...toIpcPayload(payload) as any }),
+  loadPendingUpdates: async () => (await loadLumiUserProfileFromDatabase({ userId: lumiIdentityStore.activeUserId }) as any).pendingUpdates ?? [],
+  savePendingUpdate: pending => saveLumiUserProfilePendingUpdate({ userId: lumiIdentityStore.activeUserId, pending: toIpcPayload(pending) as any }),
+  approvePendingUpdate: payload => approveLumiUserProfilePendingUpdate({ userId: lumiIdentityStore.activeUserId, ...toIpcPayload(payload) as any }),
+  rejectPendingUpdate: payload => rejectLumiUserProfilePendingUpdate({ userId: lumiIdentityStore.activeUserId, ...payload }),
+  setMeta: payload => setLumiUserProfileMeta({ userId: lumiIdentityStore.activeUserId, ...toIpcPayload(payload) as any }),
+  clear: () => clearLumiUserProfile({ userId: lumiIdentityStore.activeUserId }),
 })
 
 function syncGodotStageRenderer(state: { state: 'stopped' | 'starting' | 'running' | 'stopping' | 'error' }) {
@@ -321,16 +413,18 @@ pluginHostInspectorStore.setBridge({
 
 // NOTICE: Runtime tool stores must register during setup so renderer consumers can see them
 // before `onMounted()` finishes the rest of the startup flow.
-void mcpToolsStore.refresh().catch((error) => {
-  console.warn('[App] Failed to refresh MCP runtime tools:', error)
-})
-void refreshPluginRuntimeTools()
-void proactiveVisionStore.registerObserveScreenTool().catch((error) => {
-  console.warn('[App] Failed to register Lumi screen observation tool:', error)
-})
-selfAdjustmentStore.initializeToolRegistration()
-lumiAgentStore.initializeToolRegistration()
-initializeLumiToolMeshRuntime()
+if (lumiOnlineStore.runtimeMode === 'offline-client') {
+  void mcpToolsStore.refresh().catch((error) => {
+    console.warn('[App] Failed to refresh MCP runtime tools:', error)
+  })
+  void refreshPluginRuntimeTools()
+  void proactiveVisionStore.registerObserveScreenTool().catch((error) => {
+    console.warn('[App] Failed to register Lumi screen observation tool:', error)
+  })
+  selfAdjustmentStore.initializeToolRegistration()
+  lumiAgentStore.initializeToolRegistration()
+  initializeLumiToolMeshRuntime()
+}
 
 const { restore: restoreLocale } = useLanguage(language, getMainLocale, setLocale)
 
@@ -383,6 +477,7 @@ onMounted(async () => {
 
   analyticsStore.initialize()
   await displayModelsStore.initialize()
+  await lumiIdentityStore.initialize()
   cardStore.initialize()
   void lumiMemoryStore.initializePersistence()
     .then(() => lumiMemoryStore.prewarmSemanticIndex().catch((error) => {
@@ -391,23 +486,28 @@ onMounted(async () => {
     .catch((error) => {
       console.warn('[App] Lumi memory persistence initialization failed:', error)
     })
-  void lumiUserProfileStore.initializePersistence().catch((error) => {
-    console.warn('[App] Lumi user profile persistence initialization failed:', error)
-  })
+  lumiUserProfileStore.setActiveProfileUser(lumiIdentityStore.activeUserId)
+  lumiCurrentStateStore.setActiveStateUser(lumiIdentityStore.activeUserId)
+  void lumiUserProfileStore.initializePersistence()
+    .then(() => lumiUserProfileStore.ensureKnownUserProfile(lumiIdentityStore.activeUserId))
+    .catch((error) => {
+      console.warn('[App] Lumi user profile persistence initialization failed:', error)
+    })
   void lumiCurrentStateStore.initializePersistence().catch((error) => {
     console.warn('[App] Lumi current_state persistence initialization failed:', error)
   })
 
   await chatSessionStore.initialize()
-  if (chatSyncLifecycle.role === 'authority' && proactiveVisionStore.enabled) {
+  await lumiOnlineStore.initialize()
+  if (chatSyncLifecycle.role === 'authority' && lumiOnlineStore.runtimeMode === 'offline-client' && proactiveVisionStore.enabled) {
     void proactiveVisionStore.start().catch((error) => {
       console.warn('[App] Failed to start Lumi proactive vision:', error)
     })
   }
-  if (chatSyncLifecycle.role === 'authority' && diarySchedulerStore.enabled) {
+  if (chatSyncLifecycle.role === 'authority' && lumiOnlineStore.runtimeMode === 'offline-client' && diarySchedulerStore.enabled) {
     diarySchedulerStore.start()
   }
-  if (chatSyncLifecycle.role === 'authority' && autonomousLifeStore.enabled) {
+  if (chatSyncLifecycle.role === 'authority' && lumiOnlineStore.runtimeMode === 'offline-client' && autonomousLifeStore.enabled) {
     autonomousLifeStore.start()
   }
   if (chatSyncLifecycle.role === 'authority' && miniChatEnabled.value) {
@@ -417,8 +517,8 @@ onMounted(async () => {
   }
 
   if (chatSyncLifecycle.role === 'authority') {
-    watch(() => proactiveVisionStore.enabled, (enabled) => {
-      if (enabled) {
+    watch([() => proactiveVisionStore.enabled, () => lumiOnlineStore.runtimeMode], ([enabled, mode]) => {
+      if (enabled && mode === 'offline-client') {
         void proactiveVisionStore.start().catch((error) => {
           console.warn('[App] Failed to start Lumi proactive vision:', error)
         })
@@ -428,8 +528,8 @@ onMounted(async () => {
       proactiveVisionStore.stop({ disable: true })
     })
 
-    watch(() => diarySchedulerStore.enabled, (enabled) => {
-      if (enabled) {
+    watch([() => diarySchedulerStore.enabled, () => lumiOnlineStore.runtimeMode], ([enabled, mode]) => {
+      if (enabled && mode === 'offline-client') {
         diarySchedulerStore.start()
         return
       }
@@ -437,8 +537,8 @@ onMounted(async () => {
       diarySchedulerStore.stop()
     })
 
-    watch(() => autonomousLifeStore.enabled, (enabled) => {
-      if (enabled) {
+    watch([() => autonomousLifeStore.enabled, () => lumiOnlineStore.runtimeMode], ([enabled, mode]) => {
+      if (enabled && mode === 'offline-client') {
         autonomousLifeStore.start()
         return
       }
@@ -495,6 +595,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   chatSyncLifecycle.dispose()
+  disposeLumiIdentityChanged()
+  stopLumiIdentityBusyWatch()
+  disposeLumiOnlineDesktopBridge()
+  void setLumiIdentityRuntimeBusy({ busy: false }).catch(() => {})
 })
 
 watch(themeColorsHue, () => {

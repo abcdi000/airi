@@ -4,7 +4,7 @@ import type { FileLoggerHandle } from './app/file-logger'
 
 import process, { env, platform } from 'node:process'
 
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import messages from '@proj-airi/i18n/locales'
@@ -12,6 +12,7 @@ import messages from '@proj-airi/i18n/locales'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import { Format, LogLevel, setGlobalFormat, setGlobalHookPostLog, setGlobalLogLevel, useLogg } from '@guiiai/logg'
 import { createContext } from '@moeru/eventa/adapters/electron/main'
+import { errorMessageFrom } from '@moeru/std'
 import { initScreenCaptureForMain } from '@proj-airi/electron-screen-capture/main'
 import { app, ipcMain, session } from 'electron'
 import { noop } from 'es-toolkit'
@@ -22,16 +23,17 @@ import icon from '../../resources/icon.png?asset'
 
 import { openDebugger, setupDebugger } from './app/debugger'
 import { nullFileLoggerHandle, setupFileLogger } from './app/file-logger'
+import { migrateLegacyClientConfig } from './app/legacy-client-config'
 import { installSingleInstanceGuard } from './app/single-instance'
 import { createArtistryConfig } from './configs/artistry'
 import { createGlobalAppConfig } from './configs/global'
 import { emitAppBeforeQuit, emitAppReady, emitAppWindowAllClosed } from './libs/bootkit/lifecycle'
 import { setElectronMainDirname } from './libs/electron/location'
 import { createI18n } from './libs/i18n'
-import { createWindowAuthManagerService } from './services/airi/auth'
 import { setupServerChannel } from './services/airi/channel-server'
 import { setupGodotStageManager } from './services/airi/godot-stage'
 import { setupBuiltInServer } from './services/airi/http-server'
+import { readLumiClientRuntimeMode } from './services/airi/lumi-online/runtime-role'
 import { setupMcpStdioManager } from './services/airi/mcp-servers'
 import { setupPluginHost } from './services/airi/plugins'
 import { setupArtistryBridge } from './services/airi/widgets/artistry-bridge'
@@ -68,6 +70,9 @@ const log = useLogg('main').useGlobalConfig()
 const appUserDataPath = env.APP_USER_DATA_PATH?.trim()
 if (appUserDataPath) {
   app.setPath('userData', appUserDataPath)
+}
+else if (process.argv.includes('--lumi-server-manager')) {
+  app.setPath('userData', join(app.getPath('appData'), 'lumi-server-manager'))
 }
 
 // Thanks to [@blurymind](https://github.com/blurymind),
@@ -114,6 +119,26 @@ let skipFileLogging = false
 app.whenReady().then(async () => {
   if (!shouldStartMainProcess) {
     return
+  }
+
+  if (process.argv.includes('--lumi-server-manager')) {
+    const { setupLumiServerManager } = await import('./server-manager')
+    await setupLumiServerManager()
+    return
+  }
+
+  try {
+    const migration = await migrateLegacyClientConfig({
+      legacyUserDataPath: join(app.getPath('appData'), '@proj-airi', 'stage-tamagotchi'),
+      targetUserDataPath: app.getPath('userData'),
+    })
+    if (migration.migrated)
+      log.log(`Restored legacy Lumi client configuration; backup=${migration.backupPath}`)
+  }
+  catch (error) {
+    // The migration module restores its backup before rejecting. Startup remains
+    // available so the user can inspect or export either untouched profile.
+    log.error(`Failed to restore legacy Lumi client configuration: ${errorMessageFrom(error) ?? 'unknown error'}`)
   }
 
   setupMediaPermissionHandlers(session.defaultSession)
@@ -166,7 +191,9 @@ app.whenReady().then(async () => {
   })
 
   const mcpStdioManager = injeca.provide('modules:mcp-stdio-manager', {
-    build: async () => setupMcpStdioManager(),
+    build: async () => setupMcpStdioManager({
+      startConfiguredServers: await readLumiClientRuntimeMode() === 'offline-client',
+    }),
   })
 
   const widgetsManager = injeca.provide('windows:widgets', {
@@ -179,8 +206,6 @@ app.whenReady().then(async () => {
     build: ({ dependsOn }) => setupPluginHost(dependsOn),
   })
 
-  const windowAuthManager = injeca.provide('services:window-auth-manager', () => createWindowAuthManagerService())
-
   const globalShortcut = injeca.provide('services:global-shortcut', () => setupGlobalShortcutService())
 
   // BeatSync will create a background window to capture and process audio.
@@ -189,7 +214,7 @@ app.whenReady().then(async () => {
   const devtoolsMarkdownStressWindow = injeca.provide('windows:devtools:markdown-stress', () => setupDevtoolsWindow())
 
   const onboardingWindowManager = injeca.provide('windows:onboarding', {
-    dependsOn: { serverChannel, i18n, windowAuthManager },
+    dependsOn: { serverChannel, i18n },
     build: ({ dependsOn }) => setupOnboardingWindowManager(dependsOn),
   })
 
@@ -219,7 +244,7 @@ app.whenReady().then(async () => {
   })
 
   const settingsWindow = injeca.provide('windows:settings', {
-    dependsOn: { widgetsManager, miniChatWindow, beatSync, autoUpdater, devtoolsWindow: devtoolsMarkdownStressWindow, serverChannel, godotStageManager, mcpStdioManager, i18n, windowAuthManager, globalShortcut },
+    dependsOn: { widgetsManager, miniChatWindow, beatSync, autoUpdater, devtoolsWindow: devtoolsMarkdownStressWindow, serverChannel, godotStageManager, mcpStdioManager, i18n, globalShortcut },
     build: async ({ dependsOn }) =>
       setupSettingsWindowReusableFunc({
         ...dependsOn,
@@ -227,8 +252,15 @@ app.whenReady().then(async () => {
       }),
   })
 
+  injeca.invoke({
+    dependsOn: { onboardingWindowManager, settingsWindow },
+    callback: ({ onboardingWindowManager, settingsWindow }) => {
+      onboardingWindowManager.setOnlineAccountOpener(async () => await settingsWindow.openWindow('/settings/account'))
+    },
+  })
+
   const mainWindow = injeca.provide('windows:main', {
-    dependsOn: { settingsWindow, chatWindow, miniChatWindow, minecraftMcpMonitorWindow, widgetsManager, noticeWindow, beatSync, autoUpdater, serverChannel, godotStageManager, mcpStdioManager, i18n, onboardingWindowManager, windowAuthManager },
+    dependsOn: { settingsWindow, chatWindow, miniChatWindow, minecraftMcpMonitorWindow, widgetsManager, noticeWindow, beatSync, autoUpdater, serverChannel, godotStageManager, mcpStdioManager, i18n, onboardingWindowManager },
     build: async ({ dependsOn }) => setupMainWindow({
       ...dependsOn,
       onWindowCreated: (window) => {

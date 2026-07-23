@@ -9,18 +9,10 @@ const defaultDeniedApps = [
   'keepass',
   'keychain',
   'system settings',
-  'settings',
   'windows security',
   'activity monitor',
+  'lumi',
   'airi',
-]
-
-const defaultOpenableApps = [
-  'Finder',
-  'Terminal',
-  'Cursor',
-  'Visual Studio Code',
-  'Google Chrome',
 ]
 
 const DISPLAY_SIZE_RE = /^(\d+)x(\d+)$/i
@@ -28,30 +20,6 @@ const HOME_PREFIX_RE = /^~(?=\/|$)/
 
 function normalizeHomePathToken(value: string) {
   return value.replace(HOME_PREFIX_RE, '$HOME')
-}
-
-function resolveDefaultOpenableApps(executor: ExecutorKind, hostPlatform: NodeJS.Platform) {
-  if (executor === 'linux-x11') {
-    return ['Terminal', 'Visual Studio Code', 'Google Chrome']
-  }
-
-  if (executor === 'macos-local') {
-    return defaultOpenableApps
-  }
-
-  if (executor === 'windows-local') {
-    return ['Windows Terminal', 'Visual Studio Code', 'Google Chrome', 'QQ']
-  }
-
-  if (hostPlatform === 'darwin') {
-    return defaultOpenableApps
-  }
-
-  if (hostPlatform === 'win32') {
-    return ['Windows Terminal', 'Visual Studio Code', 'Google Chrome']
-  }
-
-  return ['Terminal', 'Visual Studio Code', 'Google Chrome']
 }
 
 function resolveDefaultTerminalShell(hostPlatform: NodeJS.Platform) {
@@ -87,7 +55,7 @@ function parseInteger(value: string | undefined, fallback: number) {
 }
 
 function parseList(value: string | undefined, fallback: string[] = []) {
-  if (!value)
+  if (value == null)
     return fallback
 
   return value
@@ -206,10 +174,8 @@ export function resolveComputerUseConfig(): ComputerUseConfig {
     maxOperationUnits: parseInteger(env.COMPUTER_USE_MAX_OPERATION_UNITS, 160),
     maxPendingActions: parseInteger(env.COMPUTER_USE_MAX_PENDING_ACTIONS, 24),
     allowedBounds: parseBounds(env.COMPUTER_USE_ALLOWED_BOUNDS),
-    allowApps: parseList(env.COMPUTER_USE_ALLOW_APPS),
     denyApps: parseList(env.COMPUTER_USE_DENY_APPS, defaultDeniedApps),
     denyWindowTitles: parseList(env.COMPUTER_USE_DENY_WINDOW_TITLES),
-    openableApps: parseList(env.COMPUTER_USE_OPENABLE_APPS, resolveDefaultOpenableApps(executor, hostPlatform)),
     timeoutMs: parseInteger(env.COMPUTER_USE_TIMEOUT_MS, 15_000),
     sessionTag: env.COMPUTER_USE_SESSION_TAG?.trim() || undefined,
     launchHostProcess,
@@ -220,7 +186,7 @@ export function resolveComputerUseConfig(): ComputerUseConfig {
           ? `${launchHostProcess} -> swift/quartz + open`
           : executor === 'windows-local'
             ? `${launchHostProcess} -> Windows UI Automation + SendInput`
-          : `${launchHostProcess} -> local dry-run`),
+            : `${launchHostProcess} -> local dry-run`),
     requireSessionTagForMutatingActions,
     requireAllowedBoundsForMutatingActions,
     requireCoordinateAlignmentForMutatingActions,

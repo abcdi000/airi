@@ -862,13 +862,17 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
     }
   }
 
-  async function transcribeForRecording(recording: Blob | null | undefined) {
+  async function transcribeForRecording(
+    recording: Blob | null | undefined,
+    options?: { signal?: AbortSignal },
+  ) {
     error.value = undefined
 
     if (!recording)
       return
 
     try {
+      options?.signal?.throwIfAborted()
       if (recording && recording.size > 0) {
         const providerId = activeTranscriptionProvider.value
         const provider = await providersStore.getProviderInstance<TranscriptionProviderWithExtraOptions<string, any>>(providerId)
@@ -883,8 +887,13 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
           provider,
           model,
           new File([recording], 'recording.wav'),
+          undefined,
+          options?.signal
+            ? { providerOptions: { abortSignal: options.signal } }
+            : undefined,
         )
         const text = result.mode === 'stream' ? await result.text : result.text
+        options?.signal?.throwIfAborted()
         if (!text || !text.trim()) {
           error.value = 'No transcription result returned from provider'
           return
@@ -894,6 +903,8 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
       }
     }
     catch (err) {
+      if (options?.signal?.aborted)
+        return
       error.value = errorMessage(err)
       console.error('Error generating transcription:', error.value)
     }

@@ -6,13 +6,16 @@ import type { ChatHistoryItem } from '../../types/chat'
 import type { ChatSessionMeta, ChatSessionRecord, ChatSessionsExport, ChatSessionsIndex } from '../../types/chat-session'
 
 import { errorMessageFrom } from '@moeru/std'
+import { isStageWeb } from '@proj-airi/stage-shared'
 import { cloneDeep } from 'es-toolkit'
 import { nanoid } from 'nanoid'
 import { defineStore, storeToRefs } from 'pinia'
 import { computed, ref, watch } from 'vue'
 
+import { LUMI_AIRI_CARD_ID } from '../../constants/lumi-card'
 import { chatSessionsRepo } from '../../database/repos/chat-sessions.repo'
 import { authedFetch } from '../../libs/auth-fetch'
+import { normalizeChatMessageActors, normalizeChatSessionMeta } from '../../libs/chat-conversation'
 import {
   applyCreateActions,
   createChatWsClient,
@@ -25,7 +28,7 @@ import {
 import { SERVER_URL } from '../../libs/server'
 import { capturePosthogEvent } from '../analytics/posthog'
 import { useAuthStore } from '../auth'
-import { LUMI_AIRI_CARD_ID } from '../../constants/lumi-card'
+import { LUMI_DOGGY_USER_ID, useLumiIdentityStore } from '../lumi-identity'
 import { useAiriCardStore } from '../modules/airi-card'
 import { mergeLoadedSessionMessages } from './session-message-merge'
 
@@ -39,6 +42,17 @@ type CloudSyncableRole = Extract<MessageRole, 'user' | 'assistant'>
 interface CloudMergePayload {
   messages: NewMessagesPayload['messages']
   toSeq?: number
+}
+
+export interface CreateChatSessionOptions {
+  setActive?: boolean
+  messages?: ChatHistoryItem[]
+  title?: string
+  timelineType?: ChatSessionMeta['timelineType']
+  parentTimelineId?: string
+  syncedToMain?: boolean
+  conversationType?: ChatSessionMeta['conversationType']
+  participantUserIds?: string[]
 }
 
 /**
@@ -66,15 +80,71 @@ function isLumiCharacter(characterId?: string) {
   return characterId === LUMI_AIRI_CARD_ID
 }
 
+/**
+ * Normalizes reactive chat state into a JSON-compatible persistence snapshot.
+ *
+ * Before:
+ * - Vue proxies nested inside session metadata or message arrays.
+ *
+ * After:
+ * - Plain data that IndexedDB, archives, and future LAN transport can clone.
+ */
+function createPersistenceSnapshot<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+/** Rebinds an imported archive to its target user without retaining cloud ownership. */
+function scopeImportedSessions(payload: ChatSessionsExport, targetUserId: string): ChatSessionsExport {
+  if (payload.index.userId === targetUserId)
+    return cloneDeep(payload)
+
+  const sessionIds = Object.values(payload.index.characters).flatMap(character => Object.keys(character.sessions))
+  const idMap = new Map(sessionIds.map(sessionId => [sessionId, `${sessionId}--import-${stableHash(`${targetUserId}:${sessionId}`)}`]))
+  const index: ChatSessionsIndex = { userId: targetUserId, characters: {} }
+  const sessions: Record<string, ChatSessionRecord> = {}
+
+  for (const [characterId, character] of Object.entries(payload.index.characters)) {
+    index.characters[characterId] = {
+      activeSessionId: idMap.get(character.activeSessionId) ?? '',
+      sessions: {},
+    }
+    for (const [sessionId, meta] of Object.entries(character.sessions)) {
+      const nextId = idMap.get(sessionId)!
+      const nextMeta: ChatSessionMeta = {
+        ...meta,
+        sessionId: nextId,
+        userId: targetUserId,
+        parentTimelineId: meta.parentTimelineId ? idMap.get(meta.parentTimelineId) : undefined,
+        cloudChatId: undefined,
+        cloudMaxSeq: undefined,
+        conversationType: meta.conversationType === 'group' ? 'group' : 'direct',
+        participantUserIds: meta.conversationType === 'group'
+          ? [...new Set([targetUserId, ...(meta.participantUserIds ?? [])])]
+          : [targetUserId],
+      }
+      index.characters[characterId].sessions[nextId] = nextMeta
+      const record = payload.sessions[sessionId]
+      if (record)
+        sessions[nextId] = { meta: nextMeta, messages: normalizeChatMessageActors(cloneDeep(record.messages), nextMeta) }
+    }
+  }
+
+  return { format: 'chat-sessions-index:v1', index, sessions }
+}
+
 export const useChatSessionStore = defineStore('chat-session', () => {
   const { userId, token: authToken } = storeToRefs(useAuthStore())
   const { activeCardId, systemPrompt } = storeToRefs(useAiriCardStore())
+  const lumiIdentityStore = useLumiIdentityStore()
+  const lumiActiveUserId = computed(() => lumiIdentityStore.activeUserId || '')
+  const lumiIdentityReady = computed(() => Boolean(lumiIdentityStore.ready))
 
   const activeSessionId = ref<string>('')
   const sessionMessages = ref<Record<string, ChatHistoryItem[]>>({})
   const sessionMetas = ref<Record<string, ChatSessionMeta>>({})
   const sessionGenerations = ref<Record<string, number>>({})
   const index = ref<ChatSessionsIndex | null>(null)
+  const onlineProjectionActive = ref(false)
 
   const ready = ref(false)
   const isReady = computed(() => ready.value)
@@ -121,7 +191,20 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   const mathSyntaxSystemPrompt = '- For any math equation, use LaTeX format, eg: $ x^3 $, always escape dollar sign outside math equation\n'
 
   function getCurrentUserId() {
+    if (isLumiCharacter(getCurrentCharacterId()) && lumiIdentityReady.value && lumiActiveUserId.value)
+      return lumiActiveUserId.value
     return userId.value || 'local'
+  }
+
+  function isCloudUser() {
+    // Lumi desktop and Pocket use the Lumi server protocol exclusively while
+    // online. A stale AIRI auth token must never reconnect their local chat
+    // store to the upstream AIRI cloud service.
+    if (!isStageWeb())
+      return false
+
+    const authenticatedUserId = userId?.value
+    return !!authToken?.value && !!authenticatedUserId && authenticatedUserId !== 'local' && getCurrentUserId() === authenticatedUserId
   }
 
   function getCurrentCharacterId() {
@@ -160,7 +243,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   }
 
   function snapshotMessages(messages: ChatHistoryItem[]) {
-    return cloneDeep(messages)
+    return createPersistenceSnapshot(messages)
   }
 
   function ensureSessionMessageIds(sessionId: string) {
@@ -203,6 +286,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   }
 
   async function loadIndexForUser(currentUserId: string) {
+    if (currentUserId === LUMI_DOGGY_USER_ID)
+      await chatSessionsRepo.copyUserDataIfTargetEmpty('local', currentUserId)
     const stored = await chatSessionsRepo.getIndex(currentUserId)
     index.value = stored ?? {
       userId: currentUserId,
@@ -216,8 +301,10 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     if (index.value) {
       for (const character of Object.values(index.value.characters)) {
         for (const [sessionId, meta] of Object.entries(character.sessions)) {
+          const normalizedMeta = normalizeChatSessionMeta(meta)
+          character.sessions[sessionId] = normalizedMeta
           if (!sessionMetas.value[sessionId])
-            sessionMetas.value[sessionId] = meta
+            sessionMetas.value[sessionId] = normalizedMeta
         }
       }
     }
@@ -230,13 +317,15 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   }
 
   async function persistIndex() {
-    if (!index.value)
+    if (onlineProjectionActive.value || !index.value)
       return
-    const snapshot = cloneDeep(index.value)
+    const snapshot = createPersistenceSnapshot(index.value)
     await enqueuePersist(() => chatSessionsRepo.saveIndex(snapshot))
   }
 
   async function persistSession(sessionId: string) {
+    if (onlineProjectionActive.value)
+      return
     await enqueuePersist(async () => {
       const meta = sessionMetas.value[sessionId]
       if (!meta)
@@ -254,15 +343,15 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       if (characterIndex)
         characterIndex.sessions[sessionId] = updatedMeta
 
-      const record: ChatSessionRecord = {
+      const record = createPersistenceSnapshot<ChatSessionRecord>({
         meta: updatedMeta,
         messages,
-      }
+      })
 
       await chatSessionsRepo.saveSession(sessionId, record)
 
       if (index.value) {
-        const snapshot = cloneDeep(index.value)
+        const snapshot = createPersistenceSnapshot(index.value)
         await chatSessionsRepo.saveIndex(snapshot)
       }
     })
@@ -273,7 +362,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   }
 
   function replaceSessionMessages(sessionId: string, next: ChatHistoryItem[], options?: { persist?: boolean }) {
-    sessionMessages.value[sessionId] = next
+    const meta = sessionMetas.value[sessionId]
+    sessionMessages.value[sessionId] = meta ? normalizeChatMessageActors(next, meta) : next
 
     if (options?.persist !== false)
       void persistSession(sessionId)
@@ -310,6 +400,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
    *   loadSession call will retry.
    */
   async function loadSession(sessionId: string) {
+    if (onlineProjectionActive.value)
+      return
     if (loadedSessions.has(sessionId)) {
       return
     }
@@ -331,13 +423,15 @@ export const useChatSessionStore = defineStore('chat-session', () => {
           return
         if (stored) {
           const currentMessages = sessionMessages.value[sessionId] ?? []
-          const mergedMessages = mergeLoadedSessionMessages(stored.messages, currentMessages)
+          const normalizedMeta = normalizeChatSessionMeta(stored.meta)
+          const storedMessages = normalizeChatMessageActors(stored.messages, normalizedMeta)
+          const mergedMessages = mergeLoadedSessionMessages(storedMessages, currentMessages)
 
-          sessionMetas.value[sessionId] = stored.meta
+          sessionMetas.value[sessionId] = normalizedMeta
           replaceSessionMessages(sessionId, mergedMessages, { persist: false })
           ensureGeneration(sessionId)
 
-          if (mergedMessages !== stored.messages)
+          if (mergedMessages !== stored.messages || normalizedMeta !== stored.meta)
             await persistSession(sessionId)
         }
         loadedSessions.add(sessionId)
@@ -386,9 +480,16 @@ export const useChatSessionStore = defineStore('chat-session', () => {
    * - The new session id. When `setActive` is not `false` the session is
    *   also made the active one.
    */
-  async function createSession(characterId: string, options?: { setActive?: boolean, messages?: ChatHistoryItem[], title?: string, timelineType?: ChatSessionMeta['timelineType'], parentTimelineId?: string, syncedToMain?: boolean }) {
+  async function createSession(characterId: string, options?: CreateChatSessionOptions) {
     const currentUserId = getCurrentUserId()
-    if (isLumiCharacter(characterId) && options?.timelineType !== 'branch' && options?.timelineType !== 'legacy') {
+    const conversationType = options?.conversationType === 'group' ? 'group' : 'direct'
+    const participantUserIds = conversationType === 'group'
+      ? [...new Set([currentUserId, ...(options?.participantUserIds ?? [])])]
+      : [currentUserId]
+    if (conversationType === 'group' && participantUserIds.length < 2)
+      throw new Error('A group conversation requires at least two human participants')
+
+    if (isLumiCharacter(characterId) && conversationType === 'direct' && options?.timelineType !== 'branch' && options?.timelineType !== 'legacy') {
       await ensureLumiMainTimelineSession(currentUserId, characterId)
       return activeSessionId.value
     }
@@ -399,6 +500,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       sessionId,
       userId: currentUserId,
       characterId,
+      conversationType,
+      participantUserIds,
       title: options?.title,
       timelineType: options?.timelineType,
       parentTimelineId: options?.parentTimelineId,
@@ -407,7 +510,10 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       updatedAt: now,
     }
 
-    const initialMessages = options?.messages?.length ? cloneDeep(options.messages) : [generateInitialMessage()]
+    const initialMessages = normalizeChatMessageActors(
+      options?.messages?.length ? cloneDeep(options.messages) : [generateInitialMessage()],
+      meta,
+    )
 
     sessionMetas.value[sessionId] = meta
     replaceSessionMessages(sessionId, initialMessages, { persist: false })
@@ -426,9 +532,15 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       characterIndex.activeSessionId = sessionId
     index.value.characters[characterId] = characterIndex
 
-    const record: ChatSessionRecord = { meta, messages: initialMessages }
+    const record = createPersistenceSnapshot<ChatSessionRecord>({ meta, messages: initialMessages })
     await enqueuePersist(() => chatSessionsRepo.saveSession(sessionId, record))
     await persistIndex()
+    if (conversationType === 'group') {
+      for (const participantUserId of participantUserIds) {
+        if (participantUserId !== currentUserId)
+          await enqueuePersist(() => chatSessionsRepo.linkSessionToUser(participantUserId, meta))
+      }
+    }
 
     if (options?.setActive !== false)
       activeSessionId.value = sessionId
@@ -437,9 +549,125 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     // `cloudChatId` (POST /api/v1/chats) before the user types into it.
     // Reentrant: `reconcileCloudSessions` itself guards on `cloudReconcileTask`
     // so concurrent triggers collapse to a single in-flight task.
-    if (currentUserId !== 'local')
+    if (isCloudUser() && conversationType === 'direct')
       void reconcileCloudSessions()
 
+    return sessionId
+  }
+
+  /** Creates a participant-aware Lumi group conversation. */
+  async function createGroupSession(participantUserIds: string[], options?: Omit<CreateChatSessionOptions, 'conversationType' | 'participantUserIds'>) {
+    return await createSession(LUMI_AIRI_CARD_ID, {
+      ...options,
+      conversationType: 'group',
+      participantUserIds,
+    })
+  }
+
+  /**
+   * Replaces the participant set of a host-owned Lumi group conversation.
+   *
+   * Use when:
+   * - The group creator adds or removes a known Lumi user
+   * - Removed users must lose their local session reference immediately
+   *
+   * Expects:
+   * - The current user owns the group and remains a participant
+   * - At least two active human participants remain
+   *
+   * Returns:
+   * - Persisted group metadata shared by every remaining participant index
+   */
+  async function updateGroupSession(sessionId: string, participantUserIds: string[], options?: { title?: string }) {
+    const meta = sessionMetas.value[sessionId] ?? (await chatSessionsRepo.getSession(sessionId))?.meta
+    if (!meta || meta.characterId !== LUMI_AIRI_CARD_ID || meta.conversationType !== 'group')
+      throw new Error('Requested Lumi group conversation was not found')
+
+    const currentUserId = getCurrentUserId()
+    if (meta.userId !== currentUserId)
+      throw new Error('Only the Lumi group creator can change participants')
+
+    const nextParticipantIds = [...new Set([meta.userId, ...participantUserIds])]
+    if (nextParticipantIds.length < 2)
+      throw new Error('A group conversation requires at least two human participants')
+    const activeUserIds = new Set(lumiIdentityStore.users.filter(user => user.status === 'active').map(user => user.id))
+    if (nextParticipantIds.some(userId => !activeUserIds.has(userId)))
+      throw new Error('Lumi group participants must be active users')
+
+    const stored = await chatSessionsRepo.getSession(sessionId)
+    if (!stored)
+      throw new Error('Requested Lumi group conversation was not found')
+    const updatedMeta: ChatSessionMeta = {
+      ...meta,
+      participantUserIds: nextParticipantIds,
+      title: options?.title?.trim() || meta.title,
+      updatedAt: Date.now(),
+    }
+    const previousParticipantIds = new Set(meta.participantUserIds)
+    const nextParticipantIdSet = new Set(nextParticipantIds)
+
+    sessionMetas.value[sessionId] = updatedMeta
+    const characterIndex = index.value?.characters[meta.characterId]
+    if (characterIndex)
+      characterIndex.sessions[sessionId] = updatedMeta
+    await enqueuePersist(() => chatSessionsRepo.saveSession(sessionId, createPersistenceSnapshot({
+      meta: updatedMeta,
+      messages: normalizeChatMessageActors(stored.messages, updatedMeta),
+    })))
+    await persistIndex()
+
+    for (const participantUserId of new Set([...previousParticipantIds, ...nextParticipantIdSet])) {
+      if (participantUserId === currentUserId)
+        continue
+      if (nextParticipantIdSet.has(participantUserId))
+        await enqueuePersist(() => chatSessionsRepo.linkSessionToUser(participantUserId, updatedMeta))
+      else
+        await enqueuePersist(() => chatSessionsRepo.unlinkSessionFromUser(participantUserId, meta))
+    }
+
+    return updatedMeta
+  }
+
+  /** Loads a host-owned conversation after verifying the explicit remote actor. */
+  async function ensureSessionForActor(actorId: string, requestedSessionId?: string) {
+    const actor = lumiIdentityStore.users.find(user => user.id === actorId && user.status === 'active')
+    if (!actor)
+      throw new Error('Remote Lumi actor is unavailable')
+
+    const sessionId = requestedSessionId?.trim() || getLumiMainTimelineSessionId(actorId)
+    let record = await chatSessionsRepo.getSession(sessionId)
+    if (!record) {
+      if (requestedSessionId)
+        throw new Error('Requested Lumi conversation was not found on this host')
+
+      const now = Date.now()
+      const meta: ChatSessionMeta = {
+        sessionId,
+        userId: actorId,
+        characterId: LUMI_AIRI_CARD_ID,
+        title: 'Lumi Main Timeline',
+        timelineType: 'main',
+        conversationType: 'direct',
+        participantUserIds: [actorId],
+        createdAt: now,
+        updatedAt: now,
+      }
+      record = {
+        meta,
+        messages: normalizeChatMessageActors([generateInitialMessage()], meta),
+      }
+      await enqueuePersist(() => chatSessionsRepo.saveSession(sessionId, createPersistenceSnapshot(record!)))
+      await enqueuePersist(() => chatSessionsRepo.linkSessionToUser(actorId, meta))
+    }
+
+    const meta = normalizeChatSessionMeta(record.meta)
+    if (meta.characterId !== LUMI_AIRI_CARD_ID || !meta.participantUserIds.includes(actorId))
+      throw new Error('Remote Lumi actor is not a participant in the requested conversation')
+
+    sessionMetas.value[sessionId] = meta
+    replaceSessionMessages(sessionId, normalizeChatMessageActors(record.messages, meta), { persist: false })
+    loadedSessions.add(sessionId)
+    ensureGeneration(sessionId)
     return sessionId
   }
 
@@ -479,7 +707,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     const characterId = meta.characterId
     const cloudChatId = meta.cloudChatId
     const currentUserId = getCurrentUserId()
-    const isCloudUser = currentUserId !== 'local'
+    const canSyncToCloud = isCloudUser()
 
     // ROOT CAUSE:
     //
@@ -509,16 +737,17 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       }
     }
 
-    await enqueuePersist(() => chatSessionsRepo.deleteSession(sessionId))
+    if (meta.conversationType !== 'group')
+      await enqueuePersist(() => chatSessionsRepo.deleteSession(sessionId))
     // Drop any pending outbox sends for this session — pushing messages
     // to a deleted chat is wasted work and may surface as a server-side
     // 404/410 next time we drain.
-    if (isCloudUser)
+    if (canSyncToCloud)
       await enqueuePersist(() => chatSessionsRepo.dropOutboxForSession(currentUserId, sessionId))
     await persistIndex()
     await refreshOutboxPendingCount()
 
-    if (cloudChatId && isCloudUser) {
+    if (cloudChatId && canSyncToCloud) {
       // Tombstone first: even if the cloud DELETE never reaches the server
       // (offline, transient 5xx), the next reconcile will see the cloudChatId
       // here and skip the adopt branch — preventing the ghost-session bug
@@ -576,6 +805,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
         userId: currentUserId,
         characterId,
         timelineType: 'main',
+        conversationType: 'direct',
+        participantUserIds: [currentUserId],
       }
       sessionMetas.value[mainSessionId] = nextMeta
       characterIndex.sessions[mainSessionId] = nextMeta
@@ -609,6 +840,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       characterId,
       title: 'Lumi Main Timeline',
       timelineType: 'main',
+      conversationType: 'direct',
+      participantUserIds: [currentUserId],
       createdAt: sourceMeta?.createdAt ?? now,
       updatedAt: now,
     }
@@ -633,10 +866,10 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     characterIndex.activeSessionId = mainSessionId
     index.value.characters[characterId] = characterIndex
 
-    await enqueuePersist(() => chatSessionsRepo.saveSession(mainSessionId, {
-      meta: cloneDeep(mainMeta),
-      messages: cloneDeep(initialMessages),
-    }))
+    await enqueuePersist(() => chatSessionsRepo.saveSession(mainSessionId, createPersistenceSnapshot({
+      meta: mainMeta,
+      messages: initialMessages,
+    })))
     await persistIndex()
     activeSessionId.value = mainSessionId
 
@@ -730,7 +963,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     if (!merged.dirty)
       return
 
-    sessionMessages.value[sessionId] = merged.messages
+    replaceSessionMessages(sessionId, merged.messages, { persist: false })
     sessionMetas.value[sessionId] = { ...meta, cloudMaxSeq: merged.maxSeq }
     void persistSession(sessionId)
   }
@@ -788,7 +1021,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
 
     cloudReconcileTask = (async () => {
       const currentUserId = getCurrentUserId()
-      if (currentUserId === 'local') {
+      if (!isCloudUser()) {
         console.info('[chat-sync] reconcile skipped: anonymous user')
         return
       }
@@ -891,6 +1124,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
           sessionId: remote.id,
           userId: currentUserId,
           characterId: 'default',
+          conversationType: 'direct',
+          participantUserIds: [currentUserId],
           title: remote.title ?? undefined,
           createdAt: new Date(remote.createdAt).getTime() || now,
           updatedAt: new Date(remote.updatedAt).getTime() || now,
@@ -914,10 +1149,10 @@ export const useChatSessionStore = defineStore('chat-session', () => {
         // saveSession is about to read, and the IDB write would be
         // last-writer-wins on stale state.
         const adoptedMessagesSnapshot = snapshotMessages(sessionMessages.value[remote.id])
-        await enqueuePersist(() => chatSessionsRepo.saveSession(remote.id, {
+        await enqueuePersist(() => chatSessionsRepo.saveSession(remote.id, createPersistenceSnapshot({
           meta: adoptedMeta,
           messages: adoptedMessagesSnapshot,
-        }))
+        })))
       }
       if (isStaleEpoch())
         return
@@ -965,7 +1200,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
    * from the auth `watch`.
    */
   function ensureCloudWsClient() {
-    if (getCurrentUserId() === 'local') {
+    if (!isCloudUser()) {
       console.info('[chat-sync] WS skipped: anonymous user')
       return
     }
@@ -1048,12 +1283,33 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   }
 
   /**
+   * Clears the previous identity's chat state and fully hydrates the active user.
+   *
+   * Use when:
+   * - The desktop identity boundary changes
+   * - A device archive temporarily scopes work to another user
+   *
+   * Expects:
+   * - The identity store already exposes the destination user
+   *
+   * Returns:
+   * - After the destination user's active session is ready in memory
+   */
+  async function reloadForActiveUser() {
+    if (onlineProjectionActive.value)
+      return
+    teardownCloudWsClient()
+    clearInMemoryState()
+    await ensureActiveSessionForCharacter()
+  }
+
+  /**
    * Refresh the reactive `outboxPendingCount` from IDB. Called after every
    * enqueue / dequeue / drain so UI banners stay in sync with reality.
    */
   async function refreshOutboxPendingCount() {
     const userId = getCurrentUserId()
-    if (userId === 'local') {
+    if (!isCloudUser()) {
       outboxPendingCount.value = 0
       return
     }
@@ -1089,7 +1345,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
    */
   async function pushMessageToCloud(sessionId: string, message: { id: string, role: CloudSyncableRole, content: string }) {
     const userId = getCurrentUserId()
-    if (userId === 'local')
+    if (!isCloudUser() || sessionMetas.value[sessionId]?.conversationType === 'group')
       return
 
     const entry: ChatSendOutboxEntry = {
@@ -1150,7 +1406,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       return outboxDrainTask
     outboxDrainTask = (async () => {
       const userId = getCurrentUserId()
-      if (userId === 'local')
+      if (!isCloudUser())
         return
       if (!wsClient || wsClient.status() !== 'open')
         return
@@ -1224,7 +1480,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
    */
   async function drainTombstones(): Promise<void> {
     const userId = getCurrentUserId()
-    if (userId === 'local')
+    if (!isCloudUser())
       return
 
     const tombstones = await chatSessionsRepo.getTombstones(userId)
@@ -1333,6 +1589,9 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   function setActiveSession(sessionId: string) {
     activeSessionId.value = sessionId
 
+    if (onlineProjectionActive.value)
+      return
+
     const characterId = getCurrentCharacterId()
     const characterIndex = index.value?.characters[characterId]
     if (characterIndex) {
@@ -1355,8 +1614,15 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     index?: ChatSessionsIndex | null
   }) {
     activeSessionId.value = snapshot.activeSessionId
-    sessionMessages.value = cloneDeep(snapshot.sessionMessages)
-    sessionMetas.value = cloneDeep(snapshot.sessionMetas)
+    sessionMetas.value = Object.fromEntries(
+      Object.entries(snapshot.sessionMetas).map(([sessionId, meta]) => [sessionId, normalizeChatSessionMeta(cloneDeep(meta))]),
+    )
+    sessionMessages.value = Object.fromEntries(
+      Object.entries(snapshot.sessionMessages).map(([sessionId, messages]) => {
+        const meta = sessionMetas.value[sessionId]
+        return [sessionId, meta ? normalizeChatMessageActors(cloneDeep(messages), meta) : cloneDeep(messages)]
+      }),
+    )
     if (snapshot.index !== undefined) {
       index.value = cloneDeep(snapshot.index)
     }
@@ -1413,8 +1679,10 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       }
     }
 
-    for (const sessionId of sessionIds)
-      await enqueuePersist(() => chatSessionsRepo.deleteSession(sessionId))
+    for (const sessionId of sessionIds) {
+      if (sessionMetas.value[sessionId]?.conversationType !== 'group')
+        await enqueuePersist(() => chatSessionsRepo.deleteSession(sessionId))
+    }
 
     sessionMessages.value = {}
     sessionMetas.value = {}
@@ -1433,6 +1701,73 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   function getSessionMessages(sessionId: string) {
     ensureSession(sessionId)
     return sessionMessages.value[sessionId] ?? []
+  }
+
+  /**
+   * Replaces local chat state with an authorized server projection without persistence.
+   *
+   * Use when:
+   * - An online Lumi account has authenticated and replayed its conversations
+   * - Server push events update the currently authorized history
+   *
+   * Expects:
+   * - The caller already filtered every conversation by server authorization
+   *
+   * Returns:
+   * - Online history remains memory-only until {@link clearOnlineProjection} restores local data
+   */
+  function applyOnlineProjection(snapshot: {
+    activeSessionId: string
+    sessionMessages: Record<string, ChatHistoryItem[]>
+    sessionMetas: Record<string, ChatSessionMeta>
+    index: ChatSessionsIndex
+  }) {
+    teardownCloudWsClient()
+    onlineProjectionActive.value = true
+    applyRemoteSnapshot(snapshot)
+  }
+
+  /** Clears online-only state and restores the current user's offline archive. */
+  async function clearOnlineProjection() {
+    if (!onlineProjectionActive.value)
+      return
+    onlineProjectionActive.value = false
+    await reloadForActiveUser()
+  }
+
+  function getInteractionContext(sessionId = activeSessionId.value) {
+    const meta = sessionMetas.value[sessionId]
+    if (!meta)
+      return undefined
+    const actorId = getCurrentUserId()
+    if (!meta.participantUserIds.includes(actorId))
+      throw new Error('The active user is not a participant in this conversation')
+    const actor = lumiIdentityStore.users.find(user => user.id === actorId)
+    return {
+      conversationId: meta.sessionId,
+      conversationType: meta.conversationType,
+      actorId,
+      actorDisplayName: actor?.displayName,
+      participantIds: [...meta.participantUserIds],
+    }
+  }
+
+  function getInteractionContextForActor(sessionId: string, actorId: string) {
+    const meta = sessionMetas.value[sessionId]
+    if (!meta)
+      throw new Error('Lumi conversation is not loaded')
+    if (!meta.participantUserIds.includes(actorId))
+      throw new Error('Lumi actor is not a participant in this conversation')
+    const actor = lumiIdentityStore.users.find(user => user.id === actorId && user.status === 'active')
+    if (!actor)
+      throw new Error('Lumi actor is unavailable')
+    return {
+      conversationId: meta.sessionId,
+      conversationType: meta.conversationType,
+      actorId,
+      actorDisplayName: actor.displayName,
+      participantIds: [...meta.participantUserIds],
+    }
   }
 
   function getSessionGeneration(sessionId: string) {
@@ -1455,6 +1790,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     const characterId = getCurrentCharacterId()
     await loadSession(options.fromSessionId)
     const parentMessages = getSessionMessages(options.fromSessionId)
+    const parentMeta = sessionMetas.value[options.fromSessionId]
     const forkIndex = options.atIndex ?? parentMessages.length
     const nextMessages = parentMessages.slice(0, forkIndex)
     return await createSession(characterId, {
@@ -1462,6 +1798,8 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       messages: nextMessages,
       timelineType: isLumiCharacter(characterId) ? 'branch' : undefined,
       parentTimelineId: isLumiCharacter(characterId) ? getLumiMainTimelineSessionId(getCurrentUserId()) : undefined,
+      conversationType: parentMeta?.conversationType,
+      participantUserIds: parentMeta?.participantUserIds,
     })
   }
 
@@ -1519,7 +1857,11 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       for (const sessionId of Object.keys(character.sessions)) {
         const stored = await chatSessionsRepo.getSession(sessionId)
         if (stored) {
-          sessions[sessionId] = stored
+          const meta = normalizeChatSessionMeta(stored.meta)
+          sessions[sessionId] = {
+            meta,
+            messages: normalizeChatMessageActors(stored.messages, meta),
+          }
           continue
         }
         const meta = sessionMetas.value[sessionId]
@@ -1540,29 +1882,33 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     if (payload.format !== 'chat-sessions-index:v1')
       return
 
-    index.value = cloneDeep(payload.index)
+    const scopedPayload = scopeImportedSessions(payload, getCurrentUserId())
+
+    index.value = cloneDeep(scopedPayload.index)
     sessionMessages.value = {}
     sessionMetas.value = {}
     sessionGenerations.value = {}
     loadedSessions.clear()
     loadingSessions.clear()
 
-    await enqueuePersist(() => chatSessionsRepo.saveIndex(cloneDeep(payload.index)))
+    await enqueuePersist(() => chatSessionsRepo.saveIndex(createPersistenceSnapshot(scopedPayload.index)))
 
-    for (const [sessionId, record] of Object.entries(payload.sessions)) {
-      sessionMetas.value[sessionId] = cloneDeep(record.meta)
-      sessionMessages.value[sessionId] = cloneDeep(record.messages)
+    for (const [sessionId, record] of Object.entries(scopedPayload.sessions)) {
+      const meta = normalizeChatSessionMeta(cloneDeep(record.meta))
+      const messages = normalizeChatMessageActors(cloneDeep(record.messages), meta)
+      sessionMetas.value[sessionId] = meta
+      sessionMessages.value[sessionId] = messages
       ensureGeneration(sessionId)
-      await enqueuePersist(() => chatSessionsRepo.saveSession(sessionId, {
-        meta: cloneDeep(record.meta),
-        messages: cloneDeep(record.messages),
-      }))
+      await enqueuePersist(() => chatSessionsRepo.saveSession(sessionId, createPersistenceSnapshot({
+        meta,
+        messages,
+      })))
     }
 
     await ensureActiveSessionForCharacter()
   }
 
-  watch([userId, activeCardId], () => {
+  watch([userId, activeCardId, lumiActiveUserId], () => {
     if (!ready.value)
       return
     void ensureActiveSessionForCharacter()
@@ -1578,7 +1924,7 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   watch(userId, (next) => {
     teardownCloudWsClient()
     clearInMemoryState()
-    if (next && next !== 'local') {
+    if (next && next !== 'local' && isCloudUser()) {
       ensureCloudWsClient()
     }
     // Rehydrate for the new user. We trigger here (instead of relying on the
@@ -1592,18 +1938,27 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     void ensureActiveSessionForCharacter()
   })
 
+  watch(lumiActiveUserId, (next, previous) => {
+    if (!lumiIdentityReady.value || lumiIdentityStore.switching || !next || next === previous || !isLumiCharacter(getCurrentCharacterId()))
+      return
+    void reloadForActiveUser()
+  })
+
   return {
     ready,
     isReady,
     initialize,
 
     activeSessionId,
+    onlineProjectionActive,
     messages,
     visibleMessages,
     visibleMessageStartIndex,
 
     setActiveSession,
     applyRemoteSnapshot,
+    applyOnlineProjection,
+    clearOnlineProjection,
     getSnapshot,
     cleanupMessages,
     getAllSessions,
@@ -1626,7 +1981,13 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     completeBranchAndSyncToMain,
     exportSessions,
     importSessions,
+    reloadForActiveUser,
     createSession,
+    createGroupSession,
+    updateGroupSession,
+    ensureSessionForActor,
+    getInteractionContext,
+    getInteractionContextForActor,
     loadSession,
     deleteSession,
 

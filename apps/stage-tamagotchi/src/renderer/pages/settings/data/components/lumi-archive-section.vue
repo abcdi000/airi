@@ -1,21 +1,55 @@
 <script setup lang="ts">
 import type { DataSettingsStatusEmits } from '@proj-airi/stage-pages/pages/settings/data/status'
 
+import { errorMessageFrom } from '@moeru/std'
 import { createDataSettingsStatusHelpers } from '@proj-airi/stage-pages/pages/settings/data/status'
 import { useDataMaintenance } from '@proj-airi/stage-ui/composables/use-data-maintenance'
 import { Button } from '@proj-airi/ui'
 import { shallowRef, useTemplateRef } from 'vue'
 
+import { useTamagotchiPluginToolsStore } from '../../../../stores/plugin-tools'
+
 const emit = defineEmits<DataSettingsStatusEmits>()
 const importFileInput = useTemplateRef<HTMLInputElement>('importFileInput')
 const importing = shallowRef(false)
 const exporting = shallowRef(false)
+const exportingMigration = shallowRef(false)
+const migrationProgress = shallowRef('')
 const importError = shallowRef('')
-const { exportLumiDataArchive, importLumiDataArchive } = useDataMaintenance()
+const { exportLumiDataArchive, exportLumiServerMigrationPackage, importLumiDataArchive } = useDataMaintenance()
+const pluginTools = useTamagotchiPluginToolsStore()
 const { emitStatus, handleActionError } = createDataSettingsStatusHelpers(emit)
 
 function triggerImportPicker() {
   importFileInput.value?.click()
+}
+
+async function triggerMigrationExport() {
+  exportingMigration.value = true
+  migrationProgress.value = '正在读取 Lumi 日记...'
+  try {
+    const diary = await pluginTools.invokeTool({ ownerPluginId: 'lumi-diary', name: 'lumi_diary_export_all', input: {} })
+    if (!diary || typeof diary !== 'object' || !('entries' in diary) || !Array.isArray(diary.entries))
+      throw new Error('Lumi 日记插件返回了无效的完整导出结果。')
+    migrationProgress.value = `已读取 ${diary.entries.length} 篇日记，正在汇总 Doggy 与 Moussy 的聊天、记忆和印象...`
+    const blob = await exportLumiServerMigrationPackage(diary.entries)
+    migrationProgress.value = '数据汇总完成，正在生成带校验和的迁移文件...'
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `lumi-client-migration-${new Date().toISOString()}.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
+    emitStatus(`Lumi Server 迁移包已生成，包含 ${diary.entries.length} 篇日记。请在 Server Manager 中暂存并核对后导入。`)
+    migrationProgress.value = `迁移包已生成，包含 ${diary.entries.length} 篇日记。`
+  }
+  catch (error) {
+    migrationProgress.value = `迁移包生成失败：${errorMessageFrom(error) ?? '未知错误'}`
+    handleActionError(error)
+  }
+  finally {
+    exportingMigration.value = false
+  }
 }
 
 async function triggerExport() {
@@ -93,6 +127,13 @@ async function handleImport(event: Event) {
           @click="triggerExport"
         />
         <Button
+          variant="secondary"
+          icon="i-solar:server-square-cloud-line-duotone"
+          label="生成服务器迁移包"
+          :loading="exportingMigration"
+          @click="triggerMigrationExport"
+        />
+        <Button
           variant="primary"
           icon="i-solar:upload-minimalistic-line-duotone"
           label="导入完整归档"
@@ -103,6 +144,9 @@ async function handleImport(event: Event) {
     </div>
 
     <input ref="importFileInput" type="file" accept="application/json" :class="['hidden']" @change="handleImport">
+    <p v-if="migrationProgress" :class="['mt-3 text-sm text-emerald-800 dark:text-emerald-200']">
+      {{ migrationProgress }}
+    </p>
     <p v-if="importError" :class="['mt-3 text-sm text-red-500']">
       {{ importError }}
     </p>

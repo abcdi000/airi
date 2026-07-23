@@ -67,7 +67,6 @@ async function createClient(): Promise<Client> {
       COMPUTER_USE_APPROVAL_MODE: 'never',
       COMPUTER_USE_SESSION_TAG: 'e2e-terminal-pty',
       COMPUTER_USE_ALLOWED_BOUNDS: '0,0,1920,1080',
-      COMPUTER_USE_OPENABLE_APPS: 'Finder,Terminal',
     },
     stderr: 'pipe',
   })

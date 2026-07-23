@@ -15,6 +15,8 @@ import { ViewControlSlider, WidgetStage } from '@proj-airi/stage-ui/components/s
 import { useAudioRecorder } from '@proj-airi/stage-ui/composables/audio/audio-recorder'
 import { useVAD } from '@proj-airi/stage-ui/stores/ai/models/vad'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
+import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
+import { useLumiOnlineStore } from '@proj-airi/stage-ui/stores/lumi-online'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useHearingSpeechInputPipeline } from '@proj-airi/stage-ui/stores/modules/hearing'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
@@ -54,8 +56,10 @@ const providersStore = useProvidersStore()
 const consciousnessStore = useConsciousnessStore()
 const { activeProvider: activeChatProvider, activeModel: activeChatModel } = storeToRefs(consciousnessStore)
 const chatStore = useChatOrchestratorStore()
+const chatSession = useChatSessionStore()
+const lumiOnline = useLumiOnlineStore()
 
-const shouldUseStreamInput = computed(() => supportsStreamInput.value && !!stream.value)
+const shouldUseStreamInput = computed(() => lumiOnline.runtimeMode !== 'online-client' && supportsStreamInput.value && !!stream.value)
 
 const {
   init: initVAD,
@@ -78,6 +82,12 @@ async function startAudioInteraction() {
 
     // Hook once
     stopOnStopRecord = onStopRecord(async (recording) => {
+      if (!recording)
+        return
+      if (lumiOnline.runtimeMode === 'online-client') {
+        await lumiOnline.sendVoice(chatSession.activeSessionId, recording)
+        return
+      }
       const text = await transcribeForRecording(recording)
       if (!text || !text.trim())
         return

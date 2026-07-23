@@ -752,31 +752,15 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
     const messageCountBeforeSend = chatSession.getSessionMessages(targetSessionId).length
     const isLumiChat = isLumiChatActive()
     const isLumiVisibleChat = isLumiChat && !payload.hiddenUserMessage
+    const screenObservationToolHint = isLumiVisibleChat && shouldBridgeLumiScreenObservation(payload.text)
+      ? 'The user appears to be asking about visible desktop content. Use lumi_list_observation_sources first, choose the relevant source yourself, and then call lumi_observe_screen with that exact sourceId.'
+      : ''
     const lumiReturnContext = consumeLumiProactiveReturnContext(
       isLumiVisibleChat,
     )
-    const shouldUseScreenBridge = isLumiChat
-      && !payload.hiddenUserMessage
-      && !useTextOnlyImageBridge
-      && shouldBridgeLumiScreenObservation(payload.text)
-    const screenObservationContext = shouldUseScreenBridge
-      ? await (async () => {
-          const { useLumiProactiveVisionStore } = await import('./lumi-proactive-vision')
-          const proactiveVisionStore = useLumiProactiveVisionStore()
-          const result = await proactiveVisionStore.observeScreenForChatTool(payload.text)
-          return [
-            '[Lumi screen observation requested by user]',
-            'The user explicitly asked Lumi to look at the current screen/window/page.',
-            'The observation below was produced by Lumi through her own vision module before this reply.',
-            'Use it as current visual context. Do not say Lumi did not look unless the result status is error.',
-            result,
-            '[/Lumi screen observation requested by user]',
-          ].join('\n')
-        })()
-      : ''
     const providerUserContext = [
       visionResult?.contextText,
-      screenObservationContext,
+      screenObservationToolHint,
       isLumiVisibleChat ? buildLumiResponseAutonomyContext() : '',
       lumiReturnContext,
     ].filter(Boolean).join('\n\n')

@@ -48,7 +48,33 @@ export interface ContextMessage extends ContextUpdate<Record<string, unknown>, u
   createdAt: number
 }
 
-export type ChatHistoryItem = (ChatMessage | ErrorMessage) & { context?: ContextMessage } & { createdAt?: number, id?: string }
+/** Identifies the speaker that authored one persisted chat history item. */
+export interface ChatActorMetadata {
+  /** Stable actor ID. Human actors use Lumi's internal user ID; the assistant uses its persona ID. */
+  actorId?: string
+  /** Display label captured for provider projection and historical rendering. */
+  actorDisplayName?: string
+}
+
+/** Immutable interaction identity passed through one conversation turn. */
+export interface ChatInteractionContext {
+  /** Stable conversation ID. */
+  conversationId: string
+  /** Direct conversations have one human participant; group conversations have multiple. */
+  conversationType: 'direct' | 'group'
+  /** Actor sending the current user turn. */
+  actorId: string
+  /** Human-readable actor label used in group prompt projection. */
+  actorDisplayName?: string
+  /** Complete human participant audience for this conversation. */
+  participantIds: string[]
+  /** Authenticated remote tool scopes. Undefined means a trusted local turn; an empty list denies every tool. */
+  toolScopes?: string[]
+  /** Authenticated remote device ID. Undefined for trusted local turns. */
+  remoteDeviceId?: string
+}
+
+export type ChatHistoryItem = (ChatMessage | ErrorMessage) & { context?: ContextMessage } & ChatActorMetadata & { createdAt?: number, id?: string }
 
 export interface ChatStreamEventContext {
   message: ChatHistoryItem
@@ -68,4 +94,4 @@ export type ChatStreamEvent
     | { type: 'assistant-end', message: string, sessionId: string, context: ChatStreamEventContext }
     | { type: 'assistant-message', message: ChatAssistantMessage, sessionId: string, messageText: string, context: ChatStreamEventContext }
 
-export type StreamingAssistantMessage = ChatAssistantMessage & { context?: ContextMessage } & { createdAt?: number, id?: string }
+export type StreamingAssistantMessage = ChatAssistantMessage & { context?: ContextMessage } & ChatActorMetadata & { createdAt?: number, id?: string }

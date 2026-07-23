@@ -5,12 +5,15 @@ import { isStageTamagotchi } from '@proj-airi/stage-shared'
 import { useLive2dParams, useSettingsLive2d } from '@proj-airi/stage-ui-live2d'
 import { useModelStore } from '@proj-airi/stage-ui-three'
 
+import { lumiRoomLedgerRepo } from '../database/repos/lumi-room-ledger.repo'
 import { useBackgroundStore } from '../stores/background'
 import { useChatOrchestratorStore } from '../stores/chat'
 import { useChatSessionStore } from '../stores/chat/session-store'
 import { useDisplayModelsStore } from '../stores/display-models'
+import { useLumiChannelDevicesStore } from '../stores/lumi-channel-devices'
 import { useLumiCurrentStateStore } from '../stores/lumi-current-state'
 import { useLumiEmotionStore } from '../stores/lumi-emotion'
+import { useLumiIdentityStore } from '../stores/lumi-identity'
 import { useLumiMemoryStore } from '../stores/lumi-memory'
 import { useLumiUserProfileStore } from '../stores/lumi-user-profile'
 import { useMcpStore } from '../stores/mcp'
@@ -33,6 +36,7 @@ import {
   restoreLumiLocalStorageSnapshot,
   serializeBackgroundEntries,
 } from './data-maintenance/lumi-archive'
+import { createLumiClientMigrationPackage } from './data-maintenance/lumi-migration'
 
 export function useDataMaintenance() {
   const chatStore = useChatSessionStore()
@@ -57,7 +61,9 @@ export function useDataMaintenance() {
   const lumiMemoryStore = useLumiMemoryStore()
   const lumiUserProfileStore = useLumiUserProfileStore()
   const lumiCurrentStateStore = useLumiCurrentStateStore()
+  const lumiChannelDevicesStore = useLumiChannelDevicesStore()
   const lumiEmotionStore = useLumiEmotionStore()
+  const lumiIdentityStore = useLumiIdentityStore()
   const backgroundStore = useBackgroundStore()
 
   async function deleteAllModels() {
@@ -93,22 +99,49 @@ export function useDataMaintenance() {
   }
 
   async function exportLumiDataArchive() {
-    const archive: LumiDataArchive = {
-      format: LUMI_DATA_ARCHIVE_FORMAT,
-      version: 1,
-      source: 'lumi',
-      exportedAt: new Date().toISOString(),
-      sections: {
+    const users: LumiDataArchive['sections']['users'] = {}
+    for (const user of lumiIdentityStore.users) {
+      users[user.id] = await lumiIdentityStore.withUserScope(user.id, async () => ({
         chatSessions: await chatStore.exportSessions(),
         lumiMemory: await lumiMemoryStore.exportSnapshot(),
         lumiUserProfile: lumiUserProfileStore.exportSnapshot(),
         lumiCurrentState: lumiCurrentStateStore.exportSnapshot(),
         lumiEmotion: lumiEmotionStore.exportSnapshot(),
+      }))
+    }
+    const roomLedgers: LumiDataArchive['sections']['roomLedgers'] = {}
+    for (const conversationId of await lumiRoomLedgerRepo.listConversationIds()) {
+      const ledger = await lumiRoomLedgerRepo.get(conversationId)
+      if (ledger.events.length > 0 || ledger.receipts.length > 0)
+        roomLedgers[conversationId] = ledger
+    }
+    const archive: LumiDataArchive = {
+      format: LUMI_DATA_ARCHIVE_FORMAT,
+      version: 6,
+      source: 'lumi',
+      exportedAt: new Date().toISOString(),
+      sections: {
+        identity: {
+          users: JSON.parse(JSON.stringify(lumiIdentityStore.users)),
+          externalIdentities: JSON.parse(JSON.stringify(lumiIdentityStore.externalIdentities)),
+          activeUserId: lumiIdentityStore.activeUserId,
+          migrationVersion: lumiIdentityStore.migrationVersion,
+        },
+        users,
+        roomLedgers,
+        channelDevices: await lumiChannelDevicesStore.exportArchive(),
         backgroundEntries: await serializeBackgroundEntries(await backgroundStore.exportUserEntries()),
         localStorage: exportLumiLocalStorageSnapshot(),
       },
     }
     return new Blob([JSON.stringify(archive, null, 2)], { type: 'application/json' })
+  }
+
+  async function exportLumiServerMigrationPackage(diaryEntries: unknown[] = []) {
+    const archiveBlob = await exportLumiDataArchive()
+    const archive = JSON.parse(await archiveBlob.text()) as Record<string, unknown>
+    const migration = await createLumiClientMigrationPackage(archive, diaryEntries)
+    return new Blob([JSON.stringify(migration, null, 2)], { type: 'application/json' })
   }
 
   function isChatSessionsPayload(payload: unknown): payload is ChatSessionsExport {
@@ -131,11 +164,40 @@ export function useDataMaintenance() {
     if (!isLumiDataArchivePayload(payload))
       throw new Error('Invalid Lumi data archive format')
 
-    await chatStore.importSessions(payload.sections.chatSessions)
-    await lumiMemoryStore.importSnapshot(payload.sections.lumiMemory)
-    await lumiUserProfileStore.importSnapshot(payload.sections.lumiUserProfile)
-    await lumiCurrentStateStore.importSnapshot(payload.sections.lumiCurrentState)
-    lumiEmotionStore.importSnapshot(payload.sections.lumiEmotion)
+    await lumiRoomLedgerRepo.clearAll()
+    if (payload.version === 1) {
+      await chatStore.importSessions(payload.sections.chatSessions)
+      await lumiMemoryStore.importSnapshot(payload.sections.lumiMemory)
+      await lumiUserProfileStore.importSnapshot(payload.sections.lumiUserProfile)
+      await lumiCurrentStateStore.importSnapshot(payload.sections.lumiCurrentState)
+      lumiEmotionStore.importSnapshot(payload.sections.lumiEmotion)
+    }
+    else {
+      await lumiIdentityStore.importSnapshot(payload.sections.identity)
+      for (const [userId, sections] of Object.entries(payload.sections.users)) {
+        await lumiIdentityStore.withUserScope(userId, async () => {
+          await chatStore.importSessions(sections.chatSessions)
+          await lumiMemoryStore.importSnapshot(sections.lumiMemory)
+          await lumiUserProfileStore.importSnapshot(sections.lumiUserProfile)
+          await lumiCurrentStateStore.importSnapshot(sections.lumiCurrentState)
+          lumiEmotionStore.importSnapshot(sections.lumiEmotion)
+        })
+      }
+      if (lumiIdentityStore.activeUserId !== payload.sections.identity.activeUserId)
+        await lumiIdentityStore.selectUser(payload.sections.identity.activeUserId)
+      if (payload.version === 3 || payload.version === 4 || payload.version === 5 || payload.version === 6) {
+        for (const ledger of Object.values(payload.sections.roomLedgers ?? {}))
+          await lumiRoomLedgerRepo.replace(ledger)
+      }
+      if (payload.version === 6 || payload.version === 5)
+        await lumiChannelDevicesStore.importArchive(payload.sections.channelDevices)
+      if (payload.version === 4) {
+        const legacyDevices = payload.sections.channelDevices
+        await lumiChannelDevicesStore.importArchive(legacyDevices
+          ? { ...legacyDevices, version: 2, audit: [] }
+          : null)
+      }
+    }
     await backgroundStore.importUserEntries(await deserializeBackgroundEntries(payload.sections.backgroundEntries))
     restoreLumiLocalStorageSnapshot(payload.sections.localStorage)
   }
@@ -156,6 +218,8 @@ export function useDataMaintenance() {
     await resetProvidersSettings()
     resetModulesSettings()
     deleteAllChatSessions()
+    await lumiRoomLedgerRepo.clearAll()
+    await lumiChannelDevicesStore.clear()
     await resetSettingsState()
   }
 
@@ -175,6 +239,7 @@ export function useDataMaintenance() {
     exportChatSessions,
     importChatSessions,
     exportLumiDataArchive,
+    exportLumiServerMigrationPackage,
     importLumiDataArchive,
     deleteAllData,
     resetDesktopApplicationState,

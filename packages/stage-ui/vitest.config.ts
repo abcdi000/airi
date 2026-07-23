@@ -23,7 +23,7 @@ function BuildInfoTestPlugin() {
       }
 
       if (id === '\0~build/time') {
-        return 'export default "2026-05-07T00:00:00.000Z"'
+        return 'export default new Date("2026-05-07T00:00:00.000Z")'
       }
     },
   }

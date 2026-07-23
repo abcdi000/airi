@@ -1,4 +1,5 @@
 import type {
+  ConnectionAuthIdentity,
   DeliveryConfig,
   MetadataEventSource,
   WebSocketBaseEvent,
@@ -62,6 +63,38 @@ import {
 export {
   heartbeatFrameFrom,
   resolveEventDelivery,
+}
+export type { ConnectionAuthIdentity, WebSocketEvent } from '@proj-airi/server-shared/types'
+
+/** Structured result returned by host event authorization policy. */
+export interface EventAuthorizationDecision {
+  /** Whether the event may enter routing and consumer delivery. */
+  authorized: boolean
+  /** Human-readable reason returned to the sending peer when denied. */
+  reason?: string
+  /** Stable machine-readable reason returned to protocol-aware clients. */
+  code?: string
+  /** Delay suggested before retrying a temporary denial. */
+  retryAfterMs?: number
+}
+
+export type EventAuthorizationResult = boolean | EventAuthorizationDecision
+
+/**
+ * Normalizes boolean and structured host authorization results.
+ *
+ * Use when:
+ * - A server runtime accepts legacy boolean authorization callbacks
+ * - A host policy needs to return a denial reason or retry delay
+ *
+ * Expects:
+ * - Boolean `true` means authorized and boolean `false` means denied
+ *
+ * Returns:
+ * - A complete structured decision suitable for protocol responses
+ */
+export function resolveEventAuthorizationDecision(result: EventAuthorizationResult): EventAuthorizationDecision {
+  return typeof result === 'boolean' ? { authorized: result } : result
 }
 
 /**
@@ -195,7 +228,35 @@ function send(peer: Peer, event: WebSocketBaseEvent<string, unknown> | string) {
 export interface AppOptions {
   instanceId?: string
   auth?: {
-    token: string
+    /** Legacy shared token accepted with unrestricted event access. */
+    token?: string
+    /** Resolves a non-shared credential to a server-owned connection identity. */
+    authenticate?: (token: string) => ConnectionAuthIdentity | undefined
+    /** Applies host policy before an authenticated event is routed. */
+    authorizeEvent?: (identity: ConnectionAuthIdentity, event: WebSocketEvent) => EventAuthorizationResult
+    /** Observes authentication outcomes without receiving the presented credential. */
+    onAuthenticationResult?: (result: {
+      authenticated: boolean
+      identity?: ConnectionAuthIdentity
+      peerId: string
+      remoteAddress?: string
+    }) => void
+    /** Observes host authorization decisions after identity authentication. */
+    onAuthorizationResult?: (result: {
+      identity: ConnectionAuthIdentity
+      eventType: string
+      decision: EventAuthorizationDecision
+      peerId: string
+      remoteAddress?: string
+    }) => void
+    /** Observes the end of an authenticated connection. */
+    onDisconnected?: (result: {
+      identity: ConnectionAuthIdentity
+      peerId: string
+      remoteAddress?: string
+      code?: number
+      reason?: string
+    }) => void
   }
   logger?: {
     app?: { level?: LogLevelString, format?: Format }
@@ -271,6 +332,7 @@ export function setupApp(options?: AppOptions): { app: H3, closeAllPeers: () => 
   // === Configuration & State Initialization ===
   const instanceId = options?.instanceId || optionOrEnv(undefined, 'SERVER_INSTANCE_ID', nanoid())
   const authToken = optionOrEnv(options?.auth?.token, 'AUTHENTICATION_TOKEN', '')
+  const requiresAuthentication = Boolean(authToken || options?.auth?.authenticate)
 
   const { appLogLevel, appLogFormat, websocketLogLevel, websocketLogFormat } = normalizeLoggerConfig(options)
 
@@ -512,7 +574,7 @@ export function setupApp(options?: AppOptions): { app: H3, closeAllPeers: () => 
   const websocketGateway = createGateway({
     handler: {
       open: (peer) => {
-        if (authToken) {
+        if (requiresAuthentication) {
           peers.set(peer.id, { peer, authenticated: false, name: '', lastHeartbeatAt: Date.now() })
         }
         else {
@@ -571,6 +633,45 @@ export function setupApp(options?: AppOptions): { app: H3, closeAllPeers: () => 
           }
         }
 
+        if (event.type !== 'transport:connection:heartbeat' && event.type !== 'module:authenticate') {
+          const p = peers.get(peer.id)
+          if (!p?.authenticated) {
+            logger.withFields({ peer: peer.id, peerName: p?.name, peerRemote: peer.remoteAddress, peerRequest: peer.request?.url }).debug('not authenticated')
+            send(peer, RESPONSES.notAuthenticated(event.metadata?.event.id))
+            return
+          }
+
+          if (p.authIdentity && options?.auth?.authorizeEvent) {
+            const authorization = resolveEventAuthorizationDecision(options.auth.authorizeEvent(p.authIdentity, event))
+            notifyAuthHook('authorization result', () => options.auth?.onAuthorizationResult?.({
+              identity: p.authIdentity!,
+              eventType: event.type,
+              decision: authorization,
+              peerId: peer.id,
+              remoteAddress: peer.remoteAddress,
+            }))
+            if (!authorization.authorized) {
+              logger.withFields({ peer: peer.id, peerName: p.name, eventType: event.type, authorizationCode: authorization.code }).warn('authenticated peer is not authorized for event')
+              send(peer, RESPONSES.error(
+                authorization.reason ?? 'This connection is not permitted to send that event.',
+                event.metadata?.event.id,
+                {
+                  code: authorization.code,
+                  retryAfterMs: authorization.retryAfterMs,
+                },
+              ))
+              return
+            }
+          }
+
+          // Authentication metadata is server-owned. Always overwrite any client-provided value
+          // before control-event handling and routing so consumers can trust the credential binding.
+          event.metadata = {
+            ...event.metadata,
+            auth: p.authIdentity,
+          }
+        }
+
         switch (event.type) {
           case 'transport:connection:heartbeat': {
             const p = peers.get(peer.id)
@@ -592,8 +693,17 @@ export function setupApp(options?: AppOptions): { app: H3, closeAllPeers: () => 
 
           case 'module:authenticate': {
             const clientToken = typeof event.data.token === 'string' ? event.data.token : ''
-            if (authToken && !timingSafeCompare(clientToken, authToken)) {
+            const sharedTokenAccepted = Boolean(authToken && timingSafeCompare(clientToken, authToken))
+            const authIdentity = sharedTokenAccepted
+              ? { subject: 'shared-token', scopes: ['*'] }
+              : options?.auth?.authenticate?.(clientToken)
+            if (requiresAuthentication && !authIdentity) {
               logger.withFields({ peer: peer.id, peerRemote: peer.remoteAddress, peerRequest: peer.request?.url }).log('authentication failed')
+              notifyAuthHook('authentication result', () => options?.auth?.onAuthenticationResult?.({
+                authenticated: false,
+                peerId: peer.id,
+                remoteAddress: peer.remoteAddress,
+              }))
               send(peer, RESPONSES.error(ServerErrorMessages.invalidToken, event.metadata?.event.id))
 
               return
@@ -603,7 +713,14 @@ export function setupApp(options?: AppOptions): { app: H3, closeAllPeers: () => 
             const p = peers.get(peer.id)
             if (p) {
               p.authenticated = true
+              p.authIdentity = authIdentity
             }
+            notifyAuthHook('authentication result', () => options?.auth?.onAuthenticationResult?.({
+              authenticated: true,
+              identity: authIdentity,
+              peerId: peer.id,
+              remoteAddress: peer.remoteAddress,
+            }))
 
             sendRegistrySync(peer, event.metadata?.event.id)
 
@@ -761,13 +878,7 @@ export function setupApp(options?: AppOptions): { app: H3, closeAllPeers: () => 
         }
 
         // default case
-        const p = peers.get(peer.id)
-        if (!p?.authenticated) {
-          logger.withFields({ peer: peer.id, peerName: p?.name, peerRemote: peer.remoteAddress, peerRequest: peer.request?.url }).debug('not authenticated')
-          send(peer, RESPONSES.notAuthenticated(event.metadata?.event.id))
-
-          return
-        }
+        const p = peers.get(peer.id)!
 
         const payload = stringifyEvent(event)
         const allowBypass = options?.routing?.allowBypass !== false
@@ -889,6 +1000,15 @@ export function setupApp(options?: AppOptions): { app: H3, closeAllPeers: () => 
         const likelySilentNetworkClose = closeCode === 1005
 
         if (p) {
+          if (p.authIdentity) {
+            notifyAuthHook('authenticated disconnect', () => options?.auth?.onDisconnected?.({
+              identity: p.authIdentity!,
+              peerId: peer.id,
+              remoteAddress: peer.remoteAddress,
+              code: closeCode,
+              reason: closeReason,
+            }))
+          }
           peers.delete(peer.id)
           unregisterModulePeer(p, 'connection closed')
         }
@@ -921,6 +1041,15 @@ export function setupApp(options?: AppOptions): { app: H3, closeAllPeers: () => 
       resetRoutingState(true)
     },
   })
+
+  function notifyAuthHook(label: string, callback: () => void) {
+    try {
+      callback()
+    }
+    catch (error) {
+      logger.withError(error).warn(`Failed to record ${label}`)
+    }
+  }
 
   app.get('/ws', defineWebSocketHandler(websocketGateway.handler))
 

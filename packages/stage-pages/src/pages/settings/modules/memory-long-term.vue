@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import type { LumiMemoryFragment, LumiMemoryStatus, LumiMemoryType } from '@proj-airi/stage-ui/stores/lumi-memory'
 
+import { useLumiIdentityStore } from '@proj-airi/stage-ui/stores/lumi-identity'
 import { useLumiMemoryStore } from '@proj-airi/stage-ui/stores/lumi-memory'
-import { Button } from '@proj-airi/ui'
+import { Button, DoubleCheckButton } from '@proj-airi/ui'
 import { storeToRefs } from 'pinia'
 import { computed, reactive, ref, watch } from 'vue'
+
+import MemoryPromotionReview from '../../../components/memoryPromotionReview.vue'
 
 const MEMORY_TYPES: LumiMemoryType[] = [
   'user_preference',
@@ -12,6 +15,7 @@ const MEMORY_TYPES: LumiMemoryType[] = [
   'relationship_event',
   'shared_event',
   'persona_preference',
+  'persona_fact',
   'conflict_event',
   'promise',
   'project_context',
@@ -28,6 +32,7 @@ const TYPE_LABELS: Record<LumiMemoryType | 'all', string> = {
   relationship_event: '关系事件',
   shared_event: '共同经历',
   persona_preference: '人格偏好',
+  persona_fact: 'Lumi 自我事实',
   conflict_event: '冲突事件',
   promise: '承诺',
   project_context: '项目上下文',
@@ -48,6 +53,7 @@ const EVENT_KIND_LABELS: Record<string, string> = {
   search: '检索',
   save: '保存',
   update: '更新',
+  promote: '晋升',
   forget: '遗忘',
   delete: '删除',
   reject_duplicate: '拒绝重复',
@@ -55,15 +61,15 @@ const EVENT_KIND_LABELS: Record<string, string> = {
 }
 
 const memoryStore = useLumiMemoryStore()
+const identityStore = useLumiIdentityStore()
 memoryStore.initialize()
 
 const {
   allMemories,
-  activeMemories,
-  candidateMemories,
+  inspectableMemories,
+  promotionCandidates,
   duplicateMemoryGroups,
   recentMemoryEvents,
-  statusCounts,
   persistenceDbPath,
   persistenceLastError,
   persistenceMode,
@@ -78,11 +84,12 @@ const {
   semanticIndexStatus,
   semanticSearchPoolSize,
 } = storeToRefs(memoryStore)
+const { activeUserId } = storeToRefs(identityStore)
 
 const query = ref('')
 const statusFilter = ref<LumiMemoryStatus | 'all'>('active')
 const typeFilter = ref<LumiMemoryType | 'all'>('all')
-const selectedId = ref(allMemories.value[0]?.id ?? '')
+const selectedId = ref(inspectableMemories.value[0]?.id ?? '')
 const savedFlash = ref(false)
 const draft = reactive({
   content: '',
@@ -95,11 +102,12 @@ const draft = reactive({
   relationshipRelevance: 0.3,
 })
 
-const selectedMemory = computed(() => allMemories.value.find(memory => memory.id === selectedId.value))
+const selectedMemory = computed(() => inspectableMemories.value.find(memory => memory.id === selectedId.value))
+const selectedMemoryOwnedByViewer = computed(() => selectedMemory.value?.userId === activeUserId.value)
 
 const filteredMemories = computed(() => {
   const lowered = query.value.trim().toLowerCase()
-  return allMemories.value
+  return inspectableMemories.value
     .filter(memory => statusFilter.value === 'all' || memory.status === statusFilter.value)
     .filter(memory => typeFilter.value === 'all' || memory.type === typeFilter.value)
     .filter((memory) => {
@@ -120,18 +128,33 @@ const recallPreview = computed(() => {
   if (!query.value.trim())
     return []
 
+  const inspectableIds = new Set(inspectableMemories.value.map(memory => memory.id))
   return memoryStore.retrieve({
     query: query.value,
     userId: 'local',
     personaId: 'lumi',
     limit: 6,
-  }).rankedMemories
+    conversationType: 'direct',
+  }).rankedMemories.filter(item => inspectableIds.has(item.memory.id))
+})
+
+const activeInspectableMemories = computed(() => inspectableMemories.value.filter(memory => memory.status === 'active'))
+const candidateInspectableMemories = computed(() => inspectableMemories.value.filter(memory => memory.status === 'candidate'))
+const inspectableStatusCounts = computed(() => {
+  const counts = new Map<LumiMemoryStatus, number>()
+  for (const memory of inspectableMemories.value)
+    counts.set(memory.status, (counts.get(memory.status) ?? 0) + 1)
+  return [...counts.entries()].map(([status, count]) => ({ status, count }))
+})
+const inspectableDuplicateGroups = computed(() => {
+  const inspectableIds = new Set(inspectableMemories.value.map(memory => memory.id))
+  return duplicateMemoryGroups.value.filter(group => group.memories.every(memory => inspectableIds.has(memory.id)))
 })
 
 const stats = computed(() => [
-  { label: '总数', value: allMemories.value.length },
-  { label: '活跃', value: activeMemories.value.length },
-  { label: '待审阅', value: candidateMemories.value.length },
+  { label: '可检查', value: inspectableMemories.value.length },
+  { label: '活跃', value: activeInspectableMemories.value.length },
+  { label: '待审阅', value: candidateInspectableMemories.value.length },
   { label: '当前显示', value: filteredMemories.value.length },
 ])
 
@@ -153,7 +176,7 @@ watch(selectedMemory, (memory) => {
 watch(filteredMemories, (memories) => {
   if (selectedId.value && memories.some(memory => memory.id === selectedId.value))
     return
-  selectedId.value = memories[0]?.id ?? allMemories.value[0]?.id ?? ''
+  selectedId.value = memories[0]?.id ?? inspectableMemories.value[0]?.id ?? ''
 }, { immediate: true })
 
 function loadDraft(memory: LumiMemoryFragment) {
@@ -199,12 +222,8 @@ function deleteSelectedMemory() {
   if (!memory)
     return
 
-  const confirmed = window.confirm(`确定永久删除这条记忆吗？\n\n${memory.content.slice(0, 160)}`)
-  if (!confirmed)
-    return
-
   memoryStore.deleteMemory(memory.id)
-  selectedId.value = filteredMemories.value[0]?.id ?? allMemories.value[0]?.id ?? ''
+  selectedId.value = filteredMemories.value[0]?.id ?? inspectableMemories.value[0]?.id ?? ''
 }
 
 function mergeDuplicateGroup(memoryIds: string[]) {
@@ -214,6 +233,14 @@ function mergeDuplicateGroup(memoryIds: string[]) {
 
   statusFilter.value = 'all'
   selectedId.value = merged.id
+}
+
+function promoteMemory(memoryId: string) {
+  memoryStore.promoteMemoryScope(memoryId)
+}
+
+function promoteAllMemories(memoryIds: string[]) {
+  memoryStore.promoteMemoryScopes(memoryIds)
 }
 
 function createNewMemory() {
@@ -300,7 +327,7 @@ function statusTone(status: LumiMemoryStatus) {
 function eventTone(kind: string) {
   if (kind === 'search')
     return 'text-sky-700 dark:text-sky-300'
-  if (kind === 'save')
+  if (kind === 'save' || kind === 'promote')
     return 'text-emerald-700 dark:text-emerald-300'
   if (kind === 'update' || kind === 'forget')
     return 'text-amber-700 dark:text-amber-300'
@@ -381,6 +408,13 @@ function eventTone(kind: string) {
       </div>
     </div>
 
+    <MemoryPromotionReview
+      v-if="promotionCandidates.length"
+      :candidates="promotionCandidates"
+      @promote="promoteMemory"
+      @promote-all="promoteAllMemories"
+    />
+
     <div :class="['grid grid-cols-1 gap-4 xl:grid-cols-[minmax(320px,0.9fr)_minmax(0,1.4fr)]']">
       <section :class="['min-h-0 rounded-lg bg-white/70 p-3 shadow-sm dark:bg-neutral-950/30']">
         <div :class="['mb-3 flex flex-wrap items-center gap-2']">
@@ -419,7 +453,7 @@ function eventTone(kind: string) {
 
         <div :class="['mb-3 flex flex-wrap gap-2']">
           <div
-            v-for="item in statusCounts"
+            v-for="item in inspectableStatusCounts"
             :key="item.status"
             :class="['rounded-md px-2 py-1 text-xs font-medium', statusTone(item.status)]"
           >
@@ -474,23 +508,53 @@ function eventTone(kind: string) {
                 更新于 {{ formatDate(selectedMemory.updatedAt) }}
               </div>
             </div>
-            <div :class="['flex flex-wrap gap-2']">
+            <div v-if="selectedMemoryOwnedByViewer" :class="['flex flex-wrap gap-2']">
               <Button variant="secondary" size="sm" icon="i-solar:check-circle-line-duotone" label="设为活跃" @click="setSelectedStatus('active')" />
               <Button variant="secondary" size="sm" icon="i-solar:archive-line-duotone" label="归档" @click="setSelectedStatus('archived')" />
               <Button variant="secondary" size="sm" icon="i-solar:close-circle-line-duotone" label="拒绝" @click="setSelectedStatus('rejected')" />
-              <Button variant="secondary" size="sm" icon="i-solar:trash-bin-trash-line-duotone" label="删除" @click="deleteSelectedMemory" />
+              <DoubleCheckButton variant="danger" size="sm" @confirm="deleteSelectedMemory">
+                删除
+                <template #confirm>
+                  确认删除
+                </template>
+                <template #cancel>
+                  取消
+                </template>
+              </DoubleCheckButton>
             </div>
           </div>
 
           <textarea
             v-model="draft.content"
+            :readonly="!selectedMemoryOwnedByViewer"
             :class="['min-h-32 w-full resize-y rounded-lg border border-neutral-200 bg-white p-3 text-sm leading-6 outline-none dark:border-neutral-800 dark:bg-neutral-950']"
           />
+
+          <div :class="['grid grid-cols-1 gap-2 rounded-lg bg-neutral-50 p-3 text-xs text-neutral-600 md:grid-cols-2 dark:bg-neutral-950/50 dark:text-neutral-300']">
+            <div>
+              <span :class="['text-neutral-400']">范围</span> {{ selectedMemory.scope }}
+            </div>
+            <div>
+              <span :class="['text-neutral-400']">来源会话</span> {{ selectedMemory.sourceConversationType }}
+            </div>
+            <div v-if="selectedMemoryOwnedByViewer && selectedMemory.sourceActorId">
+              <span :class="['text-neutral-400']">来源身份</span> {{ selectedMemory.sourceActorId }}
+            </div>
+            <div>
+              <span :class="['text-neutral-400']">可见性</span> {{ selectedMemory.visibility }}
+            </div>
+            <div :class="['md:col-span-2']">
+              <span :class="['text-neutral-400']">分类依据</span> {{ selectedMemory.classificationReason }}
+            </div>
+            <div :class="['md:col-span-2']">
+              <span :class="['text-neutral-400']">披露规则</span> {{ selectedMemory.disclosureReason }}
+            </div>
+          </div>
 
           <div :class="['grid grid-cols-1 gap-3 md:grid-cols-2']">
             <label :class="['flex flex-col gap-1 text-xs text-neutral-500 dark:text-neutral-400']">
               类型
-              <select v-model="draft.type" :class="['h-10 rounded-lg border border-neutral-200 bg-white px-3 text-sm text-neutral-900 outline-none dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-50']">
+              <select v-model="draft.type" :disabled="!selectedMemoryOwnedByViewer" :class="['h-10 rounded-lg border border-neutral-200 bg-white px-3 text-sm text-neutral-900 outline-none disabled:opacity-60 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-50']">
                 <option v-for="type in MEMORY_TYPES" :key="type" :value="type">
                   {{ typeLabel(type) }}
                 </option>
@@ -499,7 +563,7 @@ function eventTone(kind: string) {
 
             <label :class="['flex flex-col gap-1 text-xs text-neutral-500 dark:text-neutral-400']">
               状态
-              <select v-model="draft.status" :class="['h-10 rounded-lg border border-neutral-200 bg-white px-3 text-sm text-neutral-900 outline-none dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-50']">
+              <select v-model="draft.status" :disabled="!selectedMemoryOwnedByViewer" :class="['h-10 rounded-lg border border-neutral-200 bg-white px-3 text-sm text-neutral-900 outline-none disabled:opacity-60 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-50']">
                 <option v-for="status in STATUS_FILTERS.filter(item => item !== 'all')" :key="status" :value="status">
                   {{ statusLabel(status) }}
                 </option>
@@ -511,6 +575,7 @@ function eventTone(kind: string) {
             标签
             <input
               v-model="draft.tagsText"
+              :readonly="!selectedMemoryOwnedByViewer"
               :class="['h-10 rounded-lg border border-neutral-200 bg-white px-3 text-sm text-neutral-900 outline-none dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-50']"
             >
           </label>
@@ -518,23 +583,23 @@ function eventTone(kind: string) {
           <div :class="['grid grid-cols-1 gap-3 md:grid-cols-2']">
             <label :class="['flex flex-col gap-2 text-xs text-neutral-500 dark:text-neutral-400']">
               置信度 {{ draft.confidence.toFixed(2) }}
-              <input v-model.number="draft.confidence" type="range" min="0" max="1" step="0.01">
+              <input v-model.number="draft.confidence" :disabled="!selectedMemoryOwnedByViewer" type="range" min="0" max="1" step="0.01">
             </label>
             <label :class="['flex flex-col gap-2 text-xs text-neutral-500 dark:text-neutral-400']">
               重要性 {{ draft.importance.toFixed(2) }}
-              <input v-model.number="draft.importance" type="range" min="0" max="1" step="0.01">
+              <input v-model.number="draft.importance" :disabled="!selectedMemoryOwnedByViewer" type="range" min="0" max="1" step="0.01">
             </label>
             <label :class="['flex flex-col gap-2 text-xs text-neutral-500 dark:text-neutral-400']">
               情绪强度 {{ draft.emotionalIntensity.toFixed(2) }}
-              <input v-model.number="draft.emotionalIntensity" type="range" min="0" max="1" step="0.01">
+              <input v-model.number="draft.emotionalIntensity" :disabled="!selectedMemoryOwnedByViewer" type="range" min="0" max="1" step="0.01">
             </label>
             <label :class="['flex flex-col gap-2 text-xs text-neutral-500 dark:text-neutral-400']">
               关系相关度 {{ draft.relationshipRelevance.toFixed(2) }}
-              <input v-model.number="draft.relationshipRelevance" type="range" min="0" max="1" step="0.01">
+              <input v-model.number="draft.relationshipRelevance" :disabled="!selectedMemoryOwnedByViewer" type="range" min="0" max="1" step="0.01">
             </label>
           </div>
 
-          <div :class="['flex flex-wrap items-center gap-2']">
+          <div v-if="selectedMemoryOwnedByViewer" :class="['flex flex-wrap items-center gap-2']">
             <Button
               :icon="savedFlash ? 'i-solar:check-circle-bold-duotone' : 'i-solar:diskette-line-duotone'"
               :label="savedFlash ? '已保存' : '保存修改'"
@@ -570,18 +635,18 @@ function eventTone(kind: string) {
             </div>
           </div>
 
-          <div v-if="duplicateMemoryGroups.length" :class="['rounded-lg bg-neutral-50 p-3 dark:bg-neutral-950/50']">
+          <div v-if="inspectableDuplicateGroups.length" :class="['rounded-lg bg-neutral-50 p-3 dark:bg-neutral-950/50']">
             <div :class="['mb-2 flex items-center justify-between gap-2']">
               <div :class="['text-sm text-neutral-800 font-medium dark:text-neutral-100']">
                 可能重复
               </div>
               <div :class="['text-xs text-neutral-500 dark:text-neutral-400']">
-                {{ duplicateMemoryGroups.length }} 组
+                {{ inspectableDuplicateGroups.length }} 组
               </div>
             </div>
             <div :class="['max-h-64 overflow-auto pr-1']">
               <div
-                v-for="group in duplicateMemoryGroups.slice(0, 8)"
+                v-for="group in inspectableDuplicateGroups.slice(0, 8)"
                 :key="group.id"
                 :class="['mb-2 rounded-md bg-white/80 p-2 text-xs last:mb-0 dark:bg-neutral-900/70']"
               >

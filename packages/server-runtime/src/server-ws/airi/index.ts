@@ -141,10 +141,10 @@ export function createResponses(serverInstanceId: string) {
         metadata: createEventMetadata(serverInstanceId, parentId),
       } satisfies WebSocketEvent<Record<string, unknown>>
     },
-    error(message: string, parentId?: string) {
+    error(message: string, parentId?: string, details?: { code?: string, retryAfterMs?: number }) {
       return {
         type: 'error',
-        data: { message },
+        data: { message, ...details },
         metadata: createEventMetadata(serverInstanceId, parentId),
       } satisfies WebSocketEvent<Record<string, unknown>>
     },

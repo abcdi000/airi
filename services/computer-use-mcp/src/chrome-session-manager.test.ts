@@ -53,7 +53,6 @@ function makeConfig(): ComputerUseConfig {
       osascript: '/usr/bin/osascript',
     },
     browserDomBridge: { enabled: false },
-    openableApps: [],
   } as ComputerUseConfig
 }
 

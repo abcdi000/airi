@@ -83,6 +83,7 @@ function applyLoadedConfig(config: ElectronMcpStdioConfigFile) {
   savedIds.value = loaded.savedIds
   expandedIds.value = new Set()
   testRowId.value = loaded.selectedRowId
+  return loaded
 }
 
 const savedServers = computed(() => servers.value.filter(s => savedIds.value.has(s.rowId)))
@@ -157,11 +158,16 @@ async function loadFromDisk() {
   const { text } = await invokeReadConfigText()
   try {
     const parsed = parseElectronMcpConfigText(text)
-    applyLoadedConfig(parsed)
+    const loaded = applyLoadedConfig(parsed)
     savedSig.value = JSON.stringify(parsed)
     jsonOpen.value = false
     jsonDraft.value = ''
     jsonError.value = ''
+    if (loaded.upgradedBrowserServers.length > 0) {
+      infoMessage.value = tn('messages.browser-config-upgraded', {
+        name: loaded.upgradedBrowserServers.join(', '),
+      })
+    }
   }
   catch (e) {
     const message = errorMessageFrom(e) ?? 'Unknown error'

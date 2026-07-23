@@ -7,11 +7,17 @@ installStrictToolSchemaMatchers()
 
 describe('image_journal config snapshot', () => {
   it('uses required nullable fields for strict provider schemas', async () => {
+    const location = {
+      hash: '',
+      href: 'http://localhost/',
+      hostname: 'localhost',
+      origin: 'http://localhost',
+      search: '',
+    }
     vi.stubGlobal('window', {
-      location: {
-        origin: 'http://localhost',
-      },
+      location,
     })
+    vi.stubGlobal('location', location)
 
     const { imageJournalTools } = await import('./image-journal')
     const tools = await imageJournalTools()

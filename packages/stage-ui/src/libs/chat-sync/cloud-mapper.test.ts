@@ -10,6 +10,8 @@ function makeMeta(partial: Partial<ChatSessionMeta>): ChatSessionMeta {
     sessionId: partial.sessionId ?? 'session-x',
     userId: partial.userId ?? 'user-1',
     characterId: partial.characterId ?? 'char-1',
+    conversationType: partial.conversationType ?? 'direct',
+    participantUserIds: partial.participantUserIds ?? [partial.userId ?? 'user-1'],
     createdAt: partial.createdAt ?? 0,
     updatedAt: partial.updatedAt ?? 0,
     ...partial,

@@ -1,7 +1,10 @@
+import type { LumiMemoryPersistenceSnapshot } from './lumi-memory'
+
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { migratedLumiAllMemories, migratedLumiContextManifest, migratedLumiMemories } from '../../../lumi-runtime/src'
+import { LUMI_DOGGY_USER_ID, LUMI_MOUSSY_USER_ID, useLumiIdentityStore } from './lumi-identity'
 import { useLumiMemoryStore } from './lumi-memory'
 
 describe('lumi-memory store', () => {
@@ -56,6 +59,7 @@ describe('lumi-memory store', () => {
       userId: 'local',
       personaId: 'lumi',
       limit: 20,
+      conversationType: 'direct',
     })
 
     expect(before.some(memory => memory.id === candidate.id)).toBe(false)
@@ -67,9 +71,191 @@ describe('lumi-memory store', () => {
       userId: 'local',
       personaId: 'lumi',
       limit: 20,
+      conversationType: 'direct',
     })
 
     expect(after.some(memory => memory.id === candidate.id)).toBe(true)
+  })
+
+  it('forces direct memory writes into the active identity scope', () => {
+    const store = useLumiMemoryStore()
+
+    const memory = store.remember({
+      id: 'legacy-local-owner-test',
+      userId: 'local',
+      personaId: 'lumi',
+      type: 'project_context',
+      content: 'A legacy caller must not create an unscoped local memory.',
+      confidence: 0.9,
+      importance: 0.8,
+      emotionalIntensity: 0,
+      relationshipRelevance: 0.4,
+      createdAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z',
+      decay: 0,
+      tags: ['test'],
+      status: 'active',
+    })
+
+    expect(memory.userId).toBe(LUMI_DOGGY_USER_ID)
+    expect(memory.scope).toBe('relationship')
+    expect(memory.ownerId).toBe(LUMI_DOGGY_USER_ID)
+  })
+
+  it('includes persisted semantic vectors in complete memory snapshots', async () => {
+    const store = useLumiMemoryStore()
+    const snapshot: LumiMemoryPersistenceSnapshot = {
+      fragments: [],
+      events: [],
+      seedId: 'vector-export',
+      dbPath: 'mock-memory.sqlite3',
+    }
+    const vectors = [{
+      memoryId: 'memory-vector-export',
+      model: 'BAAI/bge-small-zh-v1.5',
+      signature: 'verified-signature',
+      vector: [0.6, 0.8],
+      device: 'cuda',
+      updatedAt: '2026-07-22T00:00:00.000Z',
+    }]
+    const getVectors = vi.fn(async () => vectors)
+    store.setPersistenceBridge({
+      getSnapshot: vi.fn(async () => snapshot),
+      replaceSnapshot: vi.fn(async ({ snapshot: value }) => value),
+      upsertMemory: vi.fn(),
+      deleteMemory: vi.fn(),
+      getVectors,
+      saveEvent: vi.fn(),
+      setSeedId: vi.fn(),
+      clear: vi.fn(),
+    })
+
+    const exported = await store.exportSnapshot()
+
+    expect(getVectors).toHaveBeenCalledWith({
+      model: 'BAAI/bge-small-zh-v1.5',
+      userId: LUMI_DOGGY_USER_ID,
+    })
+    expect(exported.vectors).toEqual(vectors)
+  })
+
+  it('keeps Lumi global facts loaded after switching to Moussy', () => {
+    const identityStore = useLumiIdentityStore()
+    const store = useLumiMemoryStore()
+    const globalMemory = store.remember({
+      id: 'lumi-global-birthday',
+      userId: LUMI_DOGGY_USER_ID,
+      personaId: 'lumi',
+      type: 'persona_fact',
+      content: 'Lumi 的生日是5月13日。',
+      confidence: 0.95,
+      importance: 0.95,
+      emotionalIntensity: 0.3,
+      relationshipRelevance: 0.5,
+      createdAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z',
+      decay: 0,
+      tags: ['lumi_self', 'birthday'],
+      status: 'active',
+      scope: 'global',
+      ownerType: 'lumi',
+      ownerId: 'lumi',
+      visibility: 'global',
+      participantUserIds: [],
+      subjectUserIds: ['lumi'],
+      sensitivity: 'normal',
+    })
+    identityStore.activeUserId = LUMI_MOUSSY_USER_ID
+
+    const found = store.search({ query: 'Lumi 生日 5月13日', userId: LUMI_MOUSSY_USER_ID, personaId: 'lumi', limit: 5, conversationType: 'direct' })
+
+    expect(found.some(memory => memory.id === globalMemory.id)).toBe(true)
+  })
+
+  it('preserves shared ownership while importing relationship memories for Moussy', async () => {
+    const identityStore = useLumiIdentityStore()
+    const store = useLumiMemoryStore()
+    const replaceSnapshot = vi.fn(async ({ snapshot }: { snapshot: LumiMemoryPersistenceSnapshot }) => snapshot)
+    store.setPersistenceBridge({
+      getSnapshot: vi.fn(),
+      replaceSnapshot,
+      upsertMemory: vi.fn(),
+      deleteMemory: vi.fn(),
+      saveEvent: vi.fn(),
+      setSeedId: vi.fn(),
+      clear: vi.fn(),
+    })
+    identityStore.activeUserId = LUMI_MOUSSY_USER_ID
+
+    await store.importSnapshot({
+      fragments: [
+        {
+          id: 'global-import',
+          userId: LUMI_DOGGY_USER_ID,
+          personaId: 'lumi',
+          type: 'persona_fact',
+          content: 'Lumi 的生日是5月13日。',
+          confidence: 0.95,
+          importance: 0.95,
+          emotionalIntensity: 0.2,
+          relationshipRelevance: 0.4,
+          createdAt: '2026-07-21T00:00:00.000Z',
+          updatedAt: '2026-07-21T00:00:00.000Z',
+          decay: 0,
+          tags: ['lumi_self', 'birthday'],
+          status: 'active',
+          scope: 'global',
+          ownerType: 'lumi',
+          ownerId: 'lumi',
+          visibility: 'global',
+          participantUserIds: [],
+          subjectUserIds: ['lumi'],
+          sensitivity: 'normal',
+          sourceActorId: LUMI_DOGGY_USER_ID,
+          sourceConversationType: 'direct',
+          classificationReason: 'Explicit Lumi self fact accepted as global.',
+          disclosureReason: 'Lumi self fact is available in every authorized conversation.',
+        },
+        {
+          id: 'relationship-import',
+          userId: LUMI_DOGGY_USER_ID,
+          personaId: 'lumi',
+          type: 'user_fact',
+          content: 'Moussy 喜欢一起玩游戏。',
+          confidence: 0.9,
+          importance: 0.8,
+          emotionalIntensity: 0.2,
+          relationshipRelevance: 0.8,
+          createdAt: '2026-07-21T00:00:00.000Z',
+          updatedAt: '2026-07-21T00:00:00.000Z',
+          decay: 0,
+          tags: ['user_fact'],
+          status: 'active',
+          scope: 'relationship',
+          ownerType: 'user',
+          ownerId: LUMI_DOGGY_USER_ID,
+          visibility: 'participants',
+          participantUserIds: [LUMI_DOGGY_USER_ID],
+          subjectUserIds: [LUMI_DOGGY_USER_ID],
+          sensitivity: 'normal',
+          sourceActorId: LUMI_DOGGY_USER_ID,
+          sourceConversationType: 'direct',
+          classificationReason: 'User fact retained in its source relationship.',
+          disclosureReason: 'Relationship memory is visible only in direct conversation with its owner.',
+        },
+      ],
+      events: [],
+      seedId: 'scope-import',
+    })
+
+    const persisted = replaceSnapshot.mock.calls[0]?.[0].snapshot.fragments
+    expect(persisted?.find(memory => memory.id === 'global-import')?.userId).toBe(LUMI_DOGGY_USER_ID)
+    expect(persisted?.find(memory => memory.id === 'global-import')?.classificationReason).toBe('Explicit Lumi self fact accepted as global.')
+    expect(persisted?.find(memory => memory.id === 'global-import')?.disclosureReason).toBe('Lumi self fact is available in every authorized conversation.')
+    expect(persisted?.find(memory => memory.id === 'relationship-import')?.userId).toBe(LUMI_MOUSSY_USER_ID)
+    expect(persisted?.find(memory => memory.id === 'relationship-import')?.ownerId).toBe(LUMI_MOUSSY_USER_ID)
+    expect(persisted?.find(memory => memory.id === 'relationship-import')?.sourceActorId).toBe(LUMI_MOUSSY_USER_ID)
+    expect(persisted?.find(memory => memory.id === 'relationship-import')?.classificationReason).toBe('User fact retained in its source relationship.')
   })
 
   it('stores extracted Lumi memory candidates through the activation gate', () => {
@@ -90,6 +276,7 @@ describe('lumi-memory store', () => {
       userId: 'local',
       personaId: 'lumi',
       limit: 5,
+      conversationType: 'direct',
     })
 
     expect(found.length).toBeGreaterThan(0)
@@ -212,6 +399,7 @@ describe('lumi-memory store', () => {
       userId: 'local',
       personaId: 'lumi',
       limit: 5,
+      conversationType: 'direct',
     })
 
     expect(saved.id).toBe('alaya-driver-memory')

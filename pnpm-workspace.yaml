@@ -30,6 +30,7 @@ patchedDependencies:
   sponsorkit@17.1.0: patches/sponsorkit@17.1.0.patch
   uiohook-napi@1.5.5: patches/uiohook-napi@1.5.5.patch
 catalog:
+  '@aparajita/capacitor-secure-storage': ^8.0.0
   '@ax-llm/ax': ^19.0.43
   '@better-auth/oauth-provider': 1.5.6
   '@capacitor/android': ^8.3.1
@@ -85,6 +86,7 @@ catalog:
   '@xsai/model': 0.5.0-beta.2
   '@xsai/shared': 0.5.0-beta.2
   '@xsai/shared-chat': 0.5.0-beta.2
+  '@xsai/shared-stream': 0.5.0-beta.2
   '@xsai/stream-text': 0.5.0-beta.2
   '@xsai/stream-transcription': 0.5.0-beta.2
   '@xsai/tool': 0.5.0-beta.2
@@ -123,6 +125,7 @@ catalog:
   node-pty: ^1.1.0
   ofetch: ^1.5.1
   oxc-minify: ^0.126.0
+  patchright: 1.61.1
   pinia: ^3.0.4
   playwright-extra: ^4.3.6
   posthog-js: 1.306.1

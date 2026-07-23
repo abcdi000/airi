@@ -139,7 +139,13 @@ export default defineConfig({
           src: resolve(import.meta.dirname, '..', '..', 'packages', 'stage-pages', 'src', 'pages'),
           exclude: base => [
             ...base,
+            '**/settings/account/index.vue',
+            '**/settings/account/account-settings-page.vue',
             '**/settings/connection/index.vue',
+            '**/settings/flux.vue',
+            '**/settings/providers/chat/official-provider.vue',
+            '**/settings/providers/speech/official-provider-speech.vue',
+            '**/settings/providers/speech/official-provider-speech-streaming.vue',
           ],
         },
       ],

@@ -5,7 +5,7 @@ import type {
   LumiMemoryStatus,
 } from './types'
 
-import { isRecallableMemory, normalizeMemoryScores } from './validation'
+import { canAccessLumiMemory, isRecallableMemory, normalizeMemoryScores } from './validation'
 
 export interface StaticLumiMemoryDriverOptions {
   /**
@@ -68,7 +68,7 @@ export function searchStaticLumiMemories(
 
   return fragments
     .filter(fragment => fragment.personaId === request.personaId)
-    .filter(fragment => includeMigratedUsers || fragment.userId === request.userId)
+    .filter(fragment => includeMigratedUsers || canAccessLumiMemory(fragment, request))
     .filter(fragment => statuses.includes(fragment.status))
     .filter(fragment => !request.types?.length || request.types.includes(fragment.type))
     .filter(fragment => fragment.status === 'active' ? isRecallableMemory(fragment) : fragment.content.trim().length > 0)

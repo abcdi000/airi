@@ -399,4 +399,29 @@ describe('channel-server store reconnect', () => {
     expect(serverSdkMocks.MockClient.instances.length).toBeGreaterThan(1)
     expect(serverSdkMocks.MockClient.instances.at(-1)?.options.token).toBe('rotated-secret')
   })
+
+  it('atomically replaces the URL and credential before room traffic can use the new client', async () => {
+    const store = useModsServerChannelStore()
+    const firstInitializePromise = store.initialize({ token: 'old-secret' })
+    serverSdkMocks.MockClient.instances[0].simulateAuthenticated()
+    await firstInitializePromise
+
+    const configurePromise = store.configureConnection({
+      url: 'wss://192.168.1.20:6121/ws',
+      token: 'device-secret',
+    })
+    await nextTick()
+
+    const configuredClient = serverSdkMocks.MockClient.instances.at(-1)
+    expect(configuredClient?.options.url).toBe('wss://192.168.1.20:6121/ws')
+    expect(configuredClient?.options.token).toBe('device-secret')
+    expect(serverSdkMocks.MockClient.instances).toHaveLength(2)
+
+    configuredClient?.simulateAuthenticated()
+    await configurePromise
+    await nextTick()
+
+    expect(store.connected).toBe(true)
+    expect(serverSdkMocks.MockClient.instances).toHaveLength(2)
+  })
 })

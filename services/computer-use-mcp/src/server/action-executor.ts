@@ -14,7 +14,7 @@ import type {
 } from '../types'
 import type { ComputerUseServerRuntime } from './runtime'
 
-import { normalizeConfiguredAppAction } from '../app-aliases'
+import { normalizeAppAction } from '../app-aliases'
 import { decideBrowserTypeAction } from '../browser-action-router'
 import { isBrowserDomActionSupported } from '../browser-dom/capabilities'
 import { resolveDisplayPoint } from '../display'
@@ -234,7 +234,7 @@ function getPolicyEvaluationContext(params: {
 
 export function createExecuteAction(runtime: ComputerUseServerRuntime): ExecuteAction {
   return async (action, toolName, options = {}) => {
-    const normalizedAction = normalizeConfiguredAppAction(action, runtime.config.openableApps)
+    const normalizedAction = normalizeAppAction(action)
     const { executionTarget, context: actualContext, displayInfo } = await refreshRuntimeRunState(runtime)
     const context = getPolicyEvaluationContext({
       action: normalizedAction,

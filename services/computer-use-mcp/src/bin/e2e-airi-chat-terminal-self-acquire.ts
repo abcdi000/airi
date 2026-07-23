@@ -593,7 +593,6 @@ async function prepareMcpConfig() {
           COMPUTER_USE_APPROVAL_MODE: 'never',
           COMPUTER_USE_SESSION_TAG: `airi-chat-terminal-self-acquire-${runId}`,
           COMPUTER_USE_ALLOWED_BOUNDS: '0,0,1920,1080',
-          COMPUTER_USE_OPENABLE_APPS: 'Finder,Terminal,Visual Studio Code,Cursor',
           COMPUTER_USE_SESSION_ROOT: mcpSessionRoot,
         },
       },

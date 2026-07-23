@@ -2,8 +2,11 @@
 import type { ServerForm } from '../mcp-config'
 
 import { Button, Checkbox, FieldInput, FieldKeyValues, FieldSelect } from '@proj-airi/ui'
-import { useI18n } from 'vue-i18n'
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+import ComputerUsePolicyFields from './ComputerUsePolicyFields.vue'
+import LumiBrowserBackendFields from './LumiBrowserBackendFields.vue'
 
 defineEmits<{ remove: [] }>()
 
@@ -19,6 +22,7 @@ const startupModeOptions = [
 ]
 
 const isComputerUseServer = computed(() => model.value.identifier.trim() === 'computer_use')
+const isLumiBrowserServer = computed(() => model.value.argsText.includes('@proj-airi/playwright-extra-mcp'))
 const interruptShortcut = computed({
   get: () => model.value.envEntries.find(entry => entry.key === 'COMPUTER_USE_INTERRUPT_SHORTCUT')?.value ?? 'End',
   set: (value: string) => {
@@ -80,6 +84,14 @@ const interruptShortcut = computed({
       input-class="font-mono"
       :required="false"
     />
+    <ComputerUsePolicyFields
+      v-if="isComputerUseServer"
+      v-model="model"
+    />
+    <LumiBrowserBackendFields
+      v-if="isLumiBrowserServer"
+      v-model="model"
+    />
     <FieldSelect
       v-model="model.startupMode"
       :label="tn('fields.startup-mode.label')"
@@ -87,14 +99,14 @@ const interruptShortcut = computed({
       :options="startupModeOptions"
     />
     <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-      <label class="flex items-start gap-3 rounded-lg border border-neutral-200/70 p-3 text-sm dark:border-neutral-800">
+      <label class="flex items-start gap-3 border border-neutral-200/70 rounded-lg p-3 text-sm dark:border-neutral-800">
         <Checkbox v-model="model.longRunning" class="mt-0.5 shrink-0" />
         <span class="flex flex-col gap-1">
           <span class="font-medium">{{ tn('fields.long-running.label') }}</span>
           <span class="text-xs text-neutral-500 dark:text-neutral-400">{{ tn('fields.long-running.description') }}</span>
         </span>
       </label>
-      <label class="flex items-start gap-3 rounded-lg border border-neutral-200/70 p-3 text-sm dark:border-neutral-800">
+      <label class="flex items-start gap-3 border border-neutral-200/70 rounded-lg p-3 text-sm dark:border-neutral-800">
         <Checkbox v-model="model.persistent" class="mt-0.5 shrink-0" />
         <span class="flex flex-col gap-1">
           <span class="font-medium">{{ tn('fields.persistent.label') }}</span>

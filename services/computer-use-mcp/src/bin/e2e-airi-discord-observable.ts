@@ -675,7 +675,6 @@ async function main() {
         ...env,
         COMPUTER_USE_EXECUTOR: 'macos-local',
         COMPUTER_USE_APPROVAL_MODE: 'never',
-        COMPUTER_USE_OPENABLE_APPS: 'Terminal,Cursor,Google Chrome,Electron,Discord',
         COMPUTER_USE_DENY_APPS: '1Password,Keychain,System Settings,Activity Monitor',
         COMPUTER_USE_SESSION_TAG: `airi-discord-e2e-${runId}`,
         COMPUTER_USE_ALLOWED_BOUNDS: env.COMPUTER_USE_ALLOWED_BOUNDS || '0,0,2560,1600',

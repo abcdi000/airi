@@ -2,6 +2,7 @@
 import type { SpeechProviderWithExtraOptions } from '@xsai-ext/providers/utils'
 
 import { errorMessageFrom } from '@moeru/std'
+import { isStageWeb } from '@proj-airi/stage-shared'
 import {
   Alert,
   ErrorContainer,
@@ -75,7 +76,9 @@ const activeSpeechUsesProviderConfiguredVoice = computed(() => {
 
 const selectableSpeechProvidersMetadata = computed(() => {
   return [
-    ...configuredSpeechProvidersMetadata.value.filter(metadata => metadata.id !== 'speech-noop'),
+    ...configuredSpeechProvidersMetadata.value.filter((metadata) => {
+      return metadata.id !== 'speech-noop' && (isStageWeb() || !metadata.id.startsWith('official-provider'))
+    }),
     ...allAudioSpeechProvidersMetadata.value.filter(metadata => metadata.id === 'speech-noop'),
   ]
 })

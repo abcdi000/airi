@@ -27,6 +27,7 @@ interface Emits {
 
 const props = withDefaults(defineProps<{
   extraSteps?: OnboardingStep[]
+  onlineSetup?: () => Promise<void> | void
 }>(), {
   extraSteps: () => [],
 })
@@ -108,16 +109,14 @@ async function saveProviderConfiguration(data: ProviderConfigData) {
   }
 }
 
-async function handleSave() {
-  capturePosthogEvent('onboarding_step_completed', { step: currentStep.value?.id ?? 'unknown' })
-  emit('configured')
-}
-
 const allSteps = computed<OnboardingStep[]>(() => {
   const coreSteps: OnboardingStep[] = [
     {
       id: 'welcome',
       component: StepWelcome,
+      props: () => ({
+        onlineSetup: props.onlineSetup,
+      }),
     },
     {
       id: 'provider-selection',
@@ -162,6 +161,11 @@ const allSteps = computed<OnboardingStep[]>(() => {
 const currentStep = computed(() => allSteps.value[step.value] ?? null)
 const isLastStep = computed(() => step.value === allSteps.value.length - 1)
 const currentStepProps = computed(() => currentStep.value?.props?.() ?? {})
+
+async function handleSave() {
+  capturePosthogEvent('onboarding_step_completed', { step: currentStep.value?.id ?? 'unknown' })
+  emit('configured')
+}
 
 async function canPassGuard(guard?: OnboardingStepGuard) {
   if (!guard)

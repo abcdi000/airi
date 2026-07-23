@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { isStageWeb } from '@proj-airi/stage-shared'
 import { signOut } from '@proj-airi/stage-ui/libs/auth'
 import { useAuthStore } from '@proj-airi/stage-ui/stores/auth'
 import { onClickOutside } from '@vueuse/core'
@@ -7,7 +8,10 @@ import { computed, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
 const authStore = useAuthStore()
-const { isAuthenticated, user, credits } = storeToRefs(authStore)
+const { isAuthenticated: airiIsAuthenticated, user, credits } = storeToRefs(authStore)
+
+const isLumiProduct = !isStageWeb()
+const isAuthenticated = computed(() => isStageWeb() && airiIsAuthenticated.value)
 
 const userName = computed(() => user.value?.name)
 const userAvatar = computed(() => user.value?.image)
@@ -44,7 +48,19 @@ onClickOutside(dropdownRef, () => {
         <div i-solar:settings-minimalistic-bold-duotone size-5 text="neutral-500 dark:neutral-400" />
       </RouterLink>
 
+      <RouterLink
+        v-if="isLumiProduct"
+        border="2 solid neutral-100/60 dark:neutral-800/30"
+        bg="neutral-50/70 dark:neutral-800/70"
+        w-fit flex items-center justify-center rounded-xl p-2 backdrop-blur-md
+        title="Lumi account"
+        to="/settings/account"
+      >
+        <div i-solar:user-id-bold-duotone />
+      </RouterLink>
+
       <button
+        v-else
         border="2 solid neutral-100/60 dark:neutral-800/30"
         bg="neutral-50/70 dark:neutral-800/70"
         w-fit flex items-center justify-center rounded-xl p-2 backdrop-blur-md

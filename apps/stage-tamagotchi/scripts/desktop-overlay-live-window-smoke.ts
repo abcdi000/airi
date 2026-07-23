@@ -250,7 +250,6 @@ async function prepareMcpConfig() {
     TMPDIR: env.TMPDIR || '',
     COMPUTER_USE_EXECUTOR: env.COMPUTER_USE_SMOKE_EXECUTOR || env.COMPUTER_USE_EXECUTOR || 'macos-local',
     COMPUTER_USE_APPROVAL_MODE: env.COMPUTER_USE_SMOKE_APPROVAL_MODE || env.COMPUTER_USE_APPROVAL_MODE || 'never',
-    COMPUTER_USE_OPENABLE_APPS: env.COMPUTER_USE_OPENABLE_APPS || 'Terminal,Cursor,Google Chrome',
     COMPUTER_USE_SESSION_TAG: `desktop-overlay-live-window-smoke-${runId}`,
     COMPUTER_USE_SESSION_ROOT: mcpSessionRoot,
   }

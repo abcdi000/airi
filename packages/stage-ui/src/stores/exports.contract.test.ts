@@ -34,6 +34,7 @@ describe('stage-ui exports contract', () => {
       './libs/*',
       './libs/inference',
       './libs/inference/adapters/*',
+      './libs/lumi-agent',
       './stores',
       './stores/*',
       './stores/analytics',

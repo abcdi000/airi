@@ -76,7 +76,7 @@ meta:
   descriptionKey: settings.pages.system.description
   icon: i-solar:filters-bold-duotone
   settingsEntry: true
-  order: 9
+  order: 10
   stageTransition:
     name: slide
     pageSpecificAvailable: true

@@ -1,9 +1,13 @@
+import type { LumiToolDefinition } from './lumi-tool-mesh'
+
 import { createTestingPinia } from '@pinia/testing'
+import { tool } from '@xsai/tool'
 import { setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { z } from 'zod'
 
-import type { LumiToolDefinition } from './lumi-tool-mesh'
 import {
+  bindLumiToolMeshToolsForTurn,
   orderToolPlanSteps,
   parseLumiModelDecision,
   useLumiToolMeshStore,
@@ -137,5 +141,118 @@ describe('lumi tool mesh', () => {
     const result = await store.executeTool('run_agent', {}, { scope: 'chat', source: 'test' })
     expect(result.status).toBe('pending_confirmation')
     expect(store.waitingForConfirmation).toBe(true)
+  })
+
+  it('blocks direct-user tools in group plans without calling their executors', async () => {
+    const store = useLumiToolMeshStore()
+    const searchPrivateNotes = vi.fn(() => ({ notes: ['private'] }))
+    store.registerToolDefinitions('test', [
+      toolDef({ id: 'search_private_notes' }),
+    ], {
+      search_private_notes: searchPrivateNotes,
+    })
+
+    const result = await store.executeToolPlan({
+      goal: 'read private data',
+      toolPlan: [{ id: 'private', toolId: 'search_private_notes', purpose: 'read notes', input: {} }],
+    }, {
+      scope: 'chat',
+      source: 'test',
+      conversationId: 'group-doggy-moussy',
+      conversationType: 'group',
+      actorId: 'moussy',
+      participantIds: ['doggy', 'moussy'],
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.executed[0].status).toBe('blocked')
+    expect(result.executed[0].blockedReason).toContain('unavailable in user-facing chat')
+    expect(searchPrivateNotes).not.toHaveBeenCalled()
+  })
+
+  it('keeps direct-user profile tools available in their direct conversation', async () => {
+    const store = useLumiToolMeshStore()
+    const readUserProfile = vi.fn(() => ({ entries: ['profile'] }))
+    store.registerToolDefinitions('test', [
+      toolDef({ id: 'read_user_profile' }),
+    ], {
+      read_user_profile: readUserProfile,
+    })
+
+    const result = await store.executeTool('read_user_profile', {}, {
+      scope: 'chat',
+      source: 'test',
+      conversationId: 'direct-doggy',
+      conversationType: 'direct',
+      actorId: 'doggy',
+      participantIds: ['doggy'],
+    })
+
+    expect(result.status).toBe('success')
+    expect(readUserProfile).toHaveBeenCalledOnce()
+  })
+
+  it('blocks Lumi-private records even in a direct user chat', async () => {
+    const store = useLumiToolMeshStore()
+    const searchPrivateNotes = vi.fn(() => ({ notes: ['private'] }))
+    store.registerToolDefinitions('test', [
+      toolDef({ id: 'search_private_notes' }),
+    ], {
+      search_private_notes: searchPrivateNotes,
+    })
+
+    const result = await store.executeTool('search_private_notes', {}, {
+      scope: 'chat',
+      source: 'test',
+      conversationId: 'direct-moussy',
+      conversationType: 'direct',
+      actorId: 'moussy',
+      participantIds: ['moussy'],
+    })
+
+    expect(result.status).toBe('blocked')
+    expect(result.blockedReason).toContain('unavailable in user-facing chat')
+    expect(searchPrivateNotes).not.toHaveBeenCalled()
+  })
+
+  it('omits direct-user tools from group prompt guidance', () => {
+    const store = useLumiToolMeshStore()
+    store.registerToolDefinitions('test', [
+      toolDef({ id: 'search_private_notes' }),
+      toolDef({ id: 'list_lumiworld_artifacts' }),
+    ])
+
+    const guidance = store.buildPromptGuidance('chat', 'group')
+
+    expect(guidance).not.toContain('internal toolId: search_private_notes')
+    expect(guidance).toContain('internal toolId: list_lumiworld_artifacts')
+    expect(guidance).toContain('[Group Tool Boundary]')
+  })
+
+  it('removes model-facing diary tools from visible chat but preserves internal scheduler access', async () => {
+    const diaryTool = await tool({
+      name: 'lumi_diary_read_day',
+      description: 'Read a private diary day.',
+      parameters: z.object({}),
+      execute: async () => 'private diary',
+    })
+    const publicTool = await tool({
+      name: 'lumi_memory_search',
+      description: 'Search policy-filtered memory.',
+      parameters: z.object({}),
+      execute: async () => 'shared memory',
+    })
+    const interaction = {
+      conversationId: 'direct-moussy',
+      conversationType: 'direct' as const,
+      actorId: 'moussy',
+      participantIds: ['moussy'],
+    }
+
+    const visible = bindLumiToolMeshToolsForTurn([diaryTool, publicTool], interaction)
+    const internal = bindLumiToolMeshToolsForTurn([diaryTool, publicTool], interaction, { allowPrivateLumiTools: true })
+
+    expect(visible.map(tool => tool.function.name)).toEqual(['lumi_memory_search'])
+    expect(internal.map(tool => tool.function.name)).toEqual(['lumi_diary_read_day', 'lumi_memory_search'])
   })
 })

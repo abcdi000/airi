@@ -1,5 +1,4 @@
 import type { I18n } from '../../libs/i18n'
-import type { WindowAuthManager } from '../../services/airi/auth'
 import type { ServerChannel } from '../../services/airi/channel-server'
 
 import { join, resolve } from 'node:path'
@@ -12,10 +11,9 @@ import { isMacOS } from 'std-env'
 
 import icon from '../../../../resources/icon.png?asset'
 
-import { electronOnboardingClose } from '../../../shared/eventa'
+import { electronOnboardingClose, electronOnboardingOpenOnlineAccount } from '../../../shared/eventa'
 import { baseUrl, getElectronMainDirname, load, withHashRoute } from '../../libs/electron/location'
 import { createReusableWindow } from '../../libs/electron/window-manager'
-import { createAuthService } from '../../services/airi/auth'
 import { toggleWindowShow } from '../shared'
 import { setupBaseWindowElectronInvokes } from '../shared/window'
 
@@ -23,14 +21,15 @@ export interface OnboardingWindowManager {
   getWindow: () => Promise<BrowserWindow>
   getAndToggleWindow: () => Promise<BrowserWindow>
   onClosed: (callback: () => void) => () => void
+  setOnlineAccountOpener: (callback: () => Promise<void>) => void
 }
 
 export function setupOnboardingWindowManager(params: {
   serverChannel: ServerChannel
   i18n: I18n
-  windowAuthManager: WindowAuthManager
 }): OnboardingWindowManager {
   const closeCallbacks = new Set<() => void>()
+  let openOnlineAccount: (() => Promise<void>) | undefined
 
   async function getOnboardingWindow(getWindow: () => Promise<BrowserWindow>) {
     const window = await getWindow()
@@ -41,7 +40,7 @@ export function setupOnboardingWindowManager(params: {
 
   const reusableWindow = createReusableWindow(async () => {
     const newWindow = new BrowserWindow({
-      title: 'Welcome to AIRI',
+      title: 'Welcome to Lumi',
       width: 1000,
       height: 650,
       minWidth: 400,
@@ -75,10 +74,14 @@ export function setupOnboardingWindowManager(params: {
     defineInvokeHandler(context, electronOnboardingClose, async () => {
       safeClose(newWindow)
     })
+    defineInvokeHandler(context, electronOnboardingOpenOnlineAccount, async () => {
+      if (!openOnlineAccount)
+        throw new Error('Lumi account settings are not ready')
+      safeClose(newWindow)
+      await openOnlineAccount()
+    })
 
     await setupBaseWindowElectronInvokes({ context, window: newWindow, i18n: params.i18n, serverChannel: params.serverChannel })
-    createAuthService({ context, window: newWindow, windowAuthManager: params.windowAuthManager })
-
     await load(newWindow, withHashRoute(baseUrl(resolve(getElectronMainDirname(), '..', 'renderer')), '/onboarding'))
 
     newWindow.on('closed', () => {
@@ -101,6 +104,9 @@ export function setupOnboardingWindowManager(params: {
       return () => {
         closeCallbacks.delete(callback)
       }
+    },
+    setOnlineAccountOpener: (callback) => {
+      openOnlineAccount = callback
     },
   }
 }

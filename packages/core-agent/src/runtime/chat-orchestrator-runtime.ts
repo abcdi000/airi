@@ -3,7 +3,7 @@ import type { CommonContentPart, Message, ToolMessage } from '@xsai/shared-chat'
 
 import type { AgentContextPort } from '../contracts/context-port'
 import type { AgentForegroundStreamPort } from '../contracts/stream-port'
-import type { ChatAssistantMessage, ChatHistoryItem, ChatSlices, ChatStreamEventContext, ContextMessage, StreamingAssistantMessage } from '../types/chat'
+import type { ChatAssistantMessage, ChatHistoryItem, ChatInteractionContext, ChatSlices, ChatStreamEventContext, ContextMessage, StreamingAssistantMessage } from '../types/chat'
 import type { StreamEvent, StreamOptions } from '../types/llm'
 
 import { createQueue } from '@proj-airi/stream-kit'
@@ -11,6 +11,7 @@ import { createQueue } from '@proj-airi/stream-kit'
 import { formatContextPromptText } from '../messages/context-prompt'
 import { formatTimePrefix } from '../messages/datetime-prefix'
 import { createChatHooks } from './agent-hooks'
+import { createContextRegistry } from './context-registry'
 import { useLlmmarkerParser } from './llm-marker-parser'
 import { categorizeResponse, createStreamingCategorizer } from './response-categoriser'
 
@@ -153,6 +154,17 @@ export interface ChatOrchestratorSendOptions {
   chatProvider: ChatProvider
   /** Provider-specific request options, currently used for headers. */
   providerConfig?: Record<string, unknown>
+  /** Immutable actor and participant identity for this turn. */
+  interaction?: ChatInteractionContext
+  /**
+   * Optional shared execution lane. Sends in one lane remain FIFO even when
+   * they belong to different sessions.
+   */
+  executionLane?: string
+  /** Stable assistant actor ID persisted on the response. */
+  assistantActorId?: string
+  /** Assistant display name persisted on the response. */
+  assistantActorDisplayName?: string
   /** Optional per-send history boundary applied before provider message projection. */
   providerHistoryTransform?: (messages: ChatHistoryItem[]) => ChatHistoryItem[]
   /** Image attachments appended to the user message content parts. */
@@ -171,6 +183,8 @@ export interface ChatOrchestratorSendOptions {
   toolResultTextTransform?: (params: { toolName: string, result: unknown, isError: boolean }) => string | undefined
   /** Tool definitions passed through to the LLM stream port. */
   tools?: StreamOptions['tools']
+  /** Final per-turn policy applied after builtin and caller tools are merged. */
+  toolTransform?: StreamOptions['toolTransform']
   /** Original transport input metadata used by bridge/devtools observers. */
   input?: ChatStreamEventContext['input']
   /** Uses the text as provider-facing input without persisting a visible user bubble. */
@@ -294,7 +308,7 @@ export interface ChatOrchestratorRuntimeDeps {
   /** Returns optional prompt text appended to the provider system message for this send. */
   getSystemPromptSupplement?: () => string | undefined
   /** Runtime context providers ingested immediately before prompt composition. */
-  runtimeContextProviders?: Array<(event: { messageText: string, sessionId: string }) => Awaitable<ContextMessage | null | undefined>>
+  runtimeContextProviders?: Array<(event: { messageText: string, sessionId: string, interaction?: ChatInteractionContext }) => Awaitable<ContextMessage | null | undefined>>
   /** Clock used for persisted message timestamps. @default Date.now */
   now?: () => number
   /** Monotonic clock used for elapsed telemetry in milliseconds. @default performance.now */
@@ -305,7 +319,7 @@ export interface ChatOrchestratorRuntimeDeps {
   unwrapMessage?: <T>(message: T) => T
   /** Called whenever writable runtime state changes. */
   onStateChange?: (state: ChatOrchestratorRuntimeState) => void
-  /** Called after a runtime-owned send completes or fails and `sending` has been cleared. */
+  /** Called after one runtime-owned send completes or fails. */
   onSendSettled?: (event: { sessionId: string }) => void
   /** Called when a send starts and the first assistant placeholder is created. */
   onTrackFirstMessage?: () => void
@@ -345,12 +359,14 @@ export interface ChatOrchestratorRuntimeDeps {
     sessionId: string
     message: Extract<ChatHistoryItem, { role: 'user' }> & { id: string }
     messageText: string
+    interaction?: ChatInteractionContext
   }) => void
   /** Called after the assistant message has been finalized into session history. */
   onAssistantMessageAppended?: (event: {
     sessionId: string
     message: StreamingAssistantMessage
     messageText: string
+    interaction?: ChatInteractionContext
   }) => void
   /** Called after user turn persistence, before provider prompt composition. */
   onUserTurnReady?: (event: {
@@ -358,6 +374,7 @@ export interface ChatOrchestratorRuntimeDeps {
     messageText: string
     sessionMessages: ChatHistoryItem[]
     hasAttachments: boolean
+    interaction?: ChatInteractionContext
   }) => Awaitable<void>
   /** Called after assistant streaming and hook finalization. */
   onAssistantTurnReady?: (event: {
@@ -366,6 +383,7 @@ export interface ChatOrchestratorRuntimeDeps {
     sessionMessages: ChatHistoryItem[]
     hasAttachments: boolean
     hiddenUserMessage?: boolean
+    interaction?: ChatInteractionContext
   }) => void
 }
 
@@ -373,7 +391,7 @@ export interface ChatOrchestratorRuntimeDeps {
  * Platform-agnostic chat orchestrator runtime API.
  */
 export interface ChatOrchestratorRuntime {
-  /** Enqueues a user send for the target session, preserving FIFO order. */
+  /** Enqueues a user send, preserving FIFO order within its target session. */
   ingest: (sendingMessage: string, options: ChatOrchestratorSendOptions, targetSessionId?: string) => Promise<void>
   /** Rejects queued sends that have not started yet. */
   cancelPendingSends: (sessionId?: string) => void
@@ -423,6 +441,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
   const unwrapMessage = deps.unwrapMessage ?? (<T>(message: T) => message)
 
   let sending = false
+  let activeSendCount = 0
   let pendingQueuedSends: QueuedSend[] = []
 
   function emitStateChange() {
@@ -453,23 +472,49 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       deps.foregroundStream.reset()
   }
 
-  async function ingestRuntimeContexts(event: { messageText: string, sessionId: string }) {
-    for (const provider of deps.runtimeContextProviders ?? []) {
-      const contextMessage = await provider(event)
-      if (contextMessage)
-        deps.context.ingest(contextMessage)
+  function createTurnContext() {
+    const registry = createContextRegistry()
+    const activeContexts = deps.context.snapshot()
+
+    return {
+      ingest(message: ContextMessage) {
+        // Preserve shared observability while prompt composition reads only
+        // the context snapshot owned by this individual turn.
+        deps.context.ingest(message)
+        const result = registry.ingest(message)
+        if (!result)
+          return
+        activeContexts[result.sourceKey] = result.mutation === 'append'
+          ? [...(activeContexts[result.sourceKey] ?? []), structuredClone(message)]
+          : [structuredClone(message)]
+      },
+      snapshot: () => structuredClone(activeContexts),
     }
   }
 
-  function buildProviderMessages(sessionMessagesForSend: ChatHistoryItem[]) {
+  async function ingestRuntimeContexts(
+    event: { messageText: string, sessionId: string, interaction?: ChatInteractionContext },
+    turnContext: ReturnType<typeof createTurnContext>,
+  ) {
+    for (const provider of deps.runtimeContextProviders ?? []) {
+      const contextMessage = await provider(event)
+      if (contextMessage)
+        turnContext.ingest(contextMessage)
+    }
+  }
+
+  function buildProviderMessages(sessionMessagesForSend: ChatHistoryItem[], interaction?: ChatInteractionContext) {
     const nowTs = now()
 
     return sessionMessagesForSend.map((msg) => {
-      const { context: _context, id: _id, createdAt, ...withoutContext } = msg
+      const { context: _context, id: _id, createdAt, actorId: _actorId, actorDisplayName, ...withoutContext } = msg
       const rawMessage = unwrapMessage(withoutContext)
 
       if (rawMessage.role === 'user') {
-        return prependTextToContent(rawMessage, formatTimePrefix(createdAt ?? nowTs))
+        const speakerPrefix = interaction?.conversationType === 'group' && actorDisplayName
+          ? `[Speaker: ${actorDisplayName}]\n`
+          : ''
+        return prependTextToContent(rawMessage, `${formatTimePrefix(createdAt ?? nowTs)}${speakerPrefix}`)
       }
 
       if (rawMessage.role === 'assistant') {
@@ -493,11 +538,19 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
     deps.session.ensureSession(sessionId)
 
     const sendingCreatedAt = now()
+    const turnContext = createTurnContext()
 
     // TODO: Expire or prune stale runtime contexts from disconnected services before composing.
     const streamingMessageContext: ChatStreamEventContext = {
-      message: { role: 'user', content: sendingMessage, createdAt: sendingCreatedAt, id: createId() },
-      contexts: deps.context.snapshot(),
+      message: {
+        role: 'user',
+        content: sendingMessage,
+        createdAt: sendingCreatedAt,
+        id: createId(),
+        actorId: options.interaction?.actorId,
+        actorDisplayName: options.interaction?.actorDisplayName,
+      },
+      contexts: turnContext.snapshot(),
       composedMessage: [],
       input: options.input,
     }
@@ -507,6 +560,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
     if (shouldAbort())
       return
 
+    activeSendCount += 1
     setSending(true)
 
     const buildingMessage: StreamingAssistantMessage = {
@@ -516,6 +570,8 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       tool_results: [],
       createdAt: now(),
       id: createId(),
+      actorId: options.assistantActorId,
+      actorDisplayName: options.assistantActorDisplayName,
     }
     patchForegroundStream(sessionId, buildingMessage)
     deps.onTrackFirstMessage?.()
@@ -560,6 +616,8 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         content: finalContent,
         createdAt: sendingCreatedAt,
         id: userMessageId,
+        actorId: options.interaction?.actorId,
+        actorDisplayName: options.interaction?.actorDisplayName,
       }
       if (!options.hiddenUserMessage)
         deps.session.appendSessionMessage(sessionId, userMessage)
@@ -571,6 +629,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
           sessionId,
           message: userMessage,
           messageText: sendingMessage,
+          interaction: options.interaction,
         })
       }
 
@@ -583,14 +642,15 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
           messageText: sendingMessage,
           sessionMessages: sessionMessagesForSend,
           hasAttachments: !!options.attachments?.length,
+          interaction: options.interaction,
         })
       }
 
       // Datetime is no longer injected through the side-channel context store.
       // It is applied at message-assembly time (see below) as a user-turn
       // local-time prefix, matching Lumi's original ChatSession behavior.
-      await ingestRuntimeContexts({ messageText: sendingMessage, sessionId })
-      streamingMessageContext.contexts = deps.context.snapshot()
+      await ingestRuntimeContexts({ messageText: sendingMessage, sessionId, interaction: options.interaction }, turnContext)
+      streamingMessageContext.contexts = turnContext.snapshot()
       deps.onLifecycle?.({
         phase: 'before-compose',
         channel: 'chat',
@@ -740,7 +800,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       const providerHistoryMessages = options.providerHistoryTransform
         ? options.providerHistoryTransform(limitedProviderHistory)
         : limitedProviderHistory
-      const newMessages = buildProviderMessages(providerHistoryMessages)
+      const newMessages = buildProviderMessages(providerHistoryMessages, options.interaction)
       const systemPromptSupplement = deps.getSystemPromptSupplement?.()?.trim()
       if (systemPromptSupplement) {
         const systemMessage = newMessages.find(message => message.role === 'system')
@@ -755,7 +815,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         }
       }
 
-      const contextsSnapshot = deps.context.snapshot()
+      const contextsSnapshot = turnContext.snapshot()
       const contextPromptText = formatContextPromptText(contextsSnapshot)
       if (contextPromptText) {
         const lastMessage = newMessages.at(-1)
@@ -932,6 +992,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
             sessionId,
             message: finalAssistant,
             messageText,
+            interaction: options.interaction,
           })
         }
       }
@@ -962,6 +1023,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
           sessionMessages: sessionMessagesForSend,
           hasAttachments: !!options.attachments?.length,
           hiddenUserMessage: options.hiddenUserMessage,
+          interaction: options.interaction,
         })
       }
 
@@ -977,44 +1039,54 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       throw error
     }
     finally {
-      setSending(false)
+      activeSendCount = Math.max(0, activeSendCount - 1)
+      setSending(activeSendCount > 0)
       deps.onSendSettled?.({ sessionId })
     }
   }
 
-  const sendQueue = createQueue<QueuedSend>({
-    handlers: [
-      async ({ data }) => {
-        const { sendingMessage, options, generation, deferred, sessionId, cancelled } = data
+  function createSessionSendQueue() {
+    const queue = createQueue<QueuedSend>({
+      handlers: [
+        async ({ data }) => {
+          const { sendingMessage, options, generation, deferred, sessionId, cancelled } = data
 
-        if (cancelled)
-          return
+          if (cancelled)
+            return
 
-        if (deps.session.getSessionGeneration(sessionId) !== generation) {
-          deferred.reject(new Error('Chat session was reset before send could start'))
-          return
-        }
+          if (deps.session.getSessionGeneration(sessionId) !== generation) {
+            deferred.reject(new Error('Chat session was reset before send could start'))
+            return
+          }
 
-        try {
-          await performSend(sendingMessage, options, generation, sessionId)
-          deferred.resolve()
-        }
-        catch (error) {
-          deferred.reject(error)
-        }
-      },
-    ],
-  })
+          try {
+            await performSend(sendingMessage, options, generation, sessionId)
+            deferred.resolve()
+          }
+          catch (error) {
+            deferred.reject(error)
+          }
+        },
+      ],
+    })
 
-  sendQueue.on('enqueue', (queuedSend) => {
-    pendingQueuedSends.push(queuedSend)
-    emitStateChange()
-  })
+    queue.on('enqueue', (queuedSend) => {
+      pendingQueuedSends.push(queuedSend)
+      emitStateChange()
+    })
 
-  sendQueue.on('dequeue', (queuedSend) => {
-    pendingQueuedSends = pendingQueuedSends.filter(item => item !== queuedSend)
-    emitStateChange()
-  })
+    queue.on('dequeue', (queuedSend) => {
+      pendingQueuedSends = pendingQueuedSends.filter(item => item !== queuedSend)
+      emitStateChange()
+    })
+
+    return queue
+  }
+
+  // Conversations own independent FIFO lanes by default. Callers may bind
+  // several conversations to one resource lane while a shared tool/runtime
+  // still requires strict serialization.
+  const sessionSendQueues = new Map<string, ReturnType<typeof createSessionSendQueue>>()
 
   function ingest(
     sendingMessage: string,
@@ -1023,8 +1095,14 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
   ) {
     const sessionId = targetSessionId || deps.getActiveSessionId()
     const generation = deps.session.getSessionGeneration(sessionId)
+    const executionLane = options.executionLane?.trim() || sessionId
 
     return new Promise<void>((resolve, reject) => {
+      let sendQueue = sessionSendQueues.get(executionLane)
+      if (!sendQueue) {
+        sendQueue = createSessionSendQueue()
+        sessionSendQueues.set(executionLane, sendQueue)
+      }
       sendQueue.enqueue({
         sendingMessage,
         options,

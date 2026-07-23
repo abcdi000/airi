@@ -4,6 +4,8 @@ import type {
   ElectronMcpCallToolPayload,
   ElectronMcpCallToolResult,
   ElectronMcpComputerUseChatTurn,
+  ElectronMcpResourceLease,
+  ElectronMcpResourceLeaseInput,
   ElectronMcpStdioApplyResult,
   ElectronMcpStdioConfigFile,
   ElectronMcpStdioConfigText,
@@ -35,14 +37,18 @@ import {
   electronMcpGetRuntimeStatus,
   electronMcpInterruptComputerUse,
   electronMcpListTools,
+  electronMcpListResourceLeases,
   electronMcpOpenConfigFile,
   electronMcpReadConfigText,
   electronMcpSetComputerUseChatActive,
   electronMcpTestServer,
+  electronMcpTerminateResourceLease,
   electronMcpWriteConfigText,
 } from '../../../../shared/eventa'
 import { parseElectronMcpConfigText } from '../../../../shared/mcp-config'
 import { onAppBeforeQuit } from '../../../libs/bootkit/lifecycle'
+import { recordLumiChannelAudit } from '../channel-server/device-audit'
+import { createMcpResourceLeaseRegistry } from './resource-leases'
 
 interface McpServerSession {
   client: Client
@@ -61,6 +67,8 @@ export interface McpStdioManager {
   interruptComputerUse: () => Promise<{ interrupted: boolean }>
   setComputerUseChatActive: (payload: { sourceId: string, active: boolean, reset?: boolean, turnId?: string }) => Promise<void>
   getComputerUseChatTurn: () => ElectronMcpComputerUseChatTurn | undefined
+  listResourceLeases: () => ElectronMcpResourceLease[]
+  terminateResourceLease: (leaseId: string) => Promise<ElectronMcpResourceLease>
   stopAll: () => Promise<void>
   getRuntimeStatus: () => ElectronMcpStdioRuntimeStatus
   readConfigText: () => Promise<ElectronMcpStdioConfigText>
@@ -294,6 +302,30 @@ function sanitizeBrowserMcpPayload(payload: ElectronMcpCallToolPayload): Electro
       mainOriginalArguments: previewMcpDebugValue(payload.arguments),
       mainSanitizedArguments: previewMcpDebugValue(normalized.args),
     },
+  }
+}
+
+function resourceLeaseFrom(payload: ElectronMcpCallToolPayload, serverName: string): ElectronMcpResourceLeaseInput | undefined {
+  const candidate = payload.debug?.lumiResourceLease
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate))
+    return undefined
+
+  const value = candidate as Record<string, unknown>
+  if (typeof value.id !== 'string'
+    || !['browser', 'computer-use', 'minecraft'].includes(String(value.resource))
+    || typeof value.actorId !== 'string'
+    || typeof value.conversationId !== 'string') {
+    return undefined
+  }
+
+  return {
+    id: value.id.slice(0, 200),
+    resource: value.resource as ElectronMcpResourceLeaseInput['resource'],
+    toolName: payload.name.slice(0, 240),
+    serverName: serverName.slice(0, 120),
+    actorId: value.actorId.slice(0, 160),
+    conversationId: value.conversationId.slice(0, 240),
+    deviceId: typeof value.deviceId === 'string' ? value.deviceId.slice(0, 160) : undefined,
   }
 }
 
@@ -565,6 +597,7 @@ export function createMcpStdioManager(): McpStdioManager {
   const log = useLogg('main/mcp-stdio').useGlobalConfig()
   const callLog = useLogg('main/mcp-call').useGlobalConfig()
   const sessions = new Map<string, McpServerSession>()
+  const resourceLeases = createMcpResourceLeaseRegistry()
   const serverConfigs = new Map<string, ElectronMcpStdioServerConfig>()
   const runtimeStatuses = new Map<string, ElectronMcpStdioServerRuntimeStatus>()
   const recentMcpMutations = new Map<string, { at: number, pending: boolean }>()
@@ -664,6 +697,51 @@ export function createMcpStdioManager(): McpStdioManager {
         throw new Error(`${stringifyError(error)}\n\n${stderr}`)
 
       throw error
+    }
+  }
+
+  const terminateResourceServer = async (serverName: string) => {
+    const session = sessions.get(serverName)
+    if (!session)
+      return
+
+    sessions.delete(serverName)
+    await closeSession(session)
+    setRuntimeStatus({
+      name: serverName,
+      state: 'stopped',
+      command: describeServerCommand(session.config),
+      args: session.config.args ?? [],
+      pid: null,
+      startupMode: getStartupMode(session.config),
+      longRunning: session.config.longRunning,
+      persistent: session.config.persistent,
+      requestTimeoutMs: getRequestTimeout(session.config),
+      maxTotalTimeoutMs: getMaxTotalTimeout(session.config),
+    })
+
+    const config = serverConfigs.get(serverName)
+    if (!config || config.enabled === false || getStartupMode(config) === 'manual')
+      return
+
+    try {
+      await startServer(serverName, config)
+    }
+    catch (error) {
+      setRuntimeStatus({
+        name: serverName,
+        state: 'error',
+        command: describeServerCommand(config),
+        args: config.args ?? [],
+        pid: null,
+        lastError: stringifyError(error),
+        startupMode: getStartupMode(config),
+        longRunning: config.longRunning,
+        persistent: config.persistent,
+        requestTimeoutMs: getRequestTimeout(config),
+        maxTotalTimeoutMs: getMaxTotalTimeout(config),
+      })
+      log.withFields({ serverName }).withError(error).warn('failed to restart MCP server after operator termination')
     }
   }
 
@@ -1177,7 +1255,34 @@ export function createMcpStdioManager(): McpStdioManager {
       }
     }
 
-    const promise = callToolOnce(payload, traceId, startedAt)
+    const { serverName } = parseQualifiedToolName(payload.name)
+    const lease = resourceLeaseFrom(payload, serverName)
+    if (lease) {
+      resourceLeases.begin(lease, async () => await terminateResourceServer(serverName))
+      recordLumiChannelAudit({
+        kind: 'tool-resource-started',
+        deviceId: lease.deviceId,
+        userId: lease.actorId,
+        conversationId: lease.conversationId,
+        eventType: lease.toolName,
+        code: lease.resource,
+      })
+    }
+
+    const callPromise = callToolOnce(payload, traceId, startedAt)
+    const promise = lease
+      ? callPromise.finally(() => {
+          resourceLeases.finish(lease.id)
+          recordLumiChannelAudit({
+            kind: 'tool-resource-finished',
+            deviceId: lease.deviceId,
+            userId: lease.actorId,
+            conversationId: lease.conversationId,
+            eventType: lease.toolName,
+            code: lease.resource,
+          })
+        })
+      : callPromise
     if (idempotencyKey) {
       recentMcpCallsByModelToolCallId.set(idempotencyKey, { at: startedAt, promise })
       promise.catch(() => {
@@ -1231,6 +1336,24 @@ export function createMcpStdioManager(): McpStdioManager {
     return active
       ? { sourceId: active[0], turnId: active[1] }
       : undefined
+  }
+
+  const listResourceLeases = () => resourceLeases.list()
+
+  const terminateResourceLease = async (leaseId: string) => {
+    const alreadyRequested = resourceLeases.list().find(lease => lease.id === leaseId)?.terminationRequestedAt
+    const lease = await resourceLeases.terminate(leaseId)
+    if (!alreadyRequested) {
+      recordLumiChannelAudit({
+        kind: 'tool-resource-terminated',
+        deviceId: lease.deviceId,
+        userId: lease.actorId,
+        conversationId: lease.conversationId,
+        eventType: lease.toolName,
+        code: lease.resource,
+      })
+    }
+    return lease
   }
 
   const getRuntimeStatus = (): ElectronMcpStdioRuntimeStatus => {
@@ -1331,6 +1454,8 @@ export function createMcpStdioManager(): McpStdioManager {
     interruptComputerUse,
     setComputerUseChatActive,
     getComputerUseChatTurn,
+    listResourceLeases,
+    terminateResourceLease,
     stopAll,
     getRuntimeStatus,
     readConfigText,
@@ -1339,7 +1464,7 @@ export function createMcpStdioManager(): McpStdioManager {
   }
 }
 
-export async function setupMcpStdioManager() {
+export async function setupMcpStdioManager(options?: { startConfiguredServers?: boolean }) {
   const log = useLogg('main/mcp-stdio').useGlobalConfig()
   const manager = createMcpStdioManager()
 
@@ -1349,11 +1474,13 @@ export async function setupMcpStdioManager() {
 
   await manager.ensureConfigFile()
 
-  try {
-    await manager.applyAndRestart()
-  }
-  catch (error) {
-    log.withError(error).warn('failed to apply mcp stdio config during startup')
+  if (options?.startConfiguredServers !== false) {
+    try {
+      await manager.applyAndRestart()
+    }
+    catch (error) {
+      log.withError(error).warn('failed to apply mcp stdio config during startup')
+    }
   }
 
   return manager
@@ -1426,6 +1553,14 @@ export function createMcpServersService(params: { context: ReturnType<typeof cre
 
   defineInvokeHandler(params.context, electronMcpGetComputerUseChatTurn, () => {
     return params.manager.getComputerUseChatTurn()
+  })
+
+  defineInvokeHandler(params.context, electronMcpListResourceLeases, () => {
+    return params.manager.listResourceLeases()
+  })
+
+  defineInvokeHandler(params.context, electronMcpTerminateResourceLease, async ({ leaseId }) => {
+    return await params.manager.terminateResourceLease(leaseId)
   })
 
   defineInvokeHandler(params.context, electronMcpReadConfigText, async () => {

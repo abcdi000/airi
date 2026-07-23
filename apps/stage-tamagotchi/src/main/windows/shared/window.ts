@@ -4,6 +4,7 @@ import type { BrowserWindow, BrowserWindowConstructorOptions } from 'electron'
 
 import type { I18n } from '../../libs/i18n'
 import type { ServerChannel } from '../../services/airi/channel-server'
+import type { McpStdioManager } from '../../services/airi/mcp-servers'
 
 import { isRendererUnavailable } from '@proj-airi/electron-vueuse/main'
 import { isMacOS } from 'std-env'
@@ -13,7 +14,10 @@ import { createClaudeCodeAgentService } from '../../services/airi/claude-code-ag
 import { createDashScopeAsrService } from '../../services/airi/dashscope-asr'
 import { createI18nService } from '../../services/airi/i18n'
 import { createLumiCurrentStateService } from '../../services/airi/lumi-current-state'
+import { createLumiDiaryExportService } from '../../services/airi/lumi-diary-export/service'
+import { createLumiIdentityService } from '../../services/airi/lumi-identity'
 import { createLumiMemoryService } from '../../services/airi/lumi-memory'
+import { createLumiOnlineClientService } from '../../services/airi/lumi-online'
 import { createLumiUserProfileService } from '../../services/airi/lumi-user-profile'
 import { createAppService, createPowerMonitorService, createScreenService, createSystemPreferencesService, createWindowService } from '../../services/electron'
 
@@ -100,6 +104,7 @@ export async function setupBaseWindowElectronInvokes(params: {
   window: BrowserWindow
   serverChannel: ServerChannel
   i18n: I18n
+  mcpStdioManager?: McpStdioManager
 }) {
   createScreenService({ context: params.context, window: params.window })
   createWindowService({ context: params.context, window: params.window })
@@ -107,9 +112,12 @@ export async function setupBaseWindowElectronInvokes(params: {
   createPowerMonitorService({ context: params.context, window: params.window })
   createSystemPreferencesService({ context: params.context, window: params.window })
   createDashScopeAsrService({ context: params.context })
+  createLumiIdentityService({ context: params.context, window: params.window })
   createLumiMemoryService({ context: params.context })
+  createLumiOnlineClientService({ context: params.context, window: params.window, mcpStdioManager: params.mcpStdioManager })
   createLumiUserProfileService({ context: params.context })
   createLumiCurrentStateService({ context: params.context })
+  createLumiDiaryExportService({ context: params.context })
   createClaudeCodeAgentService({ context: params.context })
 
   await createI18nService({ context: params.context, window: params.window, i18n: params.i18n })

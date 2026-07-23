@@ -15,7 +15,7 @@ import { isStageTamagotchi, isStageWeb } from '@proj-airi/stage-shared'
 import { useLocalStorage } from '@vueuse/core'
 import { nanoid } from 'nanoid'
 import { defineStore } from 'pinia'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 import { useWebSocketInspectorStore } from '../../devtools/websocket-inspector'
 
@@ -56,6 +56,7 @@ export const useModsServerChannelStore = defineStore('mods:channels:proj-airi:se
   const pendingSend = ref<Array<WebSocketEvent>>([])
   const pendingSendCount = computed(() => pendingSend.value.length)
   const reconnectedCallbacks = new Set<() => void>()
+  let suppressConnectionConfigWatch = false
 
   const defaultWebSocketUrl = import.meta.env.VITE_AIRI_WS_URL || 'ws://localhost:6121/ws'
   const websocketUrl = useLocalStorage('settings/connection/websocket-url', defaultWebSocketUrl)
@@ -81,6 +82,12 @@ export const useModsServerChannelStore = defineStore('mods:channels:proj-airi:se
     'spark:command',
     'input:text',
     'input:text:voice',
+    'input:voice',
+    'lumi:room:ack',
+    'lumi:room:access-revoked',
+    'lumi:room:sync',
+    'lumi:room:sync:request',
+    'lumi:room:voice:cancel',
     'output:gen-ai:chat:message',
     'output:gen-ai:chat:complete',
     'output:gen-ai:chat:tool-call',
@@ -207,6 +214,24 @@ export const useModsServerChannelStore = defineStore('mods:channels:proj-airi:se
     }
   }
 
+  async function configureConnection(options: { url: string, token: string }) {
+    const url = options.url.trim()
+    const token = options.token.trim()
+    if (!hasReconnectableWebSocketScheme(url))
+      throw new Error('A ws or wss server channel URL is required')
+    if (!token)
+      throw new Error('A server channel credential is required')
+
+    suppressConnectionConfigWatch = true
+    websocketUrl.value = url
+    websocketAuthToken.value = token
+    await nextTick()
+    suppressConnectionConfigWatch = false
+
+    dispose()
+    await initialize()
+  }
+
   function clearListeners() {
     for (const listener of registeredListeners) {
       if (listener.boundClient) {
@@ -322,6 +347,8 @@ export const useModsServerChannelStore = defineStore('mods:channels:proj-airi:se
   }
 
   watch([websocketUrl, websocketAuthToken], ([newUrl, newToken], [oldUrl, oldToken]) => {
+    if (suppressConnectionConfigWatch)
+      return
     if (newUrl === oldUrl && newToken === oldToken)
       return
 
@@ -340,6 +367,7 @@ export const useModsServerChannelStore = defineStore('mods:channels:proj-airi:se
     websocketAuthToken,
     websocketUrl,
     ensureConnected,
+    configureConnection,
 
     initialize,
     send,

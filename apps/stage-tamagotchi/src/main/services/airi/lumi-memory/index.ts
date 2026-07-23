@@ -7,12 +7,13 @@ import type { ElectronLumiMemorySnapshot, ElectronLumiMemoryVectorRecord, Electr
 import process from 'node:process'
 
 import { spawn } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
 import { defineInvokeHandler } from '@moeru/eventa'
+import { errorMessageFrom } from '@moeru/std'
 import { app } from 'electron'
 
 import {
@@ -43,6 +44,25 @@ const LUMI_MEMORY_VECTOR_BACKFILL_LIMIT = 2000
 const LUMI_MEMORY_VECTOR_REQUEST_TIMEOUT_MS = 1_800_000
 const MAIN_MODULE_DIR = dirname(fileURLToPath(import.meta.url))
 const LUMI_MEMORY_VECTOR_DEVICE = process.env.LUMI_MEMORY_VECTOR_DEVICE || 'auto'
+const DOGGY_USER_ID = 'lumi-user-00000000-0000-4000-8000-000000000001'
+const INTERNAL_USER_ID_PATTERN = /^lumi-user-[A-Za-z0-9-]{8,80}$/
+const MEMORY_OWNER_MIGRATION_KEY = 'multi_user_owner_migration_v1'
+const MEMORY_SCOPE_MIGRATION_KEY = 'memory_scope_migration_v1'
+const LUMI_GLOBAL_SELF_FACTS_MIGRATION_KEY = 'lumi_global_self_facts_migration_v1'
+const LEGACY_SOURCE_MODE_KEY = 'legacy_source_mode_v1'
+const MEMORY_ACCESS_SQL = `(
+  (m.scope IN ('global', 'shared') AND m.sensitivity != 'private')
+  OR (
+    m.scope NOT IN ('global', 'shared')
+    AND (
+      m.owner_id = ?
+      OR EXISTS (
+        SELECT 1 FROM json_each(m.participant_user_ids_json) audience
+        WHERE audience.value = ?
+      )
+    )
+  )
+)`
 
 interface SqliteStatement {
   all: (...values: SqliteValue[]) => Record<string, any>[]
@@ -51,12 +71,13 @@ interface SqliteStatement {
 }
 
 interface SqliteDatabase {
+  close?: () => void
   exec: (sql: string) => void
   prepare: (sql: string) => SqliteStatement
 }
 
 interface SqliteModule {
-  DatabaseSync: new (path: string) => SqliteDatabase
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteDatabase
 }
 
 interface LumiVectorWorkerResponse<T = any> {
@@ -93,6 +114,13 @@ const vectorWorkerPending = new Map<string, {
 }>()
 
 async function loadSqlite(): Promise<SqliteModule> {
+  // NOTICE:
+  // The Function constructor keeps `node:sqlite` opaque to electron-vite so the
+  // runtime builtin is not rewritten into an application dependency.
+  // Static or directly analyzable imports were bundled incorrectly in packaged builds.
+  // Source/context: the desktop main-process SQLite loader in this file.
+  // Removal condition: electron-vite can preserve `node:sqlite` as a runtime builtin.
+  // eslint-disable-next-line no-new-func
   const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<SqliteModule>
   return await dynamicImport('node:sqlite')
 }
@@ -104,10 +132,107 @@ async function getDatabase(): Promise<{ db: SqliteDatabase, path: string }> {
 
   const sqlite = await loadSqlite()
   dbPathInstance = join(app.getPath('userData'), 'lumi-memory.sqlite3')
+  const databaseExisted = existsSync(dbPathInstance)
   mkdirSync(dirname(dbPathInstance), { recursive: true })
   dbInstance = new sqlite.DatabaseSync(dbPathInstance)
   migrate(dbInstance)
+  const legacySourceMode = getMeta(dbInstance, LEGACY_SOURCE_MODE_KEY) ?? (databaseExisted ? 'recover' : 'fresh')
+  setMetaWithDb(dbInstance, LEGACY_SOURCE_MODE_KEY, legacySourceMode)
+  if (legacySourceMode === 'recover')
+    mergeLegacyMemorySources(sqlite, dbInstance, dbPathInstance)
   return { db: dbInstance, path: dbPathInstance }
+}
+
+function legacyMemorySourcePaths(targetPath: string) {
+  const appData = app.getPath('appData')
+  const normalizedTarget = resolve(targetPath).toLowerCase()
+  return [...new Set([
+    join(appData, 'lumi', 'lumi-memory.sqlite3'),
+    join(appData, '@proj-airi', 'stage-tamagotchi', 'lumi-memory.sqlite3'),
+  ].map(path => resolve(path)))]
+    .filter(path => path.toLowerCase() !== normalizedTarget && existsSync(path))
+}
+
+function legacySourceFingerprint(path: string) {
+  const sourceStat = statSync(path)
+  return `${sourceStat.size}:${sourceStat.mtimeMs}`
+}
+
+function normalizedLegacyMemory(row: Record<string, any>) {
+  const memory = rowToMemory(row)
+  const userId = INTERNAL_USER_ID_PATTERN.test(memory.userId) ? memory.userId : DOGGY_USER_ID
+  const relationshipScoped = memory.scope === 'relationship' || memory.scope === 'private'
+  return {
+    ...memory,
+    userId,
+    ownerId: relationshipScoped ? userId : memory.ownerId,
+    participantUserIds: relationshipScoped ? [userId] : memory.participantUserIds,
+    subjectUserIds: relationshipScoped && memory.subjectUserIds.length === 0 ? [userId] : memory.subjectUserIds,
+    sourceActorId: memory.sourceActorId === 'local' ? userId : memory.sourceActorId,
+  }
+}
+
+/** Imports historical Lumi memory databases into the active database without modifying their files. */
+function mergeLegacyMemorySources(sqlite: SqliteModule, target: SqliteDatabase, targetPath: string) {
+  for (const sourcePath of legacyMemorySourcePaths(targetPath)) {
+    const markerKey = `legacy_memory_source_v2:${sourcePath.toLowerCase()}`
+    const fingerprint = legacySourceFingerprint(sourcePath)
+    if (getMeta(target, markerKey) === fingerprint)
+      continue
+
+    const source = new sqlite.DatabaseSync(sourcePath, { readOnly: true })
+    try {
+      const hasMemories = source.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name = \'lumi_memories\'').get()
+      if (!hasMemories)
+        continue
+
+      target.exec('BEGIN IMMEDIATE')
+      try {
+        for (const row of source.prepare('SELECT * FROM lumi_memories').all()) {
+          const memory = normalizedLegacyMemory(row)
+          const current = target.prepare('SELECT user_id, updated_at FROM lumi_memories WHERE id = ?').get(memory.id)
+          if (current && INTERNAL_USER_ID_PATTERN.test(stringField(current.user_id)) && stringField(current.updated_at) >= memory.updatedAt)
+            continue
+          upsertMemoryWithDb(target, memory)
+        }
+
+        const hasVectors = source.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name = \'lumi_memory_vectors\'').get()
+        if (hasVectors) {
+          for (const row of source.prepare('SELECT * FROM lumi_memory_vectors').all()) {
+            const vector = rowToVectorRecord(row)
+            const memoryExists = target.prepare('SELECT id FROM lumi_memories WHERE id = ?').get(vector.memoryId)
+            if (!memoryExists)
+              continue
+            const current = target.prepare('SELECT updated_at FROM lumi_memory_vectors WHERE memory_id = ? AND model = ?').get(vector.memoryId, vector.model)
+            if (current && stringField(current.updated_at) >= vector.updatedAt)
+              continue
+            upsertVectorWithDb(target, vector)
+          }
+        }
+
+        const hasEvents = source.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name = \'lumi_memory_events\'').get()
+        if (hasEvents) {
+          for (const row of source.prepare('SELECT * FROM lumi_memory_events ORDER BY created_at DESC LIMIT 200').all())
+            saveEventWithDb(target, DOGGY_USER_ID, rowToEvent(row))
+        }
+        const legacySeedId = source.prepare('SELECT value FROM lumi_meta WHERE key = \'seed_id\'').get()
+        if (typeof legacySeedId?.value === 'string' && !getMeta(target, `seed_id:${DOGGY_USER_ID}`))
+          setMetaWithDb(target, `seed_id:${DOGGY_USER_ID}`, legacySeedId.value)
+        setMetaWithDb(target, markerKey, fingerprint)
+        target.exec('COMMIT')
+      }
+      catch (error) {
+        target.exec('ROLLBACK')
+        throw error
+      }
+    }
+    catch (error) {
+      console.warn(`[lumi-memory] failed to merge legacy source ${sourcePath}`, error)
+    }
+    finally {
+      source.close?.()
+    }
+  }
 }
 
 function migrate(db: SqliteDatabase) {
@@ -137,14 +262,24 @@ function migrate(db: SqliteDatabase) {
       last_used_at TEXT,
       decay REAL NOT NULL,
       tags_json TEXT NOT NULL,
-      status TEXT NOT NULL
+      status TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'relationship',
+      owner_type TEXT NOT NULL DEFAULT 'user',
+      owner_id TEXT NOT NULL DEFAULT '',
+      visibility TEXT NOT NULL DEFAULT 'participants',
+      participant_user_ids_json TEXT NOT NULL DEFAULT '[]',
+      subject_user_ids_json TEXT NOT NULL DEFAULT '[]',
+      sensitivity TEXT NOT NULL DEFAULT 'normal',
+      source_actor_id TEXT,
+      source_conversation_type TEXT NOT NULL DEFAULT 'import',
+      classification_reason TEXT NOT NULL DEFAULT '',
+      disclosure_reason TEXT NOT NULL DEFAULT ''
     );
 
     CREATE INDEX IF NOT EXISTS idx_lumi_memories_status ON lumi_memories(status);
     CREATE INDEX IF NOT EXISTS idx_lumi_memories_type ON lumi_memories(type);
     CREATE INDEX IF NOT EXISTS idx_lumi_memories_user_persona ON lumi_memories(user_id, persona_id);
     CREATE INDEX IF NOT EXISTS idx_lumi_memories_updated_at ON lumi_memories(updated_at);
-
     CREATE TABLE IF NOT EXISTS lumi_memory_vectors (
       memory_id TEXT NOT NULL,
       model TEXT NOT NULL,
@@ -161,6 +296,7 @@ function migrate(db: SqliteDatabase) {
 
     CREATE TABLE IF NOT EXISTS lumi_memory_events (
       id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL DEFAULT '${DOGGY_USER_ID}',
       kind TEXT NOT NULL,
       memory_id TEXT,
       related_memory_ids_json TEXT,
@@ -175,39 +311,178 @@ function migrate(db: SqliteDatabase) {
 
     CREATE INDEX IF NOT EXISTS idx_lumi_memory_events_created_at ON lumi_memory_events(created_at);
   `)
+
+  const eventColumns = db.prepare('PRAGMA table_info(lumi_memory_events)').all()
+  if (!eventColumns.some(column => column.name === 'user_id'))
+    db.exec(`ALTER TABLE lumi_memory_events ADD COLUMN user_id TEXT NOT NULL DEFAULT '${DOGGY_USER_ID}'`)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_lumi_memory_events_user_created ON lumi_memory_events(user_id, created_at)')
+
+  if (getMeta(db, MEMORY_OWNER_MIGRATION_KEY) !== 'complete') {
+    db.prepare('UPDATE lumi_memories SET user_id = ?').run(DOGGY_USER_ID)
+    db.prepare('UPDATE lumi_memory_events SET user_id = ?').run(DOGGY_USER_ID)
+    const legacySeedId = getMeta(db, 'seed_id')
+    if (legacySeedId)
+      setMetaWithDb(db, `seed_id:${DOGGY_USER_ID}`, legacySeedId)
+    setMetaWithDb(db, MEMORY_OWNER_MIGRATION_KEY, 'complete')
+  }
+
+  migrateMemoryScopes(db)
+}
+
+function migrateMemoryScopes(db: SqliteDatabase) {
+  const columns = db.prepare('PRAGMA table_info(lumi_memories)').all()
+  const additions = [
+    ['scope', `TEXT NOT NULL DEFAULT 'relationship'`],
+    ['owner_type', `TEXT NOT NULL DEFAULT 'user'`],
+    ['owner_id', `TEXT NOT NULL DEFAULT ''`],
+    ['visibility', `TEXT NOT NULL DEFAULT 'participants'`],
+    ['participant_user_ids_json', `TEXT NOT NULL DEFAULT '[]'`],
+    ['subject_user_ids_json', `TEXT NOT NULL DEFAULT '[]'`],
+    ['sensitivity', `TEXT NOT NULL DEFAULT 'normal'`],
+    ['source_actor_id', 'TEXT'],
+    ['source_conversation_type', `TEXT NOT NULL DEFAULT 'import'`],
+    ['classification_reason', `TEXT NOT NULL DEFAULT ''`],
+    ['disclosure_reason', `TEXT NOT NULL DEFAULT ''`],
+  ] as const
+  for (const [name, definition] of additions) {
+    if (!columns.some(column => column.name === name))
+      db.exec(`ALTER TABLE lumi_memories ADD COLUMN ${name} ${definition}`)
+  }
+  db.exec(`
+    UPDATE lumi_memories
+    SET source_actor_id = COALESCE(NULLIF(source_actor_id, ''), user_id),
+        source_conversation_type = CASE
+          WHEN source_conversation_type IN ('direct', 'group', 'manual', 'import') THEN source_conversation_type
+          ELSE 'import'
+        END,
+        classification_reason = CASE
+          WHEN classification_reason = '' THEN 'Legacy memory normalized under the current access policy.'
+          ELSE classification_reason
+        END,
+        disclosure_reason = CASE
+          WHEN disclosure_reason != '' THEN disclosure_reason
+          WHEN scope = 'global' THEN 'Legacy Lumi-owned memory available in every authorized conversation.'
+          WHEN scope = 'shared' THEN 'Legacy non-private memory marked shareable across relationships.'
+          WHEN scope = 'group' THEN 'Legacy group memory visible only in its owning conversation.'
+          WHEN scope = 'private' THEN 'Private memory; never disclose outside its source relationship.'
+          ELSE 'Relationship memory visible only to its owning user.'
+        END
+  `)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_lumi_memories_scope_owner ON lumi_memories(scope, owner_id)')
+
+  if (getMeta(db, MEMORY_SCOPE_MIGRATION_KEY) !== 'complete') {
+    const legacyRows = db.prepare('SELECT id, user_id FROM lumi_memories').all()
+    const update = db.prepare(`
+      UPDATE lumi_memories
+      SET scope = 'relationship', owner_type = 'user', owner_id = ?, visibility = 'participants',
+          participant_user_ids_json = ?, subject_user_ids_json = ?, sensitivity = 'normal'
+      WHERE id = ?
+    `)
+    for (const row of legacyRows) {
+      const userId = stringField(row.user_id, DOGGY_USER_ID)
+      update.run(userId, JSON.stringify([userId]), JSON.stringify([userId]), stringField(row.id))
+    }
+    setMetaWithDb(db, MEMORY_SCOPE_MIGRATION_KEY, 'complete')
+  }
+
+  migrateLumiGlobalSelfFacts(db)
+}
+
+function migrateLumiGlobalSelfFacts(db: SqliteDatabase) {
+  if (getMeta(db, LUMI_GLOBAL_SELF_FACTS_MIGRATION_KEY) === 'complete')
+    return
+
+  const existing = db.prepare('SELECT id FROM lumi_memories WHERE id = ?').get('lumi-global:self:birthday')
+  if (existing) {
+    setMetaWithDb(db, LUMI_GLOBAL_SELF_FACTS_MIGRATION_KEY, 'complete')
+    return
+  }
+
+  const rows = db.prepare('SELECT id, persona_id, content, status, created_at, updated_at FROM lumi_memories').all()
+  const birthday = findLumiSelfBirthday(rows)
+  if (birthday) {
+    upsertMemoryWithDb(db, {
+      id: 'lumi-global:self:birthday',
+      userId: DOGGY_USER_ID,
+      personaId: birthday.personaId,
+      type: 'persona_fact',
+      content: `Lumi 的生日是${birthday.date}。`,
+      confidence: 0.92,
+      importance: 0.95,
+      emotionalIntensity: 0.35,
+      relationshipRelevance: 0.45,
+      createdAt: birthday.createdAt,
+      updatedAt: birthday.updatedAt,
+      decay: 0,
+      tags: ['lumi_self', 'birthday', `derived_from:${birthday.sourceId}`],
+      status: 'active',
+      scope: 'global',
+      ownerType: 'lumi',
+      ownerId: birthday.personaId,
+      visibility: 'global',
+      participantUserIds: [],
+      subjectUserIds: ['lumi'],
+      sensitivity: 'normal',
+      sourceActorId: DOGGY_USER_ID,
+      sourceConversationType: 'import',
+      classificationReason: 'Migrated an explicit Lumi self birthday into global persona memory.',
+      disclosureReason: 'Lumi-owned self knowledge is available in every authorized conversation.',
+    })
+    setMetaWithDb(db, LUMI_GLOBAL_SELF_FACTS_MIGRATION_KEY, 'complete')
+  }
+}
+
+function findLumiSelfBirthday(rows: Record<string, any>[]) {
+  for (const row of rows) {
+    if (row.status !== 'active')
+      continue
+    const match = stringField(row.content).match(/Lumi.{0,8}生日(?:是|为)?\s*(\d{1,2}\s*月\s*\d{1,2}\s*日)/i)
+    if (!match)
+      continue
+    return {
+      date: match[1].replace(/\s+/g, ''),
+      personaId: stringField(row.persona_id, 'lumi'),
+      sourceId: stringField(row.id),
+      createdAt: stringField(row.created_at, new Date().toISOString()),
+      updatedAt: stringField(row.updated_at, new Date().toISOString()),
+    }
+  }
+  return null
 }
 
 export function createLumiMemoryService(params: {
   context: ReturnType<typeof createContext>['context']
 }) {
-  defineInvokeHandler(params.context, electronLumiMemoryGetSnapshot, async () => getSnapshot())
-  defineInvokeHandler(params.context, electronLumiMemoryReplaceSnapshot, async snapshot => replaceSnapshot(snapshot))
+  defineInvokeHandler(params.context, electronLumiMemoryGetSnapshot, async ({ userId }) => getSnapshot(userId))
+  defineInvokeHandler(params.context, electronLumiMemoryReplaceSnapshot, async ({ userId, snapshot }) => replaceSnapshot(userId, snapshot))
   defineInvokeHandler(params.context, electronLumiMemoryUpsertMemory, async memory => upsertMemory(memory))
-  defineInvokeHandler(params.context, electronLumiMemoryDeleteMemory, async ({ id }) => deleteMemory(id))
-  defineInvokeHandler(params.context, electronLumiMemoryGetVectors, async payload => getVectors(payload.model))
+  defineInvokeHandler(params.context, electronLumiMemoryDeleteMemory, async ({ id, userId }) => deleteMemory(id, userId))
+  defineInvokeHandler(params.context, electronLumiMemoryGetVectors, async payload => getVectors(payload.model, payload.userId))
   defineInvokeHandler(params.context, electronLumiMemoryUpsertVector, async record => upsertVector(record))
   defineInvokeHandler(params.context, electronLumiMemoryDeleteVector, async payload => deleteVector(payload.memoryId, payload.model))
-  defineInvokeHandler(params.context, electronLumiMemoryVectorStatus, async () => getVectorStatus())
-  defineInvokeHandler(params.context, electronLumiMemoryBackfillVectors, async payload => backfillVectors(payload?.limit))
-  defineInvokeHandler(params.context, electronLumiMemorySearchVectors, async payload => searchVectors(payload.query, payload.limit))
+  defineInvokeHandler(params.context, electronLumiMemoryVectorStatus, async ({ userId }) => getVectorStatus(userId))
+  defineInvokeHandler(params.context, electronLumiMemoryBackfillVectors, async payload => backfillVectors(payload.userId, payload.limit))
+  defineInvokeHandler(params.context, electronLumiMemorySearchVectors, async payload => searchVectors(payload.userId, payload.query, payload.limit))
   defineInvokeHandler(params.context, electronLumiMemorySyncVector, async memory => syncVectorForMemory(memory))
-  defineInvokeHandler(params.context, electronLumiMemorySaveEvent, async event => saveEvent(event))
-  defineInvokeHandler(params.context, electronLumiMemorySetSeedId, async ({ seedId }) => setMeta('seed_id', seedId))
-  defineInvokeHandler(params.context, electronLumiMemoryClear, async () => clearDatabase())
+  defineInvokeHandler(params.context, electronLumiMemorySaveEvent, async ({ userId, event }) => saveEvent(userId, event))
+  defineInvokeHandler(params.context, electronLumiMemorySetSeedId, async ({ userId, seedId }) => setMeta(`seed_id:${userId}`, seedId))
+  defineInvokeHandler(params.context, electronLumiMemoryClear, async ({ userId }) => clearDatabase(userId))
 }
 
-async function getSnapshot(): Promise<ElectronLumiMemorySnapshot> {
+async function getSnapshot(userId: string): Promise<ElectronLumiMemorySnapshot> {
   const { db, path } = await getDatabase()
   const fragments = db.prepare(`
-    SELECT * FROM lumi_memories
+    SELECT m.* FROM lumi_memories m
+    WHERE ${MEMORY_ACCESS_SQL}
     ORDER BY updated_at DESC, created_at DESC
-  `).all().map(rowToMemory)
+  `).all(userId, userId).map(rowToMemory)
   const events = db.prepare(`
     SELECT * FROM lumi_memory_events
+    WHERE user_id = ?
     ORDER BY created_at DESC
     LIMIT 200
-  `).all().map(rowToEvent)
-  const seedId = getMeta(db, 'seed_id') ?? ''
+  `).all(userId).map(rowToEvent)
+  const seedId = getMeta(db, `seed_id:${userId}`) ?? ''
 
   return {
     fragments,
@@ -217,23 +492,32 @@ async function getSnapshot(): Promise<ElectronLumiMemorySnapshot> {
   } satisfies ElectronLumiMemorySnapshot
 }
 
-async function replaceSnapshot(snapshot: ElectronLumiMemorySnapshot): Promise<ElectronLumiMemorySnapshot> {
+async function replaceSnapshot(userId: string, snapshot: ElectronLumiMemorySnapshot): Promise<ElectronLumiMemorySnapshot> {
   const { db } = await getDatabase()
   db.exec('BEGIN IMMEDIATE')
   try {
-    db.exec('DELETE FROM lumi_memory_events; DELETE FROM lumi_memory_vectors; DELETE FROM lumi_memories;')
-    for (const memory of snapshot.fragments)
-      upsertMemoryWithDb(db, memory)
+    db.prepare('DELETE FROM lumi_memory_events WHERE user_id = ?').run(userId)
+    db.prepare(`DELETE FROM lumi_memory_vectors WHERE memory_id IN (
+      SELECT id FROM lumi_memories WHERE user_id = ? AND scope IN ('relationship', 'shared', 'private')
+    )`).run(userId)
+    db.prepare(`DELETE FROM lumi_memories WHERE user_id = ? AND scope IN ('relationship', 'shared', 'private')`).run(userId)
+    for (const memory of snapshot.fragments) {
+      const scope = memoryScopeField(memory.scope)
+      upsertMemoryWithDb(db, {
+        ...memory,
+        userId: scope === 'global' || scope === 'shared' || scope === 'group' ? memory.userId : userId,
+      })
+    }
     for (const event of snapshot.events)
-      saveEventWithDb(db, event)
-    setMetaWithDb(db, 'seed_id', snapshot.seedId ?? '')
+      saveEventWithDb(db, userId, event)
+    setMetaWithDb(db, `seed_id:${userId}`, snapshot.seedId ?? '')
     db.exec('COMMIT')
   }
   catch (error) {
     db.exec('ROLLBACK')
     throw error
   }
-  return await getSnapshot()
+  return await getSnapshot(userId)
 }
 
 async function upsertMemory(memory: Record<string, any>) {
@@ -261,9 +545,20 @@ function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
       last_used_at,
       decay,
       tags_json,
-      status
+      status,
+      scope,
+      owner_type,
+      owner_id,
+      visibility,
+      participant_user_ids_json,
+      subject_user_ids_json,
+      sensitivity,
+      source_actor_id,
+      source_conversation_type,
+      classification_reason,
+      disclosure_reason
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       user_id = excluded.user_id,
       persona_id = excluded.persona_id,
@@ -280,7 +575,18 @@ function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
       last_used_at = excluded.last_used_at,
       decay = excluded.decay,
       tags_json = excluded.tags_json,
-      status = excluded.status
+      status = excluded.status,
+      scope = excluded.scope,
+      owner_type = excluded.owner_type,
+      owner_id = excluded.owner_id,
+      visibility = excluded.visibility,
+      participant_user_ids_json = excluded.participant_user_ids_json,
+      subject_user_ids_json = excluded.subject_user_ids_json,
+      sensitivity = excluded.sensitivity,
+      source_actor_id = excluded.source_actor_id,
+      source_conversation_type = excluded.source_conversation_type,
+      classification_reason = excluded.classification_reason,
+      disclosure_reason = excluded.disclosure_reason
   `).run(
     stringField(memory.id),
     stringField(memory.userId, 'local'),
@@ -299,23 +605,38 @@ function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
     numberField(memory.decay),
     JSON.stringify(Array.isArray(memory.tags) ? memory.tags : []),
     stringField(memory.status, 'candidate'),
+    memoryScopeField(memory.scope),
+    ownerTypeField(memory.ownerType ?? memory.owner_type, memory.scope),
+    stringField(memory.ownerId ?? memory.owner_id, defaultMemoryOwnerId(memory)),
+    visibilityField(memory.visibility, memory.scope),
+    JSON.stringify(stringArrayField(memory.participantUserIds ?? memory.participant_user_ids_json, memory.scope === 'global' || memory.scope === 'shared' ? [] : [stringField(memory.userId, DOGGY_USER_ID)])),
+    JSON.stringify(stringArrayField(memory.subjectUserIds ?? memory.subject_user_ids_json)),
+    sensitivityField(memory.sensitivity, memory.scope),
+    nullableString(memory.sourceActorId ?? memory.source_actor_id),
+    sourceConversationTypeField(memory.sourceConversationType ?? memory.source_conversation_type),
+    stringField(memory.classificationReason ?? memory.classification_reason),
+    stringField(memory.disclosureReason ?? memory.disclosure_reason),
   )
 }
 
-async function deleteMemory(id: string) {
+async function deleteMemory(id: string, userId: string) {
   const { db } = await getDatabase()
+  const owned = db.prepare('SELECT id FROM lumi_memories WHERE id = ? AND user_id = ?').get(id, userId)
+  if (!owned)
+    return
   db.prepare('DELETE FROM lumi_memory_vectors WHERE memory_id = ?').run(id)
   db.prepare('DELETE FROM lumi_memories WHERE id = ?').run(id)
 }
 
-async function getVectors(model: string): Promise<ElectronLumiMemoryVectorRecord[]> {
+async function getVectors(model: string, userId: string): Promise<ElectronLumiMemoryVectorRecord[]> {
   const { db } = await getDatabase()
   return db.prepare(`
-    SELECT memory_id, model, signature, vector_json, device, updated_at
-    FROM lumi_memory_vectors
-    WHERE model = ?
-    ORDER BY updated_at DESC
-  `).all(stringField(model)).map(rowToVectorRecord)
+    SELECT v.memory_id, v.model, v.signature, v.vector_json, v.device, v.updated_at
+    FROM lumi_memory_vectors v
+    INNER JOIN lumi_memories m ON m.id = v.memory_id
+    WHERE v.model = ? AND ${MEMORY_ACCESS_SQL}
+    ORDER BY v.updated_at DESC
+  `).all(stringField(model), userId, userId).map(rowToVectorRecord)
 }
 
 async function upsertVector(record: ElectronLumiMemoryVectorRecord) {
@@ -359,20 +680,20 @@ async function deleteVector(memoryId: string, model?: string) {
     db.prepare('DELETE FROM lumi_memory_vectors WHERE memory_id = ?').run(memoryId)
 }
 
-async function getVectorStatus(): Promise<ElectronLumiMemoryVectorStatus> {
+async function getVectorStatus(userId: string): Promise<ElectronLumiMemoryVectorStatus> {
   const { db } = await getDatabase()
-  return vectorStatusWithDb(db)
+  return vectorStatusWithDb(db, userId)
 }
 
 async function syncVectorForMemory(memory: Record<string, any>): Promise<ElectronLumiMemoryVectorStatus> {
   const { db } = await getDatabase()
   const normalized = rowLikeMemory(memory)
   if (!normalized.id)
-    return vectorStatusWithDb(db)
+    return vectorStatusWithDb(db, normalized.userId)
 
   if (normalized.status === 'rejected') {
     db.prepare('DELETE FROM lumi_memory_vectors WHERE memory_id = ? AND model = ?').run(normalized.id, LUMI_MEMORY_EMBEDDING_MODEL)
-    return vectorStatusWithDb(db)
+    return vectorStatusWithDb(db, normalized.userId)
   }
 
   try {
@@ -388,18 +709,18 @@ async function syncVectorForMemory(memory: Record<string, any>): Promise<Electro
     })
   }
   catch (error) {
-    vectorWorkerLastError = error instanceof Error ? error.message : String(error)
+    vectorWorkerLastError = errorMessageFrom(error) ?? String(error)
     console.warn('[lumi-memory] failed to sync memory vector', error)
   }
-  return vectorStatusWithDb(db)
+  return vectorStatusWithDb(db, normalized.userId)
 }
 
-async function backfillVectors(limit = LUMI_MEMORY_VECTOR_BACKFILL_LIMIT): Promise<ElectronLumiMemoryVectorStatus> {
+async function backfillVectors(userId: string, limit = LUMI_MEMORY_VECTOR_BACKFILL_LIMIT): Promise<ElectronLumiMemoryVectorStatus> {
   const { db } = await getDatabase()
-  const memories = vectorBackfillCandidates(db, limit)
+  const memories = vectorBackfillCandidates(db, userId, limit)
   if (memories.length === 0) {
     vectorWorkerProgress = '向量已经补齐'
-    return vectorStatusWithDb(db)
+    return vectorStatusWithDb(db, userId)
   }
 
   let completed = 0
@@ -426,37 +747,38 @@ async function backfillVectors(limit = LUMI_MEMORY_VECTOR_BACKFILL_LIMIT): Promi
       }
     }
     catch (error) {
-      vectorWorkerLastError = error instanceof Error ? error.message : String(error)
+      vectorWorkerLastError = errorMessageFrom(error) ?? String(error)
       vectorWorkerProgress = `补向量失败: ${vectorWorkerLastError}`
       console.warn('[lumi-memory] vector backfill failed', error)
-      return vectorStatusWithDb(db)
+      return vectorStatusWithDb(db, userId)
     }
   }
 
   vectorWorkerProgress = `补向量完成 ${completed}/${memories.length}`
-  return vectorStatusWithDb(db)
+  return vectorStatusWithDb(db, userId)
 }
 
-async function searchVectors(query: string, limit = LUMI_MEMORY_VECTOR_SEARCH_LIMIT): Promise<ElectronLumiMemoryVectorSearchResult> {
+async function searchVectors(userId: string, query: string, limit = LUMI_MEMORY_VECTOR_SEARCH_LIMIT): Promise<ElectronLumiMemoryVectorSearchResult> {
   const { db } = await getDatabase()
   const safeQuery = stringField(query).trim()
   if (!safeQuery)
-    return { scores: {}, status: vectorStatusWithDb(db) }
+    return { scores: {}, status: vectorStatusWithDb(db, userId) }
 
-  let status = vectorStatusWithDb(db)
+  let status = vectorStatusWithDb(db, userId)
   if (status.indexedCount === 0 && status.missingCount > 0)
-    status = await backfillVectors(Math.min(160, status.missingCount))
+    status = await backfillVectors(userId, Math.min(160, status.missingCount))
 
   try {
     vectorWorkerProgress = `正在检索向量: ${previewText(safeQuery, 40)}`
     const [queryVector] = await embedTexts([safeQuery])
     const rows = db.prepare(`
-      SELECT memory_id, vector_json
-      FROM lumi_memory_vectors
-      WHERE model = ?
-      ORDER BY updated_at DESC
+      SELECT v.memory_id, v.vector_json
+      FROM lumi_memory_vectors v
+      INNER JOIN lumi_memories m ON m.id = v.memory_id
+      WHERE v.model = ? AND ${MEMORY_ACCESS_SQL}
+      ORDER BY v.updated_at DESC
       LIMIT ?
-    `).all(LUMI_MEMORY_EMBEDDING_MODEL, Math.max(1, limit))
+    `).all(LUMI_MEMORY_EMBEDDING_MODEL, userId, userId, Math.max(1, limit))
 
     const scores: Record<string, number> = {}
     for (const row of rows) {
@@ -466,22 +788,29 @@ async function searchVectors(query: string, limit = LUMI_MEMORY_VECTOR_SEARCH_LI
       scores[stringField(row.memory_id)] = cosineSimilarity(queryVector, vector)
     }
     vectorWorkerProgress = `检索完成: ${Object.keys(scores).length} 条向量`
-    return { scores, status: vectorStatusWithDb(db) }
+    return { scores, status: vectorStatusWithDb(db, userId) }
   }
   catch (error) {
-    vectorWorkerLastError = error instanceof Error ? error.message : String(error)
+    vectorWorkerLastError = errorMessageFrom(error) ?? String(error)
     vectorWorkerProgress = `检索失败: ${vectorWorkerLastError}`
     console.warn('[lumi-memory] vector search failed', error)
-    return { scores: {}, status: vectorStatusWithDb(db) }
+    return { scores: {}, status: vectorStatusWithDb(db, userId) }
   }
 }
-function vectorStatusWithDb(db: SqliteDatabase): ElectronLumiMemoryVectorStatus {
-  const rows = db.prepare(`
+function vectorStatusWithDb(db: SqliteDatabase, userId?: string): ElectronLumiMemoryVectorStatus {
+  const rows = userId
+    ? db.prepare(`
     SELECT m.id, m.updated_at, m.type, m.status, m.tags_json, m.content, v.signature
     FROM lumi_memories m
     LEFT JOIN lumi_memory_vectors v ON v.memory_id = m.id AND v.model = ?
-    WHERE m.status != 'rejected'
-  `).all(LUMI_MEMORY_EMBEDDING_MODEL)
+    WHERE m.status != 'rejected' AND ${MEMORY_ACCESS_SQL}
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL, userId, userId)
+    : db.prepare(`
+      SELECT m.id, m.updated_at, m.type, m.status, m.tags_json, m.content, v.signature
+      FROM lumi_memories m
+      LEFT JOIN lumi_memory_vectors v ON v.memory_id = m.id AND v.model = ?
+      WHERE m.status != 'rejected'
+    `).all(LUMI_MEMORY_EMBEDDING_MODEL)
   let indexedCount = 0
   for (const row of rows) {
     if (row.signature === memoryVectorSignature(rowToMemory(row)))
@@ -506,15 +835,15 @@ function vectorStatusWithDb(db: SqliteDatabase): ElectronLumiMemoryVectorStatus 
   }
 }
 
-function vectorBackfillCandidates(db: SqliteDatabase, limit: number) {
+function vectorBackfillCandidates(db: SqliteDatabase, userId: string, limit: number) {
   return db.prepare(`
     SELECT m.*
     FROM lumi_memories m
     LEFT JOIN lumi_memory_vectors v ON v.memory_id = m.id AND v.model = ?
-    WHERE m.status != 'rejected'
+    WHERE m.status != 'rejected' AND ${MEMORY_ACCESS_SQL}
     ORDER BY m.updated_at DESC, m.created_at DESC
     LIMIT ?
-  `).all(LUMI_MEMORY_EMBEDDING_MODEL, Math.max(1, limit)).map(rowToMemory).filter((memory) => {
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL, userId, userId, Math.max(1, limit)).map(rowToMemory).filter((memory) => {
     const row = db.prepare(`
         SELECT signature
         FROM lumi_memory_vectors
@@ -557,13 +886,20 @@ function upsertVectorWithDb(db: SqliteDatabase, record: ElectronLumiMemoryVector
 }
 
 async function embedTexts(texts: string[]): Promise<number[][]> {
-  const result = await requestVectorWorker<LumiVectorWorkerEmbedResult>('embed', {
+  const params = {
     model: LUMI_MEMORY_EMBEDDING_MODEL,
     texts,
     batchSize: LUMI_MEMORY_EMBEDDING_BATCH_SIZE,
     device: LUMI_MEMORY_VECTOR_DEVICE,
-    localFilesOnly: false,
-  })
+  }
+  let result: LumiVectorWorkerEmbedResult
+  try {
+    result = await requestVectorWorker<LumiVectorWorkerEmbedResult>('embed', { ...params, localFilesOnly: true })
+  }
+  catch {
+    vectorWorkerProgress = '本地向量模型不完整，正在检查配置的模型来源'
+    result = await requestVectorWorker<LumiVectorWorkerEmbedResult>('embed', { ...params, localFilesOnly: false })
+  }
   vectorWorkerDevice = result.device || vectorWorkerDevice
   return result.vectors
 }
@@ -592,6 +928,12 @@ async function ensureVectorWorker(): Promise<ChildProcessWithoutNullStreams> {
   if (vectorWorker && !vectorWorker.killed)
     return vectorWorker
   if (vectorWorkerStarting) {
+    // NOTICE:
+    // A competing ensureVectorWorker call changes this flag in its finally block.
+    // The lint rule cannot observe that asynchronous cross-invocation mutation.
+    // Source/context: concurrent renderer requests can start vector backfill together.
+    // Removal condition: startup coordination moves to a shared startup Promise.
+    // eslint-disable-next-line no-unmodified-loop-condition
     while (vectorWorkerStarting)
       await new Promise(resolve => setTimeout(resolve, 50))
     if (vectorWorker && !vectorWorker.killed)
@@ -816,7 +1158,7 @@ function handleVectorWorkerStderr(chunk: string) {
         continue
       }
       catch (error) {
-        vectorWorkerLastError = error instanceof Error ? error.message : String(error)
+        vectorWorkerLastError = errorMessageFrom(error) ?? String(error)
       }
     }
     vectorWorkerProgress = line
@@ -828,16 +1170,17 @@ function numberOrUndefined(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
-async function saveEvent(event: Record<string, any>) {
+async function saveEvent(userId: string, event: Record<string, any>) {
   const { db } = await getDatabase()
-  saveEventWithDb(db, event)
-  pruneEvents(db)
+  saveEventWithDb(db, userId, event)
+  pruneEvents(db, userId)
 }
 
-function saveEventWithDb(db: SqliteDatabase, event: Record<string, any>) {
+function saveEventWithDb(db: SqliteDatabase, userId: string, event: Record<string, any>) {
   db.prepare(`
     INSERT OR REPLACE INTO lumi_memory_events (
       id,
+      user_id,
       kind,
       memory_id,
       related_memory_ids_json,
@@ -849,9 +1192,10 @@ function saveEventWithDb(db: SqliteDatabase, event: Record<string, any>) {
       preview,
       created_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     stringField(event.id),
+    userId,
     stringField(event.kind, 'search'),
     nullableString(event.memoryId),
     JSON.stringify(Array.isArray(event.relatedMemoryIds) ? event.relatedMemoryIds : []),
@@ -883,20 +1227,26 @@ function getMeta(db: SqliteDatabase, key: string) {
   return typeof row?.value === 'string' ? row.value : undefined
 }
 
-async function clearDatabase() {
+async function clearDatabase(userId: string) {
   const { db } = await getDatabase()
-  db.exec('DELETE FROM lumi_memory_events; DELETE FROM lumi_memory_vectors; DELETE FROM lumi_memories; DELETE FROM lumi_meta;')
+  db.prepare('DELETE FROM lumi_memory_events WHERE user_id = ?').run(userId)
+  db.prepare(`DELETE FROM lumi_memory_vectors WHERE memory_id IN (
+    SELECT id FROM lumi_memories WHERE user_id = ? AND scope IN ('relationship', 'shared', 'private')
+  )`).run(userId)
+  db.prepare(`DELETE FROM lumi_memories WHERE user_id = ? AND scope IN ('relationship', 'shared', 'private')`).run(userId)
+  db.prepare('DELETE FROM lumi_meta WHERE key = ?').run(`seed_id:${userId}`)
 }
 
-function pruneEvents(db: SqliteDatabase) {
-  db.exec(`
+function pruneEvents(db: SqliteDatabase, userId: string) {
+  db.prepare(`
     DELETE FROM lumi_memory_events
-    WHERE id NOT IN (
+    WHERE user_id = ? AND id NOT IN (
       SELECT id FROM lumi_memory_events
+      WHERE user_id = ?
       ORDER BY created_at DESC
       LIMIT 200
     );
-  `)
+  `).run(userId, userId)
 }
 
 function rowLikeMemory(value: Record<string, any>) {
@@ -918,6 +1268,17 @@ function rowLikeMemory(value: Record<string, any>) {
     decay: numberField(value.decay),
     tags: Array.isArray(value.tags) ? value.tags.filter(item => typeof item === 'string') : parseJsonArray(value.tags_json),
     status: stringField(value.status, 'candidate'),
+    scope: memoryScopeField(value.scope),
+    ownerType: ownerTypeField(value.ownerType ?? value.owner_type, value.scope),
+    ownerId: stringField(value.ownerId ?? value.owner_id, defaultMemoryOwnerId(value)),
+    visibility: visibilityField(value.visibility, value.scope),
+    participantUserIds: stringArrayField(value.participantUserIds ?? value.participant_user_ids_json, value.scope === 'global' || value.scope === 'shared' ? [] : [stringField(value.userId ?? value.user_id, DOGGY_USER_ID)]),
+    subjectUserIds: stringArrayField(value.subjectUserIds ?? value.subject_user_ids_json),
+    sensitivity: sensitivityField(value.sensitivity, value.scope),
+    sourceActorId: value.sourceActorId ?? value.source_actor_id ?? undefined,
+    sourceConversationType: sourceConversationTypeField(value.sourceConversationType ?? value.source_conversation_type),
+    classificationReason: stringField(value.classificationReason ?? value.classification_reason),
+    disclosureReason: stringField(value.disclosureReason ?? value.disclosure_reason),
   }
 }
 
@@ -958,6 +1319,54 @@ function toPlainIpcObject<T>(value: T): T {
 
 function stringField(value: unknown, fallback = '') {
   return typeof value === 'string' ? value : fallback
+}
+
+function memoryScopeField(value: unknown) {
+  return value === 'global' || value === 'shared' || value === 'group' || value === 'private' ? value : 'relationship'
+}
+
+function ownerTypeField(value: unknown, scope: unknown) {
+  if (value === 'lumi' || value === 'user' || value === 'group')
+    return value
+  if (scope === 'global')
+    return 'lumi'
+  if (scope === 'group')
+    return 'group'
+  return 'user'
+}
+
+function visibilityField(value: unknown, scope: unknown) {
+  if (value === 'global' || value === 'shared' || value === 'participants' || value === 'private')
+    return value
+  if (scope === 'global')
+    return 'global'
+  if (scope === 'shared')
+    return 'shared'
+  if (scope === 'private')
+    return 'private'
+  return 'participants'
+}
+
+function sensitivityField(value: unknown, scope: unknown) {
+  return value === 'private' || scope === 'private' ? 'private' : 'normal'
+}
+
+function sourceConversationTypeField(value: unknown) {
+  return value === 'direct' || value === 'group' || value === 'manual' ? value : 'import'
+}
+
+function defaultMemoryOwnerId(value: Record<string, any>) {
+  const scope = memoryScopeField(value.scope)
+  if (scope === 'global')
+    return stringField(value.personaId ?? value.persona_id, 'lumi')
+  if (scope === 'group')
+    return stringField(value.conversationId ?? value.conversation_id, 'unassigned-group')
+  return stringField(value.userId ?? value.user_id, DOGGY_USER_ID)
+}
+
+function stringArrayField(value: unknown, fallback: string[] = []) {
+  const values = Array.isArray(value) ? value : typeof value === 'string' ? parseJsonArray(value) : fallback
+  return [...new Set(values.filter(item => typeof item === 'string').map(item => item.trim()).filter(Boolean))]
 }
 
 function nullableString(value: unknown) {

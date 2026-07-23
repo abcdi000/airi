@@ -359,12 +359,23 @@ function buildDefinitions(): LumiToolDefinition[] {
       implementationPath: 'apps/stage-tamagotchi/src/renderer/stores/lumi-proactive-vision.ts',
     }),
     def({
+      id: 'list_observation_sources',
+      name: 'List observable desktop sources',
+      description: 'List current screens and windows so Lumi can choose an exact observation target.',
+      capabilities: ['screen_observation'],
+      implementationPath: 'apps/stage-tamagotchi/src/renderer/stores/lumi-proactive-vision.ts',
+    }),
+    def({
       id: 'observe_screen',
       name: '观察一次屏幕',
       description: '通过当前主动视觉链路观察屏幕，并返回视觉摘要。',
       capabilities: ['screen_observation'],
       riskLevel: 'medium',
       canAccessNetwork: true,
+      inputSchema: {
+        reason: 'string',
+        sourceId: 'exact sourceId returned by list_observation_sources',
+      },
       implementationPath: 'apps/stage-tamagotchi/src/renderer/stores/lumi-proactive-vision.ts',
     }),
     def({
@@ -622,7 +633,11 @@ function buildExecutors(manifest: ReturnType<typeof useLocalStorage<LumiWorldMan
     },
     get_runtime_logs: (input) => useLumiProactiveVisionStore().runtimeLogs.slice(0, numberValue(input.limit, 20, 1, 80)),
     get_autonomous_decision_log: (input) => useLumiProactiveVisionStore().decisionLog.slice(0, numberValue(input.limit, 20, 1, 80)),
-    observe_screen: (input) => useLumiProactiveVisionStore().observeScreenForChatTool(text(input.reason, 'tool_mesh')),
+    list_observation_sources: () => useLumiProactiveVisionStore().listObservationSourcesForChatTool(),
+    observe_screen: (input) => useLumiProactiveVisionStore().observeScreenForChatTool(
+      text(input.reason, 'tool_mesh'),
+      text(input.sourceId),
+    ),
     get_environment_context: () => {
       const store = useLumiProactiveVisionStore()
       return {

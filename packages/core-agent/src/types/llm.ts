@@ -20,6 +20,8 @@ export interface StreamOptions {
   maxSteps?: number
   captureToolErrors?: boolean
   tools?: Tool[] | (() => Promise<Tool[] | undefined>)
+  /** Applies a final per-turn policy after builtin and caller tools are merged and deduplicated. */
+  toolTransform?: (tools: Tool[]) => Promise<Tool[]> | Tool[]
   /**
    * Per-model runtime cache of whether the provider accepts content-part arrays
    * (e.g. `[{type:'text',...},{type:'image_url',...}]`) for `messages[].content`.

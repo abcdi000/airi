@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -74,7 +74,8 @@ describe('static asset paths', () => {
     await mkdir(join(root, 'dist', 'ui'), { recursive: true })
     await writeFile(join(root, 'dist', 'ui', 'index.html'), '<html></html>')
 
-    await expect(resolveStaticAssetFilePath(root, 'dist/ui/index.html')).resolves.toContain('dist/ui/index.html')
+    const resolvedFile = await resolveStaticAssetFilePath(root, 'dist/ui/index.html')
+    expect(resolvedFile?.split(sep).join('/')).toContain('dist/ui/index.html')
     await expect(resolveStaticAssetFilePath(root, '../outside.txt')).resolves.toBeUndefined()
   })
 
@@ -83,10 +84,9 @@ describe('static asset paths', () => {
     const outsideRoot = await mkdtemp(join(tmpdir(), 'airi-plugin-assets-outside-'))
     tempRoots.push(root, outsideRoot)
 
-    const outsideFile = join(outsideRoot, 'secret.txt')
-    await writeFile(outsideFile, 'secret')
-    await symlink(outsideFile, join(root, 'link-name'))
+    await writeFile(join(outsideRoot, 'secret.txt'), 'secret')
+    await symlink(outsideRoot, join(root, 'outside-link'), 'junction')
 
-    await expect(resolveStaticAssetFilePath(root, 'link-name')).resolves.toBeUndefined()
+    await expect(resolveStaticAssetFilePath(root, 'outside-link/secret.txt')).resolves.toBeUndefined()
   })
 })

@@ -28,7 +28,7 @@ export async function setupChatWindowElectronInvokes(params: {
 
   const { context } = createContext(ipcMain, params.window)
 
-  await setupBaseWindowElectronInvokes({ context, window: params.window, i18n: params.i18n, serverChannel: params.serverChannel })
+  await setupBaseWindowElectronInvokes({ context, window: params.window, i18n: params.i18n, serverChannel: params.serverChannel, mcpStdioManager: params.mcpStdioManager })
 
   createWidgetsService({ context, widgetsManager: params.widgetsManager, window: params.window })
   createMcpServersService({ context, manager: params.mcpStdioManager })

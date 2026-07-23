@@ -201,7 +201,7 @@ function buildFailureExplanation(
     case 'open_app':
     case 'focus_app': {
       const app = action.kind === 'open_app' ? action.input.app : action.input.app
-      parts.push(`Verify that "${app}" is installed and listed in COMPUTER_USE_OPENABLE_APPS.`)
+      parts.push(`Verify that "${app}" is installed, visible when focusing, and not matched by COMPUTER_USE_DENY_APPS.`)
       break
     }
   }

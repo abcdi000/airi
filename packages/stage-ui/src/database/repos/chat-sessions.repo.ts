@@ -46,6 +46,82 @@ export const chatSessionsRepo = {
     await storage.setItemRaw(key, record)
   },
 
+  /** Adds a shared conversation reference to one participant's local index. */
+  async linkSessionToUser(userId: string, meta: ChatSessionRecord['meta']) {
+    const index = await this.getIndex(userId) ?? { userId, characters: {} }
+    const character = index.characters[meta.characterId] ?? {
+      activeSessionId: meta.sessionId,
+      sessions: {},
+    }
+    character.sessions[meta.sessionId] = meta
+    character.activeSessionId ||= meta.sessionId
+    index.characters[meta.characterId] = character
+    await this.saveIndex(index)
+  },
+
+  /** Removes a shared conversation reference without deleting its common record. */
+  async unlinkSessionFromUser(userId: string, meta: ChatSessionRecord['meta']) {
+    const index = await this.getIndex(userId)
+    const character = index?.characters[meta.characterId]
+    if (!index || !character || !character.sessions[meta.sessionId])
+      return
+    delete character.sessions[meta.sessionId]
+    if (character.activeSessionId === meta.sessionId)
+      character.activeSessionId = Object.keys(character.sessions)[0] ?? ''
+    if (Object.keys(character.sessions).length === 0)
+      delete index.characters[meta.characterId]
+    await this.saveIndex(index)
+  },
+
+  /** Copies a legacy user's sessions to a new owner without deleting the source. */
+  async copyUserDataIfTargetEmpty(sourceUserId: string, targetUserId: string) {
+    const existingTarget = await this.getIndex(targetUserId)
+    if (existingTarget)
+      return false
+    const source = await this.getIndex(sourceUserId)
+    if (!source)
+      return false
+
+    const migratedIndex: ChatSessionsIndex = {
+      ...source,
+      userId: targetUserId,
+      characters: {},
+    }
+    const migratedIds = new Map<string, string>()
+    for (const character of Object.values(source.characters)) {
+      for (const sessionId of Object.keys(character.sessions))
+        migratedIds.set(sessionId, `${sessionId}--${targetUserId.slice(-8)}`)
+    }
+    for (const [characterId, character] of Object.entries(source.characters)) {
+      migratedIndex.characters[characterId] = {
+        ...character,
+        activeSessionId: migratedIds.get(character.activeSessionId) ?? '',
+        sessions: {},
+      }
+      for (const [sessionId, meta] of Object.entries(character.sessions)) {
+        const migratedSessionId = migratedIds.get(sessionId)!
+        const migratedMeta = {
+          ...meta,
+          sessionId: migratedSessionId,
+          userId: targetUserId,
+          conversationType: 'direct' as const,
+          participantUserIds: [targetUserId],
+          parentTimelineId: meta.parentTimelineId ? migratedIds.get(meta.parentTimelineId) ?? meta.parentTimelineId : undefined,
+        }
+        migratedIndex.characters[characterId].sessions[migratedSessionId] = migratedMeta
+        const record = await this.getSession(sessionId)
+        if (record) {
+          await this.saveSession(migratedSessionId, {
+            ...record,
+            meta: migratedMeta,
+          })
+        }
+      }
+    }
+    await this.saveIndex(migratedIndex)
+    return true
+  },
+
   // Cleanup
   async deleteSession(sessionId: string) {
     await storage.removeItem(`local:chat/sessions/${sessionId}`)
@@ -150,7 +226,9 @@ export const chatSessionsRepo = {
     if (index) {
       for (const charIndex of Object.values(index.characters)) {
         for (const sessionId of Object.keys(charIndex.sessions)) {
-          await this.deleteSession(sessionId)
+          const meta = charIndex.sessions[sessionId]
+          if (meta?.conversationType !== 'group')
+            await this.deleteSession(sessionId)
         }
       }
       await storage.removeItem(`local:chat/index/${userId}`)

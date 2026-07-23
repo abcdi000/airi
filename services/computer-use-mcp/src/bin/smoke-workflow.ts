@@ -70,7 +70,6 @@ async function createClient(overrides: Record<string, string> = {}): Promise<Cli
       COMPUTER_USE_EXECUTOR: 'dry-run',
       COMPUTER_USE_SESSION_TAG: 'smoke-workflow',
       COMPUTER_USE_ALLOWED_BOUNDS: '0,0,1920,1080',
-      COMPUTER_USE_OPENABLE_APPS: 'Finder,Terminal,Cursor,Visual Studio Code,Google Chrome',
       ...overrides,
     },
     stderr: 'pipe',

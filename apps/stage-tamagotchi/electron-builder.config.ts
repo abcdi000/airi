@@ -155,6 +155,7 @@ export default {
     },
   },
   nsis: {
+    include: 'build/installer.nsh',
     artifactName: '${productName}-${version}-windows-${arch}-setup.${ext}',
     shortcutName: '${productName}',
     uninstallDisplayName: '${productName}',
@@ -165,6 +166,7 @@ export default {
     runAfterFinish: true,
   },
   nsisWeb: {
+    include: 'build/installer.nsh',
     artifactName: '${productName}-${version}-windows-${arch}-web-setup.${ext}',
     shortcutName: '${productName}',
     uninstallDisplayName: '${productName}',

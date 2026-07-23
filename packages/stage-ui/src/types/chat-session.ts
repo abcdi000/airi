@@ -2,8 +2,13 @@ import type { ChatHistoryItem } from './chat'
 
 export interface ChatSessionMeta {
   sessionId: string
+  /** User that originally created or owns the local conversation record. */
   userId: string
   characterId: string
+  /** Conversation disclosure boundary. */
+  conversationType: 'direct' | 'group'
+  /** Internal Lumi user IDs allowed to open this conversation. */
+  participantUserIds: string[]
   title?: string
   /**
    * Lumi treats conversations as one continuous relationship timeline.

@@ -1,11 +1,19 @@
 import type { LumiStateSnapshot } from '../../../../lumi-runtime/src'
+import type { LumiRoomLedgerSnapshot } from '../../database/repos/lumi-room-ledger.repo'
 import type { BackgroundEntry } from '../../stores/background'
+import type { LumiChannelDeviceArchiveSnapshot, LumiChannelDeviceArchiveSnapshotV2 } from '../../stores/lumi-channel-devices'
 import type { LumiCurrentState } from '../../stores/lumi-current-state'
+import type { LumiIdentitySnapshot } from '../../stores/lumi-identity'
 import type { LumiMemoryPersistenceSnapshot } from '../../stores/lumi-memory'
 import type { LumiUserProfileSnapshot } from '../../stores/lumi-user-profile'
 import type { ChatSessionsExport } from '../../types/chat-session'
 
-export const LUMI_DATA_ARCHIVE_FORMAT = 'lumi-data-archive:v1'
+export const LUMI_DATA_ARCHIVE_FORMAT = 'lumi-data-archive:v6'
+export const LUMI_DATA_ARCHIVE_FORMAT_V5 = 'lumi-data-archive:v5'
+export const LUMI_DATA_ARCHIVE_FORMAT_V4 = 'lumi-data-archive:v4'
+export const LUMI_DATA_ARCHIVE_FORMAT_V3 = 'lumi-data-archive:v3'
+export const LUMI_DATA_ARCHIVE_FORMAT_V2 = 'lumi-data-archive:v2'
+export const LUMI_DATA_ARCHIVE_FORMAT_V1 = 'lumi-data-archive:v1'
 
 export const LUMI_ARCHIVE_LOCAL_STORAGE_KEYS = [
   'settings/lumi/current-state/update-every-turns',
@@ -103,30 +111,93 @@ export interface SerializedBackgroundEntry {
   dataBase64: string
 }
 
-export interface LumiDataArchive {
-  format: typeof LUMI_DATA_ARCHIVE_FORMAT
+export interface LumiUserDataArchiveSections {
+  chatSessions: ChatSessionsExport
+  lumiMemory: LumiMemoryPersistenceSnapshot
+  lumiUserProfile: LumiUserProfileSnapshot
+  lumiCurrentState: LumiCurrentStateArchiveSnapshot
+  lumiEmotion: LumiEmotionArchiveSnapshot
+}
+
+export interface LumiDataArchiveV1 {
+  format: typeof LUMI_DATA_ARCHIVE_FORMAT_V1
   version: 1
   source: 'lumi'
   exportedAt: string
-  sections: {
-    chatSessions: ChatSessionsExport
-    lumiMemory: LumiMemoryPersistenceSnapshot
-    lumiUserProfile: LumiUserProfileSnapshot
-    lumiCurrentState: LumiCurrentStateArchiveSnapshot
-    lumiEmotion: LumiEmotionArchiveSnapshot
+  sections: LumiUserDataArchiveSections & {
     backgroundEntries: SerializedBackgroundEntry[]
     localStorage: Record<string, string>
   }
 }
 
-export function isLumiDataArchivePayload(payload: unknown): payload is LumiDataArchive {
+export interface LumiDataArchiveV2 {
+  format: typeof LUMI_DATA_ARCHIVE_FORMAT_V2
+  version: 2
+  source: 'lumi'
+  exportedAt: string
+  sections: {
+    identity: LumiIdentitySnapshot
+    users: Record<string, LumiUserDataArchiveSections>
+    backgroundEntries: SerializedBackgroundEntry[]
+    localStorage: Record<string, string>
+  }
+}
+
+export interface LumiDataArchiveV3 {
+  format: typeof LUMI_DATA_ARCHIVE_FORMAT_V3
+  version: 3
+  source: 'lumi'
+  exportedAt: string
+  sections: LumiDataArchiveV2['sections'] & {
+    roomLedgers: Record<string, LumiRoomLedgerSnapshot>
+  }
+}
+
+export interface LumiDataArchiveV4 {
+  format: typeof LUMI_DATA_ARCHIVE_FORMAT_V4
+  version: 4
+  source: 'lumi'
+  exportedAt: string
+  sections: LumiDataArchiveV3['sections'] & {
+    channelDevices: null | {
+      version: 1
+      hostInstanceId: string
+      devices: LumiChannelDeviceArchiveSnapshotV2['devices']
+    }
+  }
+}
+
+export interface LumiDataArchiveV5 {
+  format: typeof LUMI_DATA_ARCHIVE_FORMAT_V5
+  version: 5
+  source: 'lumi'
+  exportedAt: string
+  sections: LumiDataArchiveV3['sections'] & {
+    channelDevices: LumiChannelDeviceArchiveSnapshotV2 | null
+  }
+}
+
+export interface LumiDataArchive {
+  format: typeof LUMI_DATA_ARCHIVE_FORMAT
+  version: 6
+  source: 'lumi'
+  exportedAt: string
+  sections: LumiDataArchiveV3['sections'] & {
+    channelDevices: LumiChannelDeviceArchiveSnapshot | null
+  }
+}
+
+export function isLumiDataArchivePayload(payload: unknown): payload is LumiDataArchive | LumiDataArchiveV5 | LumiDataArchiveV4 | LumiDataArchiveV3 | LumiDataArchiveV2 | LumiDataArchiveV1 {
   if (!payload || typeof payload !== 'object')
     return false
   const record = payload as { format?: unknown, version?: unknown, sections?: unknown }
-  return record.format === LUMI_DATA_ARCHIVE_FORMAT
-    && record.version === 1
-    && !!record.sections
-    && typeof record.sections === 'object'
+  const recognizedFormat = (record.format === LUMI_DATA_ARCHIVE_FORMAT && record.version === 6)
+    || (record.format === LUMI_DATA_ARCHIVE_FORMAT_V5 && record.version === 5)
+    || (record.format === LUMI_DATA_ARCHIVE_FORMAT_V4 && record.version === 4)
+    || (record.format === LUMI_DATA_ARCHIVE_FORMAT_V3 && record.version === 3)
+    || (record.format === LUMI_DATA_ARCHIVE_FORMAT_V2 && record.version === 2)
+    || (record.format === LUMI_DATA_ARCHIVE_FORMAT_V1 && record.version === 1)
+  return recognizedFormat && !!record.sections && typeof record.sections === 'object'
 }
 
 export function exportLumiLocalStorageSnapshot(keys: readonly string[] = LUMI_ARCHIVE_LOCAL_STORAGE_KEYS) {

@@ -3,14 +3,14 @@
   "type": "module",
   "version": "0.1.0",
   "private": true,
-  "description": "Extensible Playwright MCP launcher for Lumi",
+  "description": "Patchright-first, Playwright-compatible browser MCP launcher for Lumi",
   "license": "MIT",
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
   "bin": "./dist/bin/run.mjs",
   "files": [
-    "dist",
     "README.md",
+    "dist",
     "package.json"
   ],
   "scripts": {
@@ -27,6 +27,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "catalog:",
     "@playwright/mcp": "0.0.78",
+    "patchright": "catalog:",
     "playwright": "1.62.0-alpha-1783623505000",
     "playwright-extra": "catalog:",
     "puppeteer-extra-plugin-stealth": "catalog:"

@@ -14,7 +14,7 @@ import { defineInvokeHandler } from '@moeru/eventa'
 import { createContext } from '@moeru/eventa/adapters/electron/main'
 import { errorMessageFrom } from '@moeru/std'
 import { createServer, getLocalIPs } from '@proj-airi/server-runtime/server'
-import { createServerChannelQrPayload } from '@proj-airi/stage-shared/server-channel-qr'
+import { createLumiChannelDeviceQrPayload, createServerChannelQrPayload } from '@proj-airi/stage-shared/server-channel-qr'
 import { Mutex } from 'async-mutex'
 import { app, ipcMain, session } from 'electron'
 import { createCA, createCert } from 'mkcert'
@@ -24,11 +24,35 @@ import { z } from 'zod'
 
 import {
   electronApplyServerChannelConfig,
+  electronClearLumiChannelAudit,
+  electronClearLumiChannelDevices,
+  electronCreateLumiChannelDevice,
+  electronExportLumiChannelDeviceArchive,
   electronGetServerChannelConfig,
   electronGetServerChannelQrPayload,
+  electronImportLumiChannelDeviceArchive,
+  electronListLumiChannelAudit,
+  electronListLumiChannelDevices,
+  electronRevokeLumiChannelDevice,
 } from '../../../../shared/eventa'
 import { createConfig } from '../../../libs/electron/persistence'
 import { ensureServerChannelConfigDefaults } from './config'
+import {
+  authenticateLumiChannelDevice,
+  authorizeLumiChannelDeviceEvent,
+  clearLumiChannelDeviceAudit,
+  clearLumiChannelDevices,
+  createLumiChannelDevice,
+  exportLumiChannelDeviceArchive,
+  importLumiChannelDeviceArchive,
+  listLumiChannelDeviceAudit,
+  listLumiChannelDevices,
+  recordLumiChannelAuthenticationResult,
+  recordLumiChannelAuthorizationResult,
+  recordLumiChannelDisconnected,
+  revokeLumiChannelDevice,
+  setupLumiChannelDeviceRegistry,
+} from './device-auth'
 
 const channelServerConfigSchema = object({
   hostname: optional(string()),
@@ -144,6 +168,11 @@ async function resolveServerRuntimeOptions(config: ServerOptions): Promise<Serve
     ...getServerRuntimeBaseOptions(),
     auth: {
       token: 'authToken' in config && typeof config.authToken === 'string' ? config.authToken : '',
+      authenticate: authenticateLumiChannelDevice,
+      authorizeEvent: authorizeLumiChannelDeviceEvent,
+      onAuthenticationResult: recordLumiChannelAuthenticationResult,
+      onAuthorizationResult: recordLumiChannelAuthorizationResult,
+      onDisconnected: recordLumiChannelDisconnected,
     },
     hostname: 'hostname' in config && typeof config.hostname === 'string'
       ? config.hostname || '127.0.0.1'
@@ -356,6 +385,7 @@ async function getOrCreateCertificate() {
 
 export async function setupServerChannel(params: { lifecycle: Lifecycle }): Promise<Server> {
   channelServerConfigStore.setup()
+  setupLumiChannelDeviceRegistry()
   configureServerChannelCertificateTrust()
 
   const storedConfig = await getChannelServerConfig()
@@ -463,6 +493,47 @@ export async function createServerChannelService(params: { serverChannel: Server
   defineInvokeHandler(context, electronGetServerChannelQrPayload, async () => {
     const config = await getChannelServerConfig()
     return getServerChannelQrPayload(config, params.serverChannel)
+  })
+
+  defineInvokeHandler(context, electronListLumiChannelDevices, async () => listLumiChannelDevices())
+  defineInvokeHandler(context, electronListLumiChannelAudit, async () => listLumiChannelDeviceAudit())
+  defineInvokeHandler(context, electronClearLumiChannelAudit, async () => clearLumiChannelDeviceAudit())
+  defineInvokeHandler(context, electronExportLumiChannelDeviceArchive, async () => exportLumiChannelDeviceArchive())
+  defineInvokeHandler(context, electronImportLumiChannelDeviceArchive, async (snapshot) => {
+    const restored = importLumiChannelDeviceArchive(snapshot)
+    await params.serverChannel.restart()
+    return restored
+  })
+  defineInvokeHandler(context, electronClearLumiChannelDevices, async () => {
+    clearLumiChannelDevices()
+    await params.serverChannel.restart()
+  })
+  defineInvokeHandler(context, electronCreateLumiChannelDevice, async (input) => {
+    const credential = await createLumiChannelDevice(input)
+    const config = await getChannelServerConfig()
+    const connection = getServerChannelQrPayload(config, params.serverChannel)
+    return {
+      ...credential,
+      pairing: createLumiChannelDeviceQrPayload({
+        type: 'lumi:channel-device',
+        version: 1,
+        urls: connection.urls,
+        authToken: credential.token,
+        conversationId: credential.device.conversationId,
+        roomTitle: credential.device.roomTitle,
+        actor: {
+          provider: 'lumi-lan',
+          providerInstanceId: credential.hostInstanceId,
+          externalUserId: credential.device.id,
+        },
+      }),
+    }
+  })
+  defineInvokeHandler(context, electronRevokeLumiChannelDevice, async ({ deviceId }) => {
+    const device = revokeLumiChannelDevice(deviceId)
+    // Restart closes already-authenticated sockets so revocation takes effect immediately.
+    await params.serverChannel.restart()
+    return device
   })
 
   defineInvokeHandler(context, electronApplyServerChannelConfig, async (req) => {

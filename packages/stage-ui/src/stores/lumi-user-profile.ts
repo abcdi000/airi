@@ -1,10 +1,12 @@
 import type { ChatHistoryItem } from '../types/chat'
 
+import { errorMessageFrom } from '@moeru/std'
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 
 import { extractMessageText } from '../libs/chat-sync'
+import { LUMI_DOGGY_USER_ID, LUMI_MOUSSY_USER_ID } from './lumi-identity'
 
 export type LumiUserProfileLayer = 'core' | 'dynamic' | 'daily'
 export type LumiUserProfileStatus = 'active' | 'archived' | 'deleted'
@@ -141,11 +143,12 @@ export interface LumiUserProfileSnapshot {
 export interface LumiUserProfilePersistenceSnapshot extends Omit<LumiUserProfileSnapshot, 'exportedAt'> {
   dbPath?: string
   meta?: Record<string, unknown>
+  canImportLegacyLocalData?: boolean
 }
 
 export interface LumiUserProfilePersistenceBridge {
-  loadProfileFromDatabase: () => Promise<LumiUserProfilePersistenceSnapshot>
-  replaceSnapshot: (snapshot: LumiUserProfilePersistenceSnapshot) => Promise<LumiUserProfilePersistenceSnapshot>
+  loadProfileFromDatabase: (userId?: string) => Promise<LumiUserProfilePersistenceSnapshot>
+  replaceSnapshot: (snapshot: LumiUserProfilePersistenceSnapshot, userId?: string) => Promise<LumiUserProfilePersistenceSnapshot>
   saveProfileEntry: (entry: LumiUserProfileEntry) => Promise<void>
   updateProfileEntry: (entry: LumiUserProfileEntry) => Promise<void>
   archiveProfileEntry: (payload: { id: string }) => Promise<void>
@@ -158,6 +161,11 @@ export interface LumiUserProfilePersistenceBridge {
   rejectPendingUpdate: (payload: { id: string }) => Promise<void>
   setMeta: (payload: { key: string, value: unknown }) => Promise<void>
   clear: () => Promise<void>
+}
+
+interface LumiUserProfileDetachedState {
+  snapshot: LumiUserProfilePersistenceSnapshot
+  loadedAt: string
 }
 
 const PROFILE_STORAGE_KEY = 'lumi/user-profile/entries:v1'
@@ -262,6 +270,10 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
   const persistenceMode = ref<'local-storage' | 'sqlite'>('local-storage')
   const persistenceDbPath = ref('')
   const persistenceLastError = ref('')
+  const activeProfileUserId = ref(LUMI_DOGGY_USER_ID)
+  const detachedStates = new Map<string, LumiUserProfileDetachedState>()
+  const detachedLoadPromises = new Map<string, Promise<LumiUserProfilePersistenceSnapshot>>()
+  const detachedWriteQueues = new Map<string, Promise<void>>()
   let persistenceInitPromise: Promise<void> | null = null
 
   const activeEntries = computed(() => pruneExpiredEntries(entries.value).filter(entry => entry.status === 'active'))
@@ -332,7 +344,7 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
       return
     }
 
-    if (localSnapshotHasProfileData()) {
+    if (snapshot.canImportLegacyLocalData !== false && localSnapshotHasProfileData()) {
       const replaced = await bridge.replaceSnapshot(currentPersistenceSnapshot())
       applyPersistenceSnapshot(replaced)
       consolidatePendingUpdates()
@@ -343,7 +355,47 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
 
   async function reloadFromDatabase() {
     persistenceInitPromise = null
+    persistenceReady.value = false
+    entries.value = []
+    pendingUpdates.value = []
+    events.value = []
+    bootstrapVersion.value = ''
     await hydrateFromPersistence()
+  }
+
+  function setActiveProfileUser(userId: string) {
+    activeProfileUserId.value = userId
+  }
+
+  /** Loads one user's profile without changing the identity shown by the settings UI. */
+  async function ensureUserProfileLoaded(userId: string) {
+    if (userId === activeProfileUserId.value && persistenceReady.value)
+      return currentPersistenceSnapshot()
+
+    const cached = detachedStates.get(userId)
+    if (cached)
+      return cached.snapshot
+
+    const pending = detachedLoadPromises.get(userId)
+    if (pending)
+      return pending
+
+    const bridge = persistenceBridge.value
+    if (!bridge)
+      return emptyPersistenceSnapshot()
+
+    const load = bridge.loadProfileFromDatabase(userId)
+      .then((snapshot) => {
+        const normalized = normalizePersistenceSnapshot(snapshot)
+        detachedStates.set(userId, {
+          snapshot: normalized,
+          loadedAt: new Date().toISOString(),
+        })
+        return normalized
+      })
+      .finally(() => detachedLoadPromises.delete(userId))
+    detachedLoadPromises.set(userId, load)
+    return load
   }
 
   function applyCandidate(candidate: LumiUserProfileCandidate, input: {
@@ -491,6 +543,25 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
       createdAt: now,
     }, now)
     return { status: 'stored' as const, entry }
+  }
+
+  /** Seeds only the user facts explicitly confirmed by the device owner. */
+  function ensureKnownUserProfile(userId: string) {
+    if (userId !== LUMI_MOUSSY_USER_ID || activeEntries.value.length > 0)
+      return false
+
+    createManualEntry({ layer: 'core', key: 'nickname', value: 'Moussy' })
+    createManualEntry({
+      layer: 'core',
+      key: 'relationship_to_lumi',
+      value: 'Moussy 是 Doggy 的女朋友，也是 Lumi 的朋友。',
+    })
+    createManualEntry({
+      layer: 'core',
+      key: 'relationship_guidelines',
+      value: 'Doggy 通常称呼 Moussy 为“宝宝”，Moussy 通常称呼 Doggy 为“狗”；他们经常一起玩游戏。',
+    })
+    return true
   }
 
   function updateEntry(entryId: string, patch: Partial<Pick<LumiUserProfileEntry, 'layer' | 'key' | 'value' | 'confidence' | 'weight' | 'status'>>) {
@@ -836,12 +907,15 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
     messageText: string
     recentMessages?: ChatHistoryItem[]
     limit?: number
-  }) {
+  }, userId = activeProfileUserId.value) {
     const text = [
       input.messageText,
       ...(input.recentMessages ?? []).slice(-4).map(message => extractMessageText(message)),
     ].join('\n')
-    const relevant = selectRelevantEntriesFrom(entries.value, text, input.limit ?? 8)
+    const sourceEntries = userId === activeProfileUserId.value
+      ? entries.value
+      : detachedStates.get(userId)?.snapshot.entries ?? []
+    const relevant = selectRelevantEntriesFrom(sourceEntries, text, input.limit ?? 8)
     if (!relevant.length)
       return ''
 
@@ -852,6 +926,106 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
       '[/Lumi user profile]',
     ]
     return lines.join('\n')
+  }
+
+  function isAutoUpdateEnabledForUser(userId: string) {
+    if (userId === activeProfileUserId.value)
+      return autoUpdateEnabled.value
+    return detachedStates.get(userId)?.snapshot.autoUpdateEnabled ?? true
+  }
+
+  /** Applies profile candidates to the actor named by the interaction context. */
+  async function applyCandidatesForUser(
+    userId: string,
+    candidates: LumiUserProfileCandidate[],
+    input: {
+      sourceKind?: LumiUserProfileSourceKind
+      sourceMessageId?: string
+      now?: string
+    } = {},
+  ) {
+    if (userId === activeProfileUserId.value)
+      return applyCandidates(candidates, input)
+
+    return enqueueDetachedWrite(userId, async () => {
+      const snapshot = clonePersistenceSnapshot(await ensureUserProfileLoaded(userId))
+      const results = candidates.map(candidate => applyCandidateToDetachedSnapshot(snapshot, candidate, input))
+      const bridge = persistenceBridge.value
+      const persisted = bridge
+        ? normalizePersistenceSnapshot(await bridge.replaceSnapshot(snapshot, userId))
+        : snapshot
+      detachedStates.set(userId, {
+        snapshot: persisted,
+        loadedAt: new Date().toISOString(),
+      })
+      return results
+    })
+  }
+
+  function applyCandidateToDetachedSnapshot(
+    snapshot: LumiUserProfilePersistenceSnapshot,
+    candidate: LumiUserProfileCandidate,
+    input: {
+      sourceKind?: LumiUserProfileSourceKind
+      sourceMessageId?: string
+      now?: string
+    },
+  ) {
+    if (!snapshot.autoUpdateEnabled && candidate.sourceKind !== 'manual' && input.sourceKind !== 'manual')
+      return { status: 'skipped' as const, reason: 'auto_update_disabled' }
+
+    const normalizedCandidate = normalizeCandidate(candidate)
+    if (!normalizedCandidate)
+      return { status: 'skipped' as const, reason: 'invalid_candidate' }
+
+    const normalized = {
+      ...normalizedCandidate,
+      sourceKind: normalizedCandidate.sourceKind ?? input.sourceKind,
+    }
+    const now = input.now ?? new Date().toISOString()
+    const source = createSource(normalized, {
+      sourceKind: normalized.sourceKind ?? input.sourceKind ?? 'chat',
+      sourceMessageId: input.sourceMessageId,
+      now,
+    })
+    const protectedConflict = findProtectedConflict(snapshot.entries, normalized)
+    if ((protectedConflict && normalized.sourceKind !== 'manual') || shouldCreatePendingUpdate(normalized)) {
+      const pending = upsertDetachedPending(
+        snapshot,
+        normalized,
+        source,
+        now,
+        protectedConflict ? `protected_conflict:${protectedConflict.id}` : undefined,
+        protectedConflict?.id,
+      )
+      appendDetachedEvent(snapshot, {
+        kind: 'pending',
+        pendingId: pending.id,
+        key: pending.key,
+        preview: pending.value,
+      })
+      return { status: 'pending' as const, pending }
+    }
+
+    const entry = upsertDetachedEntry(snapshot, normalized, source, now)
+    appendDetachedEvent(snapshot, {
+      kind: entry.createdAt === now ? 'create' : 'update',
+      entryId: entry.id,
+      key: entry.key,
+      preview: entry.value,
+    })
+    return { status: 'stored' as const, entry }
+  }
+
+  function enqueueDetachedWrite<Result>(userId: string, operation: () => Promise<Result>) {
+    const previous = detachedWriteQueues.get(userId) ?? Promise.resolve()
+    const run = previous.catch(() => {}).then(operation)
+    const settled = run.then(() => {}, () => {})
+    detachedWriteQueues.set(userId, settled)
+    return run.finally(() => {
+      if (detachedWriteQueues.get(userId) === settled)
+        detachedWriteQueues.delete(userId)
+    })
   }
 
   function parseCuratorOutput(raw: string): LumiUserProfileCandidate[] {
@@ -1088,7 +1262,7 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
   }
 
   function warnPersistenceFailure(action: string, error: unknown) {
-    persistenceLastError.value = error instanceof Error ? error.message : String(error)
+    persistenceLastError.value = errorMessageFrom(error) ?? String(error)
     console.warn(`[lumi-user-profile] failed to ${action}`, error)
   }
 
@@ -1117,11 +1291,15 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
     initializePersistence,
     reloadFromDatabase,
     setPersistenceBridge,
+    setActiveProfileUser,
+    ensureUserProfileLoaded,
     applyCandidate,
     applyCandidates,
+    applyCandidatesForUser,
     previewBootstrapProfile,
     importBootstrapProfile,
     createManualEntry,
+    ensureKnownUserProfile,
     updateEntry,
     deleteEntry,
     rollbackEntry,
@@ -1135,11 +1313,132 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
     exportSnapshot,
     importSnapshot,
     buildRelevantContext,
+    isAutoUpdateEnabledForUser,
     parseCuratorOutput,
     extractDeterministicCandidates,
     resetState,
   }
 })
+
+function emptyPersistenceSnapshot(): LumiUserProfilePersistenceSnapshot {
+  return {
+    entries: [],
+    pendingUpdates: [],
+    events: [],
+    autoUpdateEnabled: true,
+    bootstrapVersion: '',
+  }
+}
+
+function normalizePersistenceSnapshot(snapshot: LumiUserProfilePersistenceSnapshot): LumiUserProfilePersistenceSnapshot {
+  return {
+    ...snapshot,
+    entries: normalizeLoadedEntries(snapshot.entries),
+    pendingUpdates: normalizeLoadedPending(snapshot.pendingUpdates),
+    events: normalizeLoadedEvents(snapshot.events),
+    autoUpdateEnabled: snapshot.autoUpdateEnabled !== false,
+    bootstrapVersion: typeof snapshot.bootstrapVersion === 'string' ? snapshot.bootstrapVersion : '',
+  }
+}
+
+function clonePersistenceSnapshot(snapshot: LumiUserProfilePersistenceSnapshot): LumiUserProfilePersistenceSnapshot {
+  return normalizePersistenceSnapshot(structuredClone(snapshot))
+}
+
+function appendDetachedEvent(
+  snapshot: LumiUserProfilePersistenceSnapshot,
+  input: Omit<LumiUserProfileEvent, 'id' | 'createdAt'>,
+) {
+  snapshot.events = [{
+    id: createId('profile_event'),
+    createdAt: new Date().toISOString(),
+    ...input,
+    preview: input.preview?.slice(0, 180),
+  }, ...snapshot.events].slice(0, 200)
+}
+
+function upsertDetachedEntry(
+  snapshot: LumiUserProfilePersistenceSnapshot,
+  candidate: LumiUserProfileCandidate,
+  source: LumiUserProfileSource,
+  now: string,
+) {
+  const existing = findMergeTargetFrom(snapshot.entries, candidate)
+  if (!existing) {
+    const entry: LumiUserProfileEntry = {
+      id: createId('profile'),
+      layer: candidate.layer,
+      key: candidate.key,
+      value: candidate.value,
+      confidence: candidate.confidence,
+      weight: initialWeight(candidate),
+      source: [source],
+      protected: candidate.protected,
+      bootstrapVersion: candidate.bootstrapVersion,
+      createdAt: now,
+      updatedAt: now,
+      lastSeenAt: now,
+      status: 'active',
+      history: [],
+    }
+    snapshot.entries = [entry, ...snapshot.entries]
+    return entry
+  }
+
+  const mergedValue = mergeEntryValue(existing, candidate.value)
+  const updated: LumiUserProfileEntry = {
+    ...existing,
+    value: mergedValue,
+    confidence: Math.max(existing.confidence, candidate.confidence),
+    weight: clamp(existing.weight + candidate.confidence * 0.15, 0, 1),
+    source: mergeSources(existing.source, source),
+    protected: existing.protected || candidate.protected,
+    bootstrapVersion: candidate.bootstrapVersion ?? existing.bootstrapVersion,
+    updatedAt: now,
+    lastSeenAt: now,
+    status: 'active',
+    history: mergedValue === existing.value
+      ? existing.history
+      : [createHistory(existing.value, mergedValue, candidate.reason ?? 'profile_update', [source]), ...existing.history].slice(0, 30),
+  }
+  snapshot.entries = snapshot.entries.map(entry => entry.id === existing.id ? updated : entry)
+  return updated
+}
+
+function upsertDetachedPending(
+  snapshot: LumiUserProfilePersistenceSnapshot,
+  candidate: LumiUserProfileCandidate,
+  source: LumiUserProfileSource,
+  now: string,
+  reason?: string,
+  targetEntryId?: string,
+) {
+  const existing = findMergeTargetPending(snapshot.pendingUpdates, candidate, targetEntryId)
+  if (!existing) {
+    const pending = createPendingUpdate(candidate, source, now, reason, targetEntryId)
+    snapshot.pendingUpdates = [pending, ...snapshot.pendingUpdates].slice(0, 200)
+    return pending
+  }
+
+  const sources = mergePendingSources(existing.source, source)
+  const nextReason = reason ?? candidate.reason ?? 'additional_evidence'
+  const updated: LumiUserProfilePendingUpdate = {
+    ...existing,
+    value: mergePendingValue(existing.value, candidate.value),
+    confidence: Math.max(existing.confidence, candidate.confidence),
+    reason: existing.reason.includes(nextReason)
+      ? existing.reason
+      : `${existing.reason}; ${nextReason}`.slice(0, 220),
+    source: sources,
+    bootstrapVersion: candidate.bootstrapVersion ?? existing.bootstrapVersion,
+    autoReview: {
+      ...(existing.autoReview ?? { evidenceCount: 0 }),
+      evidenceCount: sources.length,
+    },
+  }
+  snapshot.pendingUpdates = [updated, ...snapshot.pendingUpdates.filter(item => item.id !== existing.id)].slice(0, 200)
+  return updated
+}
 
 function snapshotHasProfileData(snapshot: LumiUserProfilePersistenceSnapshot) {
   return snapshot.entries.length > 0
@@ -1728,7 +2027,7 @@ function emotionalPatternToStrategy(value: string) {
 function profileSpecialTopicalScore(entry: LumiUserProfileEntry, messageText: string) {
   if (entry.key !== 'emotional_patterns')
     return 0
-  if (/(Neuro|顶级|优秀|太强|不行|废了|比较|挫败|怀疑|能力)/i.test(messageText))
+  if (/Neuro|顶级|优秀|太强|不行|废了|比较|挫败|怀疑|能力/i.test(messageText))
     return 0.75
   return 0
 }
@@ -1839,9 +2138,12 @@ function daysBetween(iso: string, nowMs: number) {
 }
 
 function extractJson(raw: string) {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
-  if (fenced?.[1])
-    return fenced[1].trim()
+  const fenceStart = raw.indexOf('```')
+  const fenceEnd = fenceStart >= 0 ? raw.indexOf('```', fenceStart + 3) : -1
+  if (fenceEnd > fenceStart) {
+    const fenced = raw.slice(fenceStart + 3, fenceEnd).trim()
+    return fenced.toLowerCase().startsWith('json') ? fenced.slice(4).trim() : fenced
+  }
   const first = raw.indexOf('{')
   const last = raw.lastIndexOf('}')
   if (first < 0 || last <= first)

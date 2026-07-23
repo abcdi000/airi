@@ -8,6 +8,16 @@ chat:
       you: Ты
   reasoning: Причина
   sessions:
+    new-group: New group
+    group-create-title: Create a Lumi group
+    group-create-description: Choose who shares this conversation and its group memories.
+    group-name: Group name
+    participants: Participants
+    current-user: Current user
+    cancel: Cancel
+    create-group: Create group
+    group-create-failed: Could not create the group conversation
+    group-badge: Group
     title: Диалоги
     new: + Новый
     empty: Диалогов пока нет

@@ -55,6 +55,7 @@ const LUMI_PROACTIVE_VISION_TOOLS_PROVIDER = 'lumi-proactive-vision'
 const SILENCE_MARKERS = ['<silence>', '[silence]', 'silence', '不发送', '静默']
 const ENVIRONMENT_CONTEXT_LIMIT = 8
 const RUNTIME_STATUS_STORAGE_KEY = 'runtime/lumi-proactive-vision/status'
+const CAPTURE_IMAGE_CHANNEL_NAME = 'lumi-proactive-vision-capture-image'
 const AUTONOMOUS_DECISION_TIMEOUT_MS = 18_000
 const AUTONOMOUS_LOG_LIMIT = 80
 const PRIVATE_NOTE_LIMIT = 80
@@ -510,8 +511,11 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     types: ['screen', 'window'],
     fetchWindowIcons: true,
     thumbnailSize: {
-      width: 1920,
-      height: 1080,
+      // Listing sources must remain metadata-only. A still frame is captured
+      // from the selected stream, so probing every window thumbnail is wasteful
+      // and makes Chromium WGC touch invalid HWNDs on Windows.
+      width: 0,
+      height: 0,
     },
   })
   const {
@@ -528,7 +532,6 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     cleanup,
     captureFrame,
     captureSourceDataUrl,
-    captureSourceThumbnail,
   } = useVisionScreenCapture(sourcesOptions)
 
   const consciousnessStore = useConsciousnessStore()
@@ -554,6 +557,10 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
   const lastObservation = ref('')
   const lastMessage = ref('')
   const lastCaptureAt = ref<number | null>(null)
+  const lastCaptureSourceId = ref('')
+  const lastCaptureSourceName = ref('')
+  const lastCapturedImageDataUrl = ref('')
+  const lastVisionInputImageDataUrl = ref('')
   const lastMessageAt = ref<number | null>(null)
   const lastScheduledDelayMs = ref<number | null>(null)
   const tickCount = ref(0)
@@ -567,6 +574,68 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
   const visionFailureBackoffUntil = ref<number | null>(null)
   const applyingAutonomousSettingsPatch = ref(false)
   let lastObservedSettingsSnapshot = ''
+
+  const captureImageChannel = new BroadcastChannel(CAPTURE_IMAGE_CHANNEL_NAME)
+  const captureImageChannelInstanceId = crypto.randomUUID()
+  let lastCaptureImagesClearedAt = 0
+
+  function currentCaptureImageSnapshot() {
+    return {
+      type: 'snapshot' as const,
+      senderId: captureImageChannelInstanceId,
+      capturedAt: lastCaptureAt.value,
+      sourceId: lastCaptureSourceId.value,
+      sourceName: lastCaptureSourceName.value,
+      capturedImageDataUrl: lastCapturedImageDataUrl.value,
+      visionInputImageDataUrl: lastVisionInputImageDataUrl.value,
+    }
+  }
+
+  function publishLastCaptureImages() {
+    if (!lastCapturedImageDataUrl.value || !lastVisionInputImageDataUrl.value)
+      return
+    captureImageChannel.postMessage(currentCaptureImageSnapshot())
+  }
+
+  function requestLastCaptureImages() {
+    captureImageChannel.postMessage({
+      type: 'request',
+      senderId: captureImageChannelInstanceId,
+    })
+  }
+
+  captureImageChannel.addEventListener('message', (event: MessageEvent) => {
+    const message = event.data
+    if (!message || typeof message !== 'object' || message.senderId === captureImageChannelInstanceId)
+      return
+
+    if (message.type === 'request') {
+      publishLastCaptureImages()
+      return
+    }
+
+    if (message.type === 'clear') {
+      const clearedAt = Number(message.clearedAt || 0)
+      if (clearedAt >= lastCaptureImagesClearedAt) {
+        lastCaptureImagesClearedAt = clearedAt
+        clearLastCaptureImages(false)
+      }
+      return
+    }
+
+    if (message.type !== 'snapshot')
+      return
+
+    const capturedAt = Number(message.capturedAt || 0)
+    if (!capturedAt || capturedAt <= lastCaptureImagesClearedAt || capturedAt < Number(lastCaptureAt.value || 0))
+      return
+
+    lastCaptureAt.value = capturedAt
+    lastCaptureSourceId.value = String(message.sourceId || '')
+    lastCaptureSourceName.value = String(message.sourceName || '')
+    lastCapturedImageDataUrl.value = String(message.capturedImageDataUrl || '')
+    lastVisionInputImageDataUrl.value = String(message.visionInputImageDataUrl || '')
+  })
 
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined
   let video: HTMLVideoElement | undefined
@@ -1067,6 +1136,14 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
       return
     }
 
+    // A persisted window ID may become stale when that window closes. Keep the
+    // configured boundary intact so a window selection never silently widens
+    // into a full-screen capture.
+    if (sourceId.value) {
+      activeSourceId.value = ''
+      return
+    }
+
     const firstScreen = sources.value.find(source => source.id.startsWith('screen:'))
     const fallback = firstScreen ?? sources.value[0]
     if (fallback) {
@@ -1101,177 +1178,96 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     activeSourceId.value = nextSourceId
     const stream = await startStream()
     await attachVideoStream(stream)
-    sourceId.value = nextSourceId
   }
 
-  async function ensureVideoStream() {
-    if (!sourceId.value)
+  async function ensureVideoStream(targetSourceId = sourceId.value) {
+    if (!targetSourceId) {
       await refreshSources()
-    if (!sourceId.value)
+      targetSourceId = sourceId.value
+    }
+    if (!targetSourceId)
       throw new Error('No screen source selected')
 
-    const preferredSourceId = sourceId.value
-    const screenFallbackId = sources.value.find(source => source.id.startsWith('screen:'))?.id
-    const candidateSourceIds = Array.from(new Set([
-      preferredSourceId,
-      screenFallbackId,
-    ].filter(Boolean) as string[]))
-
-    let firstError = ''
-    for (const candidateSourceId of candidateSourceIds) {
-      try {
-        await tryStartStreamForSource(candidateSourceId)
-        if (candidateSourceId !== preferredSourceId)
-          setLastDecision({
-            action: 'capture_fallback',
-            reason: 'Primary capture source failed.',
-            result: `fallback_to_${candidateSourceId}`,
-          })
-        return
-      }
-      catch (error) {
-        firstError ||= errorMessageFrom(error) ?? String(error)
-        stopStream()
-      }
+    try {
+      await tryStartStreamForSource(targetSourceId)
     }
-
-    await refreshSources()
-    const refreshedScreenId = sources.value.find(source => source.id.startsWith('screen:'))?.id
-    if (refreshedScreenId && !candidateSourceIds.includes(refreshedScreenId)) {
-      try {
-        await tryStartStreamForSource(refreshedScreenId)
-        setLastDecision({
-          action: 'capture_fallback',
-          reason: 'Primary capture source failed after refresh.',
-          result: `fallback_to_${refreshedScreenId}`,
-        })
-        return
-      }
-      catch (error) {
-        firstError ||= errorMessageFrom(error) ?? String(error)
-        stopStream()
-      }
+    catch (error) {
+      stopStream()
+      throw new Error(`Capture source is not capturable: ${targetSourceId}. ${errorMessageFrom(error) ?? String(error)}`)
     }
-
-    throw new Error(`Screen capture source is not capturable. Selected source: ${preferredSourceId}. ${firstError}`)
   }
 
-  async function captureStillImageDataUrl(context: string, previousError = '') {
-    const preferredSourceId = sourceId.value || activeSourceId.value
-    const candidateSourceIds = Array.from(new Set([
-      preferredSourceId,
-      sources.value.find(source => source.id.startsWith('screen:'))?.id,
-    ].filter(Boolean) as string[]))
-
-    for (const candidateSourceId of candidateSourceIds) {
-      try {
-        const sourceDataUrl = await captureSourceDataUrl(candidateSourceId)
-        if (sourceDataUrl) {
-          sourceId.value = activeSourceId.value || candidateSourceId
-          setLastDecision({
-            action: 'capture_main_process_fallback',
-            reason: `${context}, using Electron main-process screenshot capture. ${previousError}`,
-            result: sourceId.value || candidateSourceId,
-          })
-          return sourceDataUrl
-        }
-      }
-      catch (error) {
-        previousError ||= errorMessageFrom(error) ?? String(error)
-      }
-
-      try {
-        const thumbnailDataUrl = await captureSourceThumbnail(candidateSourceId)
-        if (thumbnailDataUrl) {
-          sourceId.value = activeSourceId.value || candidateSourceId
-          setLastDecision({
-            action: 'capture_thumbnail_fallback',
-            reason: `${context}, using renderer thumbnail fallback. ${previousError}`,
-            result: sourceId.value || candidateSourceId,
-          })
-          return thumbnailDataUrl
-        }
-      }
-      catch (error) {
-        previousError ||= errorMessageFrom(error) ?? String(error)
-      }
-    }
-
-    await refreshSources()
-    const refreshedScreenId = sources.value.find(source => source.id.startsWith('screen:'))?.id
-    if (refreshedScreenId) {
-      try {
-        const sourceDataUrl = await captureSourceDataUrl(refreshedScreenId)
-        if (sourceDataUrl) {
-          sourceId.value = activeSourceId.value || refreshedScreenId
-          setLastDecision({
-            action: 'capture_main_process_fallback',
-            reason: `${context} after source refresh, using screen screenshot capture. ${previousError}`,
-            result: sourceId.value || refreshedScreenId,
-          })
-          return sourceDataUrl
-        }
-      }
-      catch (error) {
-        previousError ||= errorMessageFrom(error) ?? String(error)
-      }
-
-      try {
-        const thumbnailDataUrl = await captureSourceThumbnail(refreshedScreenId)
-        if (thumbnailDataUrl) {
-          sourceId.value = activeSourceId.value || refreshedScreenId
-          setLastDecision({
-            action: 'capture_thumbnail_fallback',
-            reason: `${context} after source refresh, using screen thumbnail fallback. ${previousError}`,
-            result: sourceId.value || refreshedScreenId,
-          })
-          return thumbnailDataUrl
-        }
-      }
-      catch (error) {
-        previousError ||= errorMessageFrom(error) ?? String(error)
-      }
-    }
-
-    throw new Error(`Still screen capture failed. ${previousError}`)
-  }
-
-  async function captureScreenImageDataUrl(options: { preferStillCapture?: boolean, allowMediaStreamFallback?: boolean } = {}) {
+  async function captureScreenImageDataUrl(options: { stopStreamAfterCapture?: boolean, targetSourceId?: string } = {}) {
     let streamError = ''
-    if (options.preferStillCapture) {
+    let targetSourceId = options.targetSourceId ?? sourceId.value
+
+    if (!targetSourceId) {
+      await refreshSources()
+      targetSourceId = sourceId.value
+    }
+    if (!targetSourceId)
+      throw new Error('No capture source selected')
+
+    // One-shot observations preserve the requested source exactly. Main-process
+    // capture may switch implementation, but never broadens a window to a screen.
+    if (options.stopStreamAfterCapture) {
       try {
-        return await captureStillImageDataUrl('Still screen capture preferred')
+        return await captureSourceDataUrl(targetSourceId)
       }
       catch (error) {
-        streamError = errorMessageFrom(error) ?? String(error)
-        if (options.allowMediaStreamFallback === false)
-          throw new Error(streamError)
+        streamError = errorMessageFrom(error) || String(error)
+        throw new Error(`Failed to capture the requested source ${targetSourceId}. ${streamError}`)
       }
     }
 
     try {
-      await ensureVideoStream()
+      await ensureVideoStream(targetSourceId)
       if (!video)
         throw new Error('Vision video stream is not ready')
 
       const dataUrl = captureFrame(video, 0.82, 1280, 720)
-      if (dataUrl)
+      if (dataUrl) {
+        if (options.stopStreamAfterCapture)
+          stopStream()
         return dataUrl
+      }
       throw new Error('Failed to capture screen frame')
     }
     catch (error) {
-      streamError = streamError || errorMessageFrom(error) || String(error)
+      streamError ||= errorMessageFrom(error) || String(error)
       stopStream()
     }
 
-    return await captureStillImageDataUrl('Media stream capture failed', streamError)
+    try {
+      return await captureSourceDataUrl(targetSourceId)
+    }
+    catch (error) {
+      const fallbackError = errorMessageFrom(error) || String(error)
+      throw new Error(`Failed to capture the requested source ${targetSourceId}. ${streamError} ${fallbackError}`)
+    }
   }
 
-  async function understandScreen(options: { preferStillCapture?: boolean, allowMediaStreamFallback?: boolean } = {}) {
-    const dataUrl = await captureScreenImageDataUrl(options)
+  async function understandScreen(options: { stopStreamAfterCapture?: boolean, targetSourceId?: string } = {}) {
+    const capturedSourceId = options.targetSourceId ?? sourceId.value
+    let dataUrl = ''
+    try {
+      dataUrl = await captureScreenImageDataUrl(options)
+    }
+    finally {
+      if (options.targetSourceId) {
+        activeSourceId.value = sources.value.some(source => source.id === sourceId.value)
+          ? sourceId.value
+          : ''
+      }
+    }
     const optimizedDataUrl = await downscaleImageDataUrlForVision(dataUrl)
 
+    lastCapturedImageDataUrl.value = dataUrl
+    lastVisionInputImageDataUrl.value = optimizedDataUrl
+    lastCaptureSourceId.value = capturedSourceId
+    lastCaptureSourceName.value = sources.value.find(source => source.id === capturedSourceId)?.name || capturedSourceId
     lastCaptureAt.value = Date.now()
+    publishLastCaptureImages()
     const { useVisionInference } = await import('@proj-airi/stage-ui/composables')
     const { runVisionInference } = useVisionInference()
     return await runVisionInference({
@@ -1739,7 +1735,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     try {
       const sessionId = await ensureActiveChatSession()
       refreshResponseMetrics(chatSession.getSessionMessages(sessionId))
-      const observation = await understandScreen({ preferStillCapture: true, allowMediaStreamFallback: false })
+      const observation = await understandScreen({ stopStreamAfterCapture: true })
       captureFailureCount.value = 0
       clearVisionFailureBackoff()
       lastObservation.value = observation
@@ -1774,7 +1770,23 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     }
   }
 
-  async function observeScreenForChatTool(reason: string) {
+  async function listObservationSourcesForChatTool() {
+    await refetchSources()
+    activeSourceId.value = sources.value.some(source => source.id === sourceId.value)
+      ? sourceId.value
+      : ''
+    return JSON.stringify({
+      status: 'ok',
+      sources: sources.value.map(source => ({
+        sourceId: source.id,
+        type: source.id.startsWith('window:') ? 'window' : 'screen',
+        name: source.name,
+      })),
+      instruction: 'Choose the most relevant source for the user request, then call lumi_observe_screen with its exact sourceId. Choose a screen only when the whole desktop context is genuinely needed.',
+    })
+  }
+
+  async function observeScreenForChatTool(reason: string, targetSourceId: string) {
     cardStore.initialize()
     if (publishOnlyWhenLumiActive.value && cardStore.activeCardId !== LUMI_AIRI_CARD_ID) {
       return JSON.stringify({
@@ -1793,9 +1805,17 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     }
 
     try {
+      await refetchSources()
+      const targetSource = sources.value.find(source => source.id === targetSourceId)
+      if (!targetSource)
+        throw new Error(`The requested capture source is no longer available: ${targetSourceId}. List sources again and choose a current source.`)
+
       tickCount.value += 1
       processing.value = true
-      const observation = await understandScreen({ preferStillCapture: true, allowMediaStreamFallback: false })
+      const observation = await understandScreen({
+        stopStreamAfterCapture: true,
+        targetSourceId,
+      })
       captureFailureCount.value = 0
       clearVisionFailureBackoff()
       lastObservation.value = observation
@@ -1814,6 +1834,11 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
       return JSON.stringify({
         status: 'ok',
         source: 'lumi_own_screen_observation',
+        captureTarget: {
+          sourceId: targetSourceId,
+          type: targetSource.id.startsWith('window:') ? 'window' : 'screen',
+          name: targetSource.name,
+        },
         reason,
         activity: entry.activity,
         salience: entry.salience,
@@ -1847,7 +1872,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
         stopStream()
       const sessionId = chatSession.activeSessionId
       if (sessionId)
-        appendSystemNoticeToSession(sessionId, createErrorSystemNotice(message, sourceId.value, 'tool_error'))
+        appendSystemNoticeToSession(sessionId, createErrorSystemNotice(message, targetSourceId, 'tool_error'))
       return JSON.stringify({
         status: 'error',
         error: message,
@@ -1860,14 +1885,24 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     }
   }
 
+  function createListObservationSourcesTool(): Promise<Tool> {
+    return tool({
+      name: 'lumi_list_observation_sources',
+      description: 'List the screens and individual desktop windows Lumi can currently observe. Call this before lumi_observe_screen so Lumi can choose the relevant target itself.',
+      parameters: z.object({}).strict(),
+      execute: async () => listObservationSourcesForChatTool(),
+    })
+  }
+
   function createObserveScreenTool(): Promise<Tool> {
     return tool({
       name: 'lumi_observe_screen',
-      description: 'Let Lumi actively look at the user current screen through the configured vision module. Use only when the user asks Lumi to look at the screen/current page/image/window, or when the reply truly needs current screen awareness.',
+      description: 'Observe exactly one current desktop source chosen by Lumi. First call lumi_list_observation_sources, then pass the selected sourceId. This tool never substitutes the configured proactive-vision source or silently broadens a window capture to the whole screen.',
       parameters: z.object({
         reason: z.string().min(1).describe('Why Lumi needs to look at the screen for this reply.'),
+        sourceId: z.string().min(1).describe('Exact sourceId returned by lumi_list_observation_sources for the screen or window Lumi chose.'),
       }).strict(),
-      execute: async payload => observeScreenForChatTool(payload.reason),
+      execute: async payload => observeScreenForChatTool(payload.reason, payload.sourceId),
     })
   }
 
@@ -1876,6 +1911,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
       return
 
     await useLlmToolsStore().registerTools(LUMI_PROACTIVE_VISION_TOOLS_PROVIDER, Promise.all([
+      createListObservationSourcesTool(),
       createObserveScreenTool(),
     ]))
     useLlmToolsetPromptsStore().registerToolsetPrompts(LUMI_PROACTIVE_VISION_TOOLS_PROVIDER, [
@@ -1883,8 +1919,10 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
         id: 'lumi-observe-screen-guidance',
         title: 'Lumi Screen Observation',
         content: [
-          'When the active persona is Lumi, the tool `lumi_observe_screen` lets Lumi actively look at the current screen through the vision module.',
+          'When the active persona is Lumi, first call `lumi_list_observation_sources`, choose the window or screen relevant to the user request, then call `lumi_observe_screen` with that exact sourceId.',
           'Call it when the user explicitly asks Lumi to look at the screen/current page/current window, or when a normal reply genuinely needs current screen awareness.',
+          'Prefer a relevant individual window when its title identifies the requested content. Choose a screen only when the request needs cross-window or whole-desktop context.',
+          'The source configured in settings belongs only to scheduled proactive vision. Do not assume it is the right source for a chat tool call.',
           'Do not call it for ordinary chat, memory recall, emotional replies, or image attachments already handled by Lumi Eyes.',
           'The tool result is Lumi\'s own observation, not a user message. Lumi must not say the user sent the screen unless the user actually did.',
         ].join('\n'),
@@ -1960,6 +1998,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     lastObservation.value = ''
     lastMessage.value = ''
     lastCaptureAt.value = null
+    clearLastCaptureImages()
     lastMessageAt.value = null
     lastScheduledDelayMs.value = null
     tickCount.value = 0
@@ -1970,6 +2009,22 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     lastSalience.value = 'low'
     lastDecision.value = null
     lastObservationSignature.value = ''
+  }
+
+  function clearLastCaptureImages(broadcast = true) {
+    const clearedAt = Date.now()
+    lastCaptureImagesClearedAt = Math.max(lastCaptureImagesClearedAt, clearedAt)
+    lastCaptureSourceId.value = ''
+    lastCaptureSourceName.value = ''
+    lastCapturedImageDataUrl.value = ''
+    lastVisionInputImageDataUrl.value = ''
+    if (broadcast) {
+      captureImageChannel.postMessage({
+        type: 'clear',
+        senderId: captureImageChannelInstanceId,
+        clearedAt,
+      })
+    }
   }
 
   return {
@@ -2011,6 +2066,10 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     lastObservation,
     lastMessage,
     lastCaptureAt,
+    lastCaptureSourceId,
+    lastCaptureSourceName,
+    lastCapturedImageDataUrl,
+    lastVisionInputImageDataUrl,
     lastMessageAt,
     lastScheduledDelayMs,
     tickCount,
@@ -2020,10 +2079,13 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     currentActivity,
     lastSalience,
     lastDecision,
+    clearLastCaptureImages,
+    requestLastCaptureImages,
     decideAfterObservation,
     executeAutonomousDecision,
     recordDecisionLog,
     buildReturnSummaryContext,
+    listObservationSourcesForChatTool,
     observeScreenForChatTool,
     refreshSources,
     selectSource,

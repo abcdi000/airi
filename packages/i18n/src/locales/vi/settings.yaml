@@ -10,8 +10,8 @@ animations:
 dialogs:
   onboarding:
     official:
-      title: AIRI Official Provider
-    title: Chào mừng đến với AIRI!
+      title: Lumi Official Provider
+    title: Chào mừng đến với Lumi!
     description: Hãy thiết lập nhà cung cấp AI đầu tiên để bắt đầu.
     selectProvider: Chọn nhà cung cấp AI
     configureProvider: Cấu hình {provider}
@@ -35,13 +35,13 @@ dialogs:
     retry: Thử lại
     credentialsSafeLabel: Keep your API keys and credentials safe!
     credentialsSafeLocal: >-
-      AIRI is running pure locally in your PC, and we will never steal your credentials for AI / LLM providers. But keep in mind that your API keys are sensitive information. Make sure to keep them safe and do not share them with anyone.
+      Lumi is running pure locally in your PC, and we will never steal your credentials for AI / LLM providers. But keep in mind that your API keys are sensitive information. Make sure to keep them safe and do not share them with anyone.
     credentialsSafeOpenSource: >-
-      AIRI is open sourced at {github}, if you want to check how we handle your credentials, feel free to inspect our code.
+      Lumi is open sourced at {github}, if you want to check how we handle your credentials, feel free to inspect our code.
     enableChatCheck: >-
-      Allow airi to send a "ping" message to the first available chat model to check availability
+      Allow Lumi to send a "ping" message to the first available chat model to check availability
     start: Bắt đầu thôi!
-    loginPrompt: Sign in to use the official AIRI provider for the best experience.
+    loginPrompt: Sign in to use the official Lumi provider for the best experience.
     loginAction: Sign in
     setupWithoutSigningIn: Setup with your provider
     flux: Flux
@@ -95,7 +95,7 @@ analytics:
   notice:
     title: Usage analytics
     description: >-
-      AIRI collects anonymous usage analytics to help us understand how the app is used and improve stability. No personal data is collected.
+      Lumi collects anonymous usage analytics to help us understand how the app is used and improve stability. No personal data is collected.
     privacyPrefix: Read the
     privacyLink: privacy policy
     onboardingHint: You can turn analytics off later in Settings > System > General.
@@ -144,7 +144,7 @@ live2d:
   theme-color-from-model:
     title: Trích xuất màu từ mô hình
     description: >
-      Extract prominent colors from current rendering canvas. Click on the color to apply it to AIRI. Try to extract multiple times, with the model in different poses, if the colors are not desirable.
+      Extract prominent colors from current rendering canvas. Click on the color to apply it to Lumi. Try to extract multiple times, with the model in different poses, if the colors are not desirable.
     button-extract:
       title: Trích xuất
   animation:
@@ -167,7 +167,7 @@ live2d:
       description: Force blinking animation with external timer
     blink-mode:
       title: Blink mode
-      description: Choose the model built-in blink or AIRI's forced blink timer.
+      description: Choose the model built-in blink or Lumi's forced blink timer.
     idle-motion:
       title: Idle animation
       no-motion: No animation available
@@ -231,7 +231,7 @@ pages:
     connections:
       tab: Connected accounts
       title: Connected accounts
-      description: Sign in to AIRI through these providers. Unlink to revoke access, then link again to switch to a different account.
+      description: Sign in to Lumi through these providers. Unlink to revoke access, then link again to switch to a different account.
       status:
         linked: Linked
         notLinked: Not linked
@@ -313,7 +313,7 @@ pages:
     delete: Xóa
     delete_card: Xóa thẻ
     delete_confirmation: Bạn có chắc muốn xóa thẻ này?
-    description: Dùng preset thẻ nhân vật AIRI
+    description: Dùng preset thẻ nhân vật Lumi
     description_label: Mô tả
     drop_here: Kéo vào đây để tải lên
     create_card: Tạo thẻ mới
@@ -383,7 +383,7 @@ pages:
       model: Giọng nói / Mô hình
       voice: Giọng nói / Giọng
     systemprompt: Lời nhắc hệ thống
-    title: Thẻ AIRI
+    title: Thẻ Lumi
     try_different_search: Hãy thử từ khóa khác
     upload: Tải lên
     upload_desc: Bấm hoặc kéo thả tệp để tải lên
@@ -392,7 +392,7 @@ pages:
     title: Bộ nhớ
   data:
     title: Dữ liệu
-    description: Quản lý dữ liệu AIRI đã lưu, xuất và đặt lại
+    description: Quản lý dữ liệu Lumi đã lưu, xuất và đặt lại
     sections:
       chats:
         title: Phiên trò chuyện
@@ -421,11 +421,11 @@ pages:
         delete: Xóa sạch dữ liệu
       desktop-folder:
         title: Open app data folder
-        description: Open AIRI's data folder in your file manager.
+        description: Open Lumi's data folder in your file manager.
         open: Open folder
       desktop:
         title: Đặt lại thiết lập máy tính
-        description: Xóa các cài đặt và trạng thái thực thi của AIRI trên máy tính.
+        description: Xóa các cài đặt và trạng thái thực thi của Lumi trên máy tính.
         center: Di chuyển cửa sổ desktop về giữa màn hình
         reset: Đặt lại dữ liệu desktop
     confirmations:
@@ -522,7 +522,7 @@ pages:
           name: Nano Banana (Preview)
           description: Use Google AI Studio for image preview and reactions.
       card:
-        description: Configure how AIRI generates images and visual content.
+        description: Configure how Lumi generates images and visual content.
         comfyui_empty: No ComfyUI workflows configured. Go to Settings → Providers → ComfyUI to upload a workflow template.
         exposed_fields: '{count} exposed fields'
         open_on_replicate: Open on Replicate
@@ -598,7 +598,7 @@ pages:
       description: Chơi Factorio!
       title: Factorio
       enable: Bật tích hợp Factorio
-      enable-description: Cho phép AIRI tương tác với trò chơi Factorio
+      enable-description: Cho phép Lumi tương tác với trò chơi Factorio
       server-address: Địa chỉ máy chủ
       server-address-description: Địa chỉ IP hoặc tên máy chủ của máy chủ Factorio
       server-address-placeholder: Nhập địa chỉ máy chủ (ví dụ localhost hoặc 192.168.1.100)
@@ -665,7 +665,7 @@ pages:
       description: Trò chuyện & gọi thoại qua Discord
       title: Discord
       enable: Bật tích hợp Discord
-      enable-description: Cho phép AIRI tương tác qua Discord
+      enable-description: Cho phép Lumi tương tác qua Discord
       token: Mã token của bot
       token-description: Mã token bot Discord của bạn
       token-placeholder: Nhập mã token bot Discord của bạn
@@ -717,7 +717,7 @@ pages:
       description: Sử Dụng Twitter
       title: X / Twitter
       enable: Bật tích hợp X / Twitter
-      enable-description: Cho phép AIRI tương tác với X / Twitter
+      enable-description: Cho phép Lumi tương tác với X / Twitter
       api-key: Khóa API
       api-key-description: Khóa API X / Twitter của bạn
       api-key-placeholder: Nhập khóa API X / Twitter của bạn
@@ -733,7 +733,7 @@ pages:
       configured: Đã cấu hình X / Twitter thành công!
     mcp-server:
       title: MCP servers
-      description: Configure MCP servers and bring their tools into AIRI.
+      description: Configure MCP servers and bring their tools into Lumi.
       config-path: Config file
       runtime-title: Trạng thái thực thi
       empty: No MCP servers yet — click "Add server" below to create one, or paste a config via "Edit JSON".
@@ -974,7 +974,7 @@ pages:
     helpinfo:
       title: Lần đầu tới đây?
       description: >
-        {chat} AIRI cần ít nhất một nhà cung cấp để suy nghĩ và hoạt động đúng cách. Có thể coi nó như bộ não của nhân vật AIRI trong hệ thống.
+        {chat} Lumi cần ít nhất một nhà cung cấp để suy nghĩ và hoạt động đúng cách. Có thể coi nó như bộ não của nhân vật Lumi trong hệ thống.
     explained:
       chat: 'Nhà cung cấp mô hình tạo văn bản. Ví dụ: OpenRouter, OpenAI, Ollama.'
       Speech: 'Nhà cung cấp mô hình giọng nói (text-to-speech). Ví dụ: ElevenLabs, Azure Speech.'
@@ -1085,7 +1085,7 @@ pages:
               placeholder: http://localhost:8188
           cors:
             title: CORS Block Detected
-            description: ComfyUI blocks requests from other applications by default. To allow AIRI to connect, you must start ComfyUI with the `--enable-cors-header "*"` flag.
+            description: ComfyUI blocks requests from other applications by default. To allow Lumi to connect, you must start ComfyUI with the `--enable-cors-header "*"` flag.
             command: python main.py --enable-cors-header "*"
           workflows:
             title: Workflow Templates
@@ -1097,7 +1097,7 @@ pages:
             remove: Remove
             config_snippet: Artistry Config Snippet
             copy_json: Copy JSON
-            paste_hint: Paste this into your AIRI Card artistry config to override these nodes.
+            paste_hint: Paste this into your Lumi Card artistry config to override these nodes.
           upload:
             prompt: Drop or select a workflow_api.json file
             invalid_json: Invalid JSON
@@ -1345,13 +1345,13 @@ pages:
         title: Web Speech API
       official:
         title: Official Provider
-        description: Official AI provider by AIRI.
+        description: Official AI provider by Lumi.
         speech-title: Official Speech Provider
-        speech-description: Official text-to-speech provider by AIRI.
+        speech-description: Official text-to-speech provider by Lumi.
         speech-streaming-title: Official Streaming Speech Provider
-        speech-streaming-description: Official low-latency text-to-speech provider by AIRI (bidirectional WebSocket).
+        speech-streaming-description: Official low-latency text-to-speech provider by Lumi (bidirectional WebSocket).
         transcription-title: Official Transcription Provider
-        transcription-description: Official speech-to-text provider by AIRI.
+        transcription-description: Official speech-to-text provider by Lumi.
       transcriptions:
         playground:
           title: Thử nghiệm chuyển văn bản
@@ -1359,6 +1359,9 @@ pages:
         title: AIHubMix
         description: https://aihubmix.com (Giảm giá 10%)
     title: Nhà cung cấp
+  online:
+    title: Trực tuyến
+    description: Cấu hình chơi mạng, ghép nối thiết bị và phòng trò chuyện chung của Lumi
   connection:
     description: Cấu hình kết nối máy chủ WebSocket
     title: Kết nối
@@ -1369,7 +1372,7 @@ pages:
     server-hostname:
       label: Expose On Network
       description: >-
-        Choose whether the AIRI gateway only listens on this device or can be reached from your local network.
+        Choose whether the Lumi gateway only listens on this device or can be reached from your local network.
       advanced-label: Bind Hostname
       advanced-description: >-
         Use a specific hostname or IP address when you need manual network binding.
@@ -1380,14 +1383,14 @@ pages:
     server-auth-token:
       label: Auth Token
       description: >-
-        Security token required by remote clients that connect to this gateway. When left empty, AIRI generates a new token automatically.
+        Security token required by remote clients that connect to this gateway. When left empty, Lumi generates a new token automatically.
       placeholder: Auto-generate
     qr:
       title: Connect from Stage Pocket
       description: >-
         Scan this QR code from Stage Pocket to try all reachable local network addresses and save the first working one.
       refresh: Refresh
-      image-alt: AIRI server channel connection QR code
+      image-alt: Lumi server channel connection QR code
       candidates: Candidate addresses
       token-hint: >-
         The QR code includes the auth token so Stage Pocket can authenticate after connecting. Do not share it publicly.
@@ -1397,7 +1400,7 @@ pages:
     qr-scan:
       title: Quick Connect
       description: Scan the QR code from Tamagotchi to quick connect
-      instructions: Point the camera at the AIRI connection QR code.
+      instructions: Point the camera at the Lumi connection QR code.
       action: Scan
       success:
         title: Connected address saved
@@ -1480,8 +1483,8 @@ pages:
           presets:
             default:
               colors:
-                color-1: Xanh AIRI
-              description: Màu xanh lá mặc định do AIRI mang đến cho bạn!
+                color-1: Xanh Lumi
+              description: Màu xanh lá mặc định do Lumi mang đến cho bạn!
               title: Màu mặc định
             morandi:
               colors:
@@ -1582,7 +1585,7 @@ sections:
 theme:
   title: Chủ Đề
   description: |
-    Chuyển đổi chủ đề cơ bản của AIRI, Chế độ Sáng hoặc Chế độ Tối.
+    Chuyển đổi chủ đề cơ bản của Lumi, Chế độ Sáng hoặc Chế độ Tối.
 title: Cài Đặt
 voices: Giọng Nói
 vrm:

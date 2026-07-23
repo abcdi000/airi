@@ -10,6 +10,7 @@ import { useAudioContext } from '@proj-airi/stage-ui/stores/audio'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
 import { useLumiAgentStore } from '@proj-airi/stage-ui/stores/lumi-agent'
+import { useLumiOnlineStore } from '@proj-airi/stage-ui/stores/lumi-online'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
 import { useSettings, useSettingsAudioDevice } from '@proj-airi/stage-ui/stores/settings'
@@ -45,6 +46,7 @@ const { enabled, stream } = storeToRefs(useSettingsAudioDevice())
 const chatOrchestrator = useChatOrchestratorStore()
 const chatSession = useChatSessionStore()
 const lumiAgentStore = useLumiAgentStore()
+const lumiOnlineStore = useLumiOnlineStore()
 const ttsDebugStore = useTtsDebugStore()
 const { ingest, onAfterMessageComposed } = chatOrchestrator
 const { messages } = storeToRefs(chatSession)
@@ -81,6 +83,10 @@ async function handleSend() {
   messageInput.value = ''
 
   try {
+    if (lumiOnlineStore.runtimeMode === 'online-client') {
+      await lumiOnlineStore.sendText(chatSession.activeSessionId, textToSend)
+      return
+    }
     const providerConfig = providersStore.getProviderConfig(activeProvider.value)
 
     await ingest(textToSend, {

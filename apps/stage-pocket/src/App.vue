@@ -3,7 +3,7 @@ import { OnboardingDialog, OnboardingStepAnalyticsNotice, ToasterRoot } from '@p
 import { isPosthogAvailableInBuild, useSharedAnalyticsStore } from '@proj-airi/stage-ui/stores/analytics'
 import { useCharacterOrchestratorStore } from '@proj-airi/stage-ui/stores/character'
 import { useDisplayModelsStore } from '@proj-airi/stage-ui/stores/display-models'
-import { useModsServerChannelStore } from '@proj-airi/stage-ui/stores/mods/api/channel-server'
+import { useLumiOnlineStore } from '@proj-airi/stage-ui/stores/lumi-online'
 import { useContextBridgeStore } from '@proj-airi/stage-ui/stores/mods/api/context-bridge'
 import { useAiriCardStore } from '@proj-airi/stage-ui/stores/modules/airi-card'
 import { useOnboardingStore } from '@proj-airi/stage-ui/stores/onboarding'
@@ -18,7 +18,7 @@ import { toast, Toaster } from 'vue-sonner'
 
 import OnboardingPermissionsStep from './components/onboarding/step-permissions.vue'
 
-import { getHostWebSocketConstructor } from './modules/websocket-bridge'
+import { createLumiOnlinePocketBridge } from './modules/lumi-online'
 
 const contextBridgeStore = useContextBridgeStore()
 const i18n = useI18n()
@@ -26,7 +26,7 @@ const displayModelsStore = useDisplayModelsStore()
 const settingsStore = useSettings()
 const settings = storeToRefs(settingsStore)
 const onboardingStore = useOnboardingStore()
-const serverChannelStore = useModsServerChannelStore()
+const lumiOnlineStore = useLumiOnlineStore()
 const characterOrchestratorStore = useCharacterOrchestratorStore()
 const settingsAudioDeviceStore = useSettingsAudioDevice()
 const { showingSetup } = storeToRefs(onboardingStore)
@@ -78,10 +78,8 @@ onMounted(async () => {
     onboardingStore.showingSetup = true
   }
 
-  await serverChannelStore.initialize({
-    possibleEvents: ['ui:configure'],
-    websocketConstructor: getHostWebSocketConstructor(),
-  }).catch(err => console.error('Failed to initialize Mods Server Channel in App.vue:', err))
+  lumiOnlineStore.setBridge(createLumiOnlinePocketBridge())
+  await lumiOnlineStore.initialize('Lumi Pocket')
   contextBridgeStore.initialize()
   characterOrchestratorStore.initialize()
 

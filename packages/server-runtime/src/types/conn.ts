@@ -1,4 +1,4 @@
-import type { MetadataEventSource } from '@proj-airi/server-shared/types'
+import type { ConnectionAuthIdentity, MetadataEventSource } from '@proj-airi/server-shared/types'
 
 export interface Peer {
   /**
@@ -35,6 +35,7 @@ export enum WebSocketReadyState {
 
 export interface AuthenticatedPeer extends NamedPeer {
   authenticated: boolean
+  authIdentity?: ConnectionAuthIdentity
   identity?: MetadataEventSource
   lastHeartbeatAt?: number
   healthy?: boolean

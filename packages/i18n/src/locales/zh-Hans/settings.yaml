@@ -10,8 +10,8 @@ animations:
 dialogs:
   onboarding:
     official:
-      title: AIRI 官方提供商
-    title: 欢迎来到 AIRI！
+      title: Lumi 官方提供商
+    title: 欢迎来到 Lumi！
     description: 让我们设置您的第一个服务来源来开始使用。
     selectProvider: 选择服务来源
     configureProvider: 配置 {provider}
@@ -35,13 +35,13 @@ dialogs:
     retry: 重试
     credentialsSafeLabel: 保证您的 API 密钥和凭据的安全！
     credentialsSafeLocal: >-
-      AIRI 完全本地运行在您的电脑中，我们绝不窃取您对大模型提供商的凭据。但请牢记，您的 API 密钥属于敏感信息。务必妥善保管，切勿与他人分享。
+      Lumi 完全本地运行在您的电脑中，我们绝不窃取您对大模型提供商的凭据。但请牢记，您的 API 密钥属于敏感信息。务必妥善保管，切勿与他人分享。
     credentialsSafeOpenSource: >-
-      AIRI 在 {github} 开源，如果您想确认我们如何存储您的凭据，您可以自由浏览源码。
+      Lumi 在 {github} 开源，如果您想确认我们如何存储您的凭据，您可以自由浏览源码。
     enableChatCheck: >-
-      允许 AIRI 向第一个可用的聊天模式发送「ping」消息以检查可用性
+      允许 Lumi 向第一个可用的聊天模式发送「ping」消息以检查可用性
     start: 开始吧！
-    loginPrompt: 登录并使用 AIRI 官方提供的服务以获得最佳体验。
+    loginPrompt: 登录并使用 Lumi 官方提供的服务以获得最佳体验。
     loginAction: 登录
     setupWithoutSigningIn: 配置您自己的 AI 服务来源
     flux: Flux 电量
@@ -95,7 +95,7 @@ analytics:
   notice:
     title: 使用数据及崩溃分析
     description: >-
-      AIRI 开发者将会收集脱敏的匿名使用数据，以及崩溃及错误细节，以帮助我们了解应用程序是如何使用和提高稳定性的，不会收集任何个人数据。
+      Lumi 开发者将会收集脱敏的匿名使用数据，以及崩溃及错误细节，以帮助我们了解应用程序是如何使用和提高稳定性的，不会收集任何个人数据。
     privacyPrefix: 阅读
     privacyLink: 隐私政策
     onboardingHint: 您可以稍后在「设置」>「系统」>「通用」中关闭使用数据及崩溃分析。
@@ -144,7 +144,7 @@ live2d:
   theme-color-from-model:
     title: 从模型提取主题颜色
     description: >
-      Extract prominent colors from current rendering canvas. Click on the color to apply it to AIRI. Try to extract multiple times, with the model in different poses, if the colors are not desirable.
+      Extract prominent colors from current rendering canvas. Click on the color to apply it to Lumi. Try to extract multiple times, with the model in different poses, if the colors are not desirable.
     button-extract:
       title: 提取
   animation:
@@ -167,7 +167,7 @@ live2d:
       description: Force blinking animation with external timer
     blink-mode:
       title: Blink mode
-      description: Choose the model built-in blink or AIRI's forced blink timer.
+      description: Choose the model built-in blink or Lumi's forced blink timer.
     idle-motion:
       title: Idle animation
       no-motion: No animation available
@@ -231,7 +231,7 @@ pages:
     connections:
       tab: 已关联的帐户
       title: 已关联的账户
-      description: 可以通过第三方帐户登录至 AIRI。解除关联即可撤回对第三方帐户的授权，也可以通过解除关联来关联至另一个帐户。
+      description: 可以通过第三方帐户登录至 Lumi。解除关联即可撤回对第三方帐户的授权，也可以通过解除关联来关联至另一个帐户。
       status:
         linked: 已关联
         notLinked: 未关联
@@ -313,7 +313,7 @@ pages:
     delete: 删除
     delete_card: 删除角色卡
     delete_confirmation: 确定要删除这张角色卡吗？
-    description: 使用 AIRI 角色卡预设
+    description: 使用 Lumi 角色卡预设
     description_label: 描述
     drop_here: 放开以上传文件
     create_card: 创建新角色卡
@@ -383,7 +383,7 @@ pages:
       model: 声音 / 模型
       voice: 声音 / 声线
     systemprompt: 系统提示词
-    title: AIRI 角色卡
+    title: Lumi 角色卡
     try_different_search: 尝试使用其他关键词搜索
     upload: 上传
     upload_desc: 点击或拖拽文件到此处上传
@@ -392,7 +392,7 @@ pages:
     title: 记忆体
   data:
     title: Data
-    description: 管理存储 AIRI 数据、导出和重置
+    description: 管理存储 Lumi 数据、导出和重置
     sections:
       chats:
         title: 聊天会话
@@ -421,12 +421,12 @@ pages:
         delete: 删除所有数据
       desktop-folder:
         title: 打开应用数据文件夹
-        description: 在文件管理器中打开 AIRI 的数据文件夹。
+        description: 在文件管理器中打开 Lumi 的数据文件夹。
         open: 打开文件夹
       desktop:
         title: 重置桌面设置和状态
-        description: 清除 AIRI 桌面设置和运行状态。
-        center: 将 AIRI 窗口移回屏幕中心
+        description: 清除 Lumi 桌面设置和运行状态。
+        center: 将 Lumi 窗口移回屏幕中心
         reset: 重置桌面数据
     confirmations:
       tooltip: 您确定吗？
@@ -440,7 +440,7 @@ pages:
       modules_reset: 重置模块设置。
       providers_reset: 服务端设置重置。
       all_deleted: 已删除所有本地数据。
-      desktop_window_centered: AIRI 窗口已移回屏幕中心。
+      desktop_window_centered: Lumi 窗口已移回屏幕中心。
       desktop_reset: 桌面数据重置。
   models:
     description: 切换角色的 Live2D，VRM 模型
@@ -525,7 +525,7 @@ pages:
           name: Nano Banana (Preview)
           description: Use Google AI Studio for image preview and reactions.
       card:
-        description: Configure how AIRI generates images and visual content.
+        description: Configure how Lumi generates images and visual content.
         comfyui_empty: No ComfyUI workflows configured. Go to Settings → Providers → ComfyUI to upload a workflow template.
         exposed_fields: '{count} exposed fields'
         open_on_replicate: Open on Replicate
@@ -601,7 +601,7 @@ pages:
       description: 一起玩 Factorio！
       title: 异星工厂 Factorio
       enable: 启用异星工厂集成
-      enable-description: 允许AIRI与异星工厂游戏互动
+      enable-description: 允许Lumi与异星工厂游戏互动
       server-address: 服务器地址
       server-address-description: 异星工厂服务器的IP地址或主机名
       server-address-placeholder: 输入服务器地址（例如：localhost或192.168.1.100）
@@ -668,7 +668,7 @@ pages:
       description: Discord 发消息和语音聊天
       title: Discord
       enable: 启用Discord集成
-      enable-description: 允许AIRI通过Discord进行互动
+      enable-description: 允许Lumi通过Discord进行互动
       token: 机器人令牌
       token-description: 您的Discord机器人令牌
       token-placeholder: 输入您的Discord机器人令牌
@@ -701,7 +701,7 @@ pages:
             search_voices_results: 找到 {count} / {total} 个声线
             unsupported_voice_warning_title: 没有支持的声线
             unsupported_voice_warning_content: >-
-              我们正在尽快支持该模型的所有音色，如果你迫切希望支持该模型音色，请在 GitHub 上联系我们 https://github.com/moeru-ai/airi/issues
+              我们正在尽快支持该模型的所有音色，如果你迫切希望支持该模型音色，请在 GitHub 上联系我们 https://github.com/moeru-ai/Lumi/issues
             show_less: 显示更少
             show_more: 显示更多
             title: 选择语音合成服务来源
@@ -720,7 +720,7 @@ pages:
       description: X / Twitter 的浏览和使用
       title: X / Twitter
       enable: 启用X / Twitter集成
-      enable-description: 允许AIRI与X / Twitter互动
+      enable-description: 允许Lumi与X / Twitter互动
       api-key: API密钥
       api-key-description: 您的X / Twitter API密钥
       api-key-placeholder: 输入您的X / Twitter API密钥
@@ -736,7 +736,7 @@ pages:
       configured: X / Twitter已正确配置！
     mcp-server:
       title: MCP 集成
-      description: 配置其他 MCP 服务器并将能力拓展至 AIRI
+      description: 配置其他 MCP 服务器并将能力拓展至 Lumi
       config-path: 配置文件
       runtime-title: 运行状态
       empty: 尚无已配置的 MCP 集成 - 点击「添加服务器」来创建一个，或者通过「编辑 JSON」直接粘贴配置
@@ -751,11 +751,11 @@ pages:
         description: '填写新的服务器配置，然后点击「保存并重启」，完成后将会更新至上方的「已配置」'
         pending-badge: 未保存
         presets-title: 快速预设
-        minecraft-preset-description: 添加 Minecraft 持久 MCP。请先在 Minecraft Java 世界里「对局域网开放」，默认连接 localhost:25565；AIRI 会在首次使用时启动它，并尽量常驻到 AIRI 关闭。
+        minecraft-preset-description: 添加 Minecraft 持久 MCP。请先在 Minecraft Java 世界里「对局域网开放」，默认连接 localhost:25565；Lumi 会在首次使用时启动它，并尽量常驻到 Lumi 关闭。
         computer-use-preset-title: Windows Computer Use 预设
         computer-use-preset-description: 添加 Lumi 的本地 Windows 控制 MCP。安装版会使用随包服务；网页仍由 Playwright MCP 处理，原生窗口操作会先观察、再执行，并在每个动作前请求你的确认。
-        playwright-preset-title: Playwright Browser 预设
-        playwright-preset-description: 添加 Lumi 随包的 Playwright MCP，用于网页打开、点击、输入、截图、标签页和页面状态检查。适合作为浏览器自动化的标准入口。
+        playwright-preset-title: Lumi 浏览器预设
+        playwright-preset-description: 添加 Lumi 随包的浏览器 MCP，默认使用 Patchright，并保留 Playwright 兼容后端，用于网页打开、点击、输入、截图、标签页和页面状态检查。
       status:
         unknown: 未加载
       actions:
@@ -765,7 +765,7 @@ pages:
         add-server: 添加
         add-minecraft-preset: 添加 Minecraft MCP 预设
         add-computer-use-preset: 添加 Windows Computer Use 预设
-        add-playwright-preset: 添加 Playwright MCP 预设
+        add-playwright-preset: 添加 Lumi 浏览器 MCP 预设
         add-env: 添加变量
         add-header: 添加请求头
         remove: 移除
@@ -802,11 +802,48 @@ pages:
         computer-use-interrupt-shortcut:
           label: Computer Use 强制中断快捷键
           description: 全局按键，会立即停止正在运行的 Computer Use 会话。默认 End。
+        computer-use-policy:
+          title: 应用黑名单
+          description: 除这里阻止的项目外，Computer Use 可以操作任意桌面应用。此策略已取代原来的应用白名单。
+          apps:
+            label: 禁止操作的应用
+            description: 每行填写一个应用名或进程名片段。清空后将允许操作所有应用。
+            placeholder: "1password\nwindows security\nlumi"
+          window-titles:
+            label: 禁止操作的窗口标题
+            description: 每行填写一个敏感窗口标题片段，也可用于保护允许启动的应用中的特定页面。
+            placeholder: "付款确认\n私人文档"
+          matching-note: 匹配不区分大小写，只要名称包含所填文字就会阻止。保存后请重启该 MCP 服务。
+        browser-backend:
+          title: 浏览器后端
+          description: 持久化 Chrome 会话优先使用 Patchright，并保留 Playwright 处理兼容与调试需求。
+          disabled: 禁用
+          default:
+            label: 默认后端
+            description: 未被单次任务或平台规则覆盖时使用的浏览器后端。
+          fallback:
+            label: 兼容回退
+            description: 仅在确认属于 Patchright 启动或驱动兼容故障时使用。
+          channel:
+            label: Patchright 浏览器通道
+            description: Lumi 的长期浏览器身份推荐使用 Google Chrome。
+          profile:
+            label: 持久化 Profile
+            description: 保存 Lumi 浏览器身份和登录状态的共享目录；留空则继续使用 JSON 配置或内置默认值。
+          headless:
+            label: Patchright 无头模式
+            description: 可以启用，但不推荐用于 Lumi 的长期浏览器。
+          persistent:
+            label: 持久化上下文
+            description: 在不同会话之间复用同一个浏览器身份。
+          no-viewport:
+            label: 使用原生窗口尺寸
+            description: 不模拟固定的自动化视口尺寸。
         startup-mode:
           label: 启动方式
-          description: 选择 AIRI 什么时候启动并常驻这个 MCP 服务。
+          description: 选择 Lumi 什么时候启动并常驻这个 MCP 服务。
           options:
-            on-startup: 跟随 AIRI 启动
+            on-startup: 跟随 Lumi 启动
             on-first-use: 首次使用工具时启动
             manual: 仅手动启动
         long-running:
@@ -814,7 +851,7 @@ pages:
           description: 给游戏、自动化等耗时工具更长的调用超时；不会强行限制 MCP 进程寿命。
         persistent:
           label: 持久会话
-          description: 表示这个 MCP 保留外部世界、登录或任务状态，AIRI 会尽量复用同一个进程直到退出。
+          description: 表示这个 MCP 保留外部世界、登录或任务状态，Lumi 会尽量复用同一个进程直到退出。
         request-timeout:
           label: 单次请求超时（毫秒）
           description: 留空使用默认值；长任务默认 60000。
@@ -862,7 +899,8 @@ pages:
         restarted: 重启好啦！启动了 {started} 个，失败 {failed} 个，跳过 {skipped} 个
         minecraft-preset-added: 已添加 Minecraft MCP 预设。保存并重启后，首次调用工具时会自动启动它。
         computer-use-preset-added: 已添加 Windows Computer Use MCP 预设。保存并重启后，Lumi 会通过现有 MCP 链路使用它。
-        playwright-preset-added: 已添加 Playwright MCP 预设。保存并重启后，Lumi 会使用随包浏览器自动化服务。
+        playwright-preset-added: 已添加 Lumi 浏览器 MCP 预设。保存并重启后默认使用 Patchright，并在兼容需求下使用 Playwright。
+        browser-config-upgraded: '已将旧版 Lumi 浏览器条目“{name}”补齐为双后端配置，请点击保存并重启以写入迁移。'
   flux:
     title: Flux
     buy: 充值
@@ -963,7 +1001,7 @@ pages:
                   openai-compatible-check-connectivity:
                     label: Ollama需要额外的配置
                     content: >-
-                      很抱歉，Ollama 连接检查失败。不要担心，如果是 Ollama，需要额外配置才能通过 Ollama。 您需要在启动 Olama 应用程序或 Ollama CLI 服务器时明确设置 <code>OLLAMA_HOST</code> 详情，请检查 <a href="https://airi.moeru.ai/docs/en/docs/manual/integrations/providers/chat/ollama">Ollama 集成指南</a>。
+                      很抱歉，Ollama 连接检查失败。不要担心，如果是 Ollama，需要额外配置才能通过 Ollama。 您需要在启动 Olama 应用程序或 Ollama CLI 服务器时明确设置 <code>OLLAMA_HOST</code> 详情，请检查 <a href="https://Lumi.moeru.ai/docs/en/docs/manual/integrations/providers/chat/ollama">Ollama 集成指南</a>。
     common:
       continueAnyway: 仍然继续
       goToModelSelection: 选择模型→
@@ -1023,7 +1061,7 @@ pages:
     helpinfo:
       title: 第一次使用？
       description: >
-        AIRI 需要配置至少一个 {chat} 服务来源，才能正常思考和运作。你可以把它看作是 AIRI 系统中角色的大脑。
+        Lumi 需要配置至少一个 {chat} 服务来源，才能正常思考和运作。你可以把它看作是 Lumi 系统中角色的大脑。
     explained:
       chat: 文本生成模型服务来源，例如 OpenRouter, OpenAI, Ollama
       Speech: 语音（文本转语音）模型服务来源，例如 ElevenLabs, Azure Speech
@@ -1143,7 +1181,7 @@ pages:
               placeholder: http://localhost:8188
           cors:
             title: CORS Block Detected
-            description: ComfyUI blocks requests from other applications by default. To allow AIRI to connect, you must start ComfyUI with the `--enable-cors-header "*"` flag.
+            description: ComfyUI blocks requests from other applications by default. To allow Lumi to connect, you must start ComfyUI with the `--enable-cors-header "*"` flag.
             command: python main.py --enable-cors-header "*"
           workflows:
             title: Workflow Templates
@@ -1155,7 +1193,7 @@ pages:
             remove: Remove
             config_snippet: Artistry Config Snippet
             copy_json: Copy JSON
-            paste_hint: Paste this into your AIRI Card artistry config to override these nodes.
+            paste_hint: Paste this into your Lumi Card artistry config to override these nodes.
           upload:
             prompt: Drop or select a workflow_api.json file
             invalid_json: Invalid JSON
@@ -1402,13 +1440,13 @@ pages:
         description: 浏览器原生STT (需要 Chrome/Edge/Safari)
         title: Web 语音API
       official:
-        title: AIRI官方提供商
+        title: Lumi官方提供商
         description: 登录后即可使用的服务来源
-        speech-title: AIRI 官方语音合成服务
+        speech-title: Lumi 官方语音合成服务
         speech-description: 登录后即可使用的发声单元服务
         speech-streaming-title: Official Streaming Speech Provider
-        speech-streaming-description: Official low-latency text-to-speech provider by AIRI (bidirectional WebSocket).
-        transcription-title: AIRI 官方语音识别服务
+        speech-streaming-description: Official low-latency text-to-speech provider by Lumi (bidirectional WebSocket).
+        transcription-title: Lumi 官方语音识别服务
         transcription-description: 登录后即可使用的听觉单元服务
       transcriptions:
         playground:
@@ -1417,6 +1455,9 @@ pages:
         title: AIHubMix
         description: https://aihubmix.com (九折优惠)
     title: 服务来源
+  online:
+    title: 联机
+    description: 配置 Lumi 联机、设备配对和共享群聊
   connection:
     description: 配置 WebSocket 服务器连接
     title: 连接
@@ -1427,7 +1468,7 @@ pages:
     server-hostname:
       label: 是否暴露在连接的网络下（WiFi，有线）
       description: >-
-        选择是否只允许此设备与 AIRI 进行配对，或是也允许来自其他本地网络的设备进行配对
+        选择是否只允许此设备与 Lumi 进行配对，或是也允许来自其他本地网络的设备进行配对
       advanced-label: 会监听的 hostname
       advanced-description: >-
         当您需要手动绑定时，使用指定的主机名或 IP 地址。
@@ -1438,28 +1479,107 @@ pages:
     server-auth-token:
       label: 认证凭据
       description: >-
-        连接和配对需要安全令牌。如果留空，AIRI 自动生成一个新的令牌。
+        连接和配对需要安全令牌。如果留空，Lumi 自动生成一个新的令牌。
       placeholder: 自动生成
     qr:
       title: 从 Pocket（口袋）版配对
       description: >-
         从 Pocket（口袋）版扫描此二维码以进行配对
       refresh: 刷新
-      image-alt: AIRI 配对码
+      image-alt: Lumi 配对码
       candidates: 备选连接地址
       token-hint: >-
         二维码包含了认证凭据，所以 Pocket（口袋）版可以自动配对，请不要公开分享此二维码。
       errors:
         title: 二维码暂不可用
         unavailable: 无法生成配对二维码
+    lumi-devices:
+      title: Lumi 局域联网设备
+      description: 为指定用户创建设备凭证，可单独撤销；令牌只显示一次。
+      name: 设备名称
+      name-placeholder: Moussy 的电脑
+      user: 对应用户
+      room: 共享群聊
+      untitled-room: 未命名的 Lumi 群聊
+      create-room: 创建共享群聊
+      no-room-title: 尚无可用的共享群聊
+      no-room-description: 请先创建包含 Doggy、Moussy 和 Lumi 的群聊，再签发此设备凭据。
+      permissions:
+        title: 设备工具权限
+        description: 未分类和未来新增的工具默认禁止，只有明确授权的类别才会提供给此设备。
+        memory: 长期记忆
+        memory-description: 始终可用，并继续遵守 Lumi 的用户、共享与群聊记忆访问规则。
+        memory-short: 记忆
+        web: 网页与 Playwright
+        web-description: 允许通过获批的 MCP 工具浏览和操作网页。
+        web-short: 网页
+        minecraft: Minecraft
+        minecraft-description: 允许此设备控制共享的持久 Minecraft 会话。
+        minecraft-short: Minecraft
+        computer-use: Windows 电脑控制
+        computer-use-description: 允许观察和操作本机桌面；其他会话占用时会拒绝并发控制。
+        computer-use-short: Windows 控制
+      create: 创建设备凭证
+      pLuming-title: 设备配对码
+      pLuming-once: 请立即扫描或复制。Lumi 只保存摘要，之后无法再次显示此令牌。
+      pLuming-alt: Lumi 设备配对二维码
+      copy: 复制配对信息
+      active: 有效
+      revoked: 已撤销
+      revoke: 撤销
+      confirm-revoke: 确认撤销
+      cancel: 取消
+      empty: 尚未创建 Lumi 局域联网设备。
+      resources:
+        title: 远程工具占用
+        description: 浏览器、Minecraft 与 Windows 控制采用独占执行。终止操作会关闭占用它的 MCP 会话，且不会显示工具参数或聊天内容。
+        refresh: 刷新占用状态
+        empty: 当前没有远程工具占用独占资源。
+        local: 本地主机
+        stopping: 正在请求终止
+        terminate: 终止
+        confirm-terminate: 停止 MCP 会话
+        types:
+          browser: 浏览器
+          minecraft: Minecraft
+          computer-use: Windows 控制
+      audit:
+        title: 设备活动记录
+        description: 记录近期连接和群聊操作，不会保存聊天正文或任何凭据。
+        clear: 清空记录
+        confirm-clear: 确认清空
+        empty: 暂无设备活动记录。
+        unknown-device: 未知设备
+        no-details: 无更多信息
+        kinds:
+          device-created: 已创建设备
+          device-revoked: 已撤销设备
+          authenticated: 已连接
+          authentication-failed: 认证被拒绝
+          disconnected: 已断开连接
+          event-accepted: 已接受群聊操作
+          event-rejected: 已拒绝群聊操作
+          tool-resource-started: 远程工具已开始
+          tool-resource-finished: 远程工具已结束
+          tool-resource-terminated: 远程工具已终止
+      errors:
+        title: 设备操作失败
+        load: 无法读取 Lumi 局域联网设备。
+        create: 无法创建设备凭证。
+        create-room: 无法创建 Lumi 共享群聊。
+        revoke: 无法撤销设备凭证。
+        audit-load: 无法读取设备活动记录。
+        audit-clear: 无法清空设备活动记录。
+        resources-load: 无法读取远程工具占用状态。
+        resource-terminate: 无法终止正在占用资源的 MCP 会话。
     qr-scan:
       title: 快速连接
-      description: 扫描桌面端的配对码以快速配对
-      instructions: 将相机中心位置对准配对码
+      description: 扫描 Lumi 设备配对码，连接到主机指定的共享群聊。
+      instructions: 将相机中心位置对准 Lumi 设备配对二维码。
       action: 扫描
       success:
-        title: 连接地址已更新
-        description: '现在配对到的 AIRI 主端 {url}'
+        title: Lumi 群聊配对成功
+        description: '已通过 {url} 连接到“{room}”'
       errors:
         title: 二维码扫描失败
         failed: 扫描或连接二维码失败。
@@ -1538,8 +1658,8 @@ pages:
           presets:
             default:
               colors:
-                color-1: AIRI Green
-              description: 默认的绿色主题，由 AIRI 为您带来！
+                color-1: Lumi Green
+              description: 默认的绿色主题，由 Lumi 为您带来！
               title: 默认颜色
             morandi:
               colors:
@@ -1640,7 +1760,7 @@ sections:
 theme:
   title: 主题
   description: |
-    切换 AIRI 的基础主题，亮色模式或暗色模式。
+    切换 Lumi 的基础主题，亮色模式或暗色模式。
 title: 设置
 voices: 声线
 vrm:

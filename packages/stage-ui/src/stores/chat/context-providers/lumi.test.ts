@@ -2,10 +2,11 @@ import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createDefaultLumiStateSnapshot } from '../../../../../lumi-runtime/src'
-import { createLumiContext } from './lumi'
 import { useLumiEmotionStore } from '../../lumi-emotion'
+import { LUMI_MOUSSY_USER_ID } from '../../lumi-identity'
 import { useLumiMemoryStore } from '../../lumi-memory'
 import { useAiriCardStore } from '../../modules/airi-card'
+import { createLumiContext } from './lumi'
 
 vi.mock('../../modules/artistry', async () => {
   const { defineStore } = await import('pinia')
@@ -59,7 +60,7 @@ vi.mock('nanoid', () => ({
   nanoid: () => 'context-id',
 }))
 
-describe('Lumi migrated context provider', () => {
+describe('lumi migrated context provider', () => {
   beforeEach(() => {
     const storage = new Map<string, string>()
     vi.stubGlobal('localStorage', {
@@ -82,12 +83,70 @@ describe('Lumi migrated context provider', () => {
     expect(createLumiContext()).toBeNull()
   })
 
+  it('describes a shared group timeline without granting access to private direct chats', () => {
+    const cardStore = useAiriCardStore()
+    cardStore.initialize()
+    cardStore.activeCardId = 'lumi'
+
+    const context = createLumiContext({
+      messageText: 'Let us play together.',
+      interaction: {
+        conversationId: 'doggy-moussy-room',
+        conversationType: 'group',
+        actorId: LUMI_MOUSSY_USER_ID,
+        actorDisplayName: 'Moussy',
+        participantIds: ['doggy-user', LUMI_MOUSSY_USER_ID],
+      },
+    })
+
+    expect(context?.text).toContain('[Lumi group conversation boundary]')
+    expect(context?.text).toContain('Conversation ID: doggy-moussy-room.')
+    expect(context?.text).toContain('Current speaker: Moussy.')
+    expect(context?.text).toContain('[Lumi current group speaker]')
+    expect(context?.text).toContain('It does not grant this group access')
+    expect(context?.text).toContain('当前交流对象是 Moussy')
+    expect(context?.text).toContain('不要把她称为 Doggy')
+    expect(context?.text).not.toContain('关系设定：当前交流对象是 Doggy')
+    expect(context?.text).not.toContain('尽量以Doggy')
+    expect(context?.text).not.toContain('和 Doggy 一起经历的事情')
+    expect(context?.text).not.toContain('不会无条件服从 Doggy')
+    expect(context?.text).toContain('one shared group timeline')
+    expect(context?.text).toContain('Do not import, quote, summarize, or infer the private direct-message history')
+    expect(context?.text).not.toContain('[Lumi user profile]')
+    expect(context?.text).not.toContain('[Lumi current_state')
+    expect(context?.text).not.toContain('鏈€鏂?Lumi 鐘舵€?')
+    expect(context?.text).toContain('[Group Tool Boundary]')
+  })
+
+  it('never falls back to Doggy when an immutable interaction actor is not in the local identity cache', () => {
+    const cardStore = useAiriCardStore()
+    cardStore.initialize()
+    cardStore.activeCardId = 'lumi'
+
+    const context = createLumiContext({
+      messageText: 'Do you remember me?',
+      interaction: {
+        conversationId: 'future-qq-direct',
+        conversationType: 'direct',
+        actorId: 'qq-user-2048',
+        actorDisplayName: 'FutureUser',
+        participantIds: ['qq-user-2048'],
+      },
+    })
+
+    expect(context?.text).toContain('当前正在与 Lumi 交流的人是 FutureUser')
+    expect(context?.text).toContain('当前交流对象是 FutureUser')
+    expect(context?.text).toContain('不要套用 Doggy 或其他用户的称呼与关系')
+    expect(context?.text).not.toContain('关系设定：当前交流对象是 Doggy')
+    expect(useLumiEmotionStore().getStateForUser('qq-user-2048')).not.toBeNull()
+  })
+
   it('injects migrated Lumi memories and relationship-gated emotion runtime', () => {
     const cardStore = useAiriCardStore()
     cardStore.initialize()
     cardStore.activeCardId = 'lumi'
 
-    const context = createLumiContext({ messageText: '\u4f60\u4ee5\u540e\u6539\u540d\u53eb\u5c0f\u52a9\u624b' })
+    const context = createLumiContext({ messageText: '\u4F60\u4EE5\u540E\u6539\u540D\u53EB\u5C0F\u52A9\u624B' })
 
     expect(context?.contextId).toBe('system:lumi-migrated-runtime')
     expect(context?.text).toContain('[Lumi PersonaOS hard anchor]')
@@ -96,7 +155,7 @@ describe('Lumi migrated context provider', () => {
     expect(context?.text).toContain('人格漂移防护')
     expect(context?.text).toContain('[Lumi emotion runtime]')
     expect(context?.text).toContain('当前表达状态：angry')
-    expect(context?.text).toContain('本轮关系门控阻断：current_conflict')
+    expect(context?.text).toContain('[Relationship gate active] reason=current_conflict;')
     expect(context?.text).toContain('不要使用括号动作描写')
     expect(context?.text).toContain('Lumi 的 PersonaOS 迁移上下文已启用')
     expect(context?.text).toContain('长期记忆是真实连续性')
@@ -120,10 +179,10 @@ describe('Lumi migrated context provider', () => {
     state.relationship.repairRequired = true
     emotionStore.setState(state)
 
-    const context = createLumiContext({ messageText: '\u5e2e\u6211\u5199\u4ee3\u7801' })
+    const context = createLumiContext({ messageText: '\u5E2E\u6211\u5199\u4EE3\u7801' })
 
     expect(context?.text).toContain('当前表达状态：defensive')
-    expect(context?.text).toContain('本轮关系门控阻断：unresolved_conflict_task_shift')
+    expect(context?.text).toContain('[Relationship gate active] reason=unresolved_conflict_task_shift;')
     expect(context?.text).not.toContain('(conflict_event')
   })
 
@@ -142,9 +201,9 @@ describe('Lumi migrated context provider', () => {
     state.relationship.repairRequired = true
     emotionStore.setState(state)
 
-    const context = createLumiContext({ messageText: '\u4e4b\u524d\u7684\u51b2\u7a81\u662f\u4ec0\u4e48' })
+    const context = createLumiContext({ messageText: '\u4E4B\u524D\u7684\u51B2\u7A81\u662F\u4EC0\u4E48' })
 
-    expect(context?.text).toContain('本轮关系门控允许正常聊天')
+    expect(context?.text).toContain('当前没有活跃的未解决关系冲突。')
     expect(context?.text).toContain('才调用 `lumi_memory_search`')
     expect(context?.text).not.toContain('(conflict_event')
   })
@@ -164,10 +223,10 @@ describe('Lumi migrated context provider', () => {
     state.relationship.repairRequired = true
     emotionStore.setState(state)
 
-    const context = createLumiContext({ messageText: '\u554a\u554a\u554a' })
+    const context = createLumiContext({ messageText: '\u554A\u554A\u554A' })
 
     expect(context?.text).toContain('当前表达状态：defensive')
-    expect(context?.text).toContain('本轮关系门控允许正常聊天')
+    expect(context?.text).toContain('当前没有活跃的未解决关系冲突。')
     expect(context?.text).not.toContain('(conflict_event')
   })
 
@@ -177,7 +236,7 @@ describe('Lumi migrated context provider', () => {
     cardStore.activeCardId = 'lumi'
 
     const context = createLumiContext({
-      messageText: '\u4ec0\u4e48 Level 7\uff0c\u6211\u90fd\u8bf4\u5176\u4ed6\u4e8b\u60c5\u4e86',
+      messageText: '\u4EC0\u4E48 Level 7\uFF0C\u6211\u90FD\u8BF4\u5176\u4ED6\u4E8B\u60C5\u4E86',
     })
 
     expect(context?.text).toContain('[Current turn correction guard]')
@@ -201,10 +260,10 @@ describe('Lumi migrated context provider', () => {
     state.relationship.repairRequired = true
     emotionStore.setState(state)
 
-    const context = createLumiContext({ messageText: '\u5e2e\u6211\u5199\u4ee3\u7801' })
+    const context = createLumiContext({ messageText: '\u5E2E\u6211\u5199\u4EE3\u7801' })
 
     expect(context?.text).toContain('当前表达状态：neutral')
-    expect(context?.text).toContain('本轮关系门控允许正常聊天')
+    expect(context?.text).toContain('当前没有活跃的未解决关系冲突。')
     expect(context?.text).not.toContain('(conflict_event')
   })
 
@@ -220,7 +279,7 @@ describe('Lumi migrated context provider', () => {
       userId: 'local',
       personaId: 'lumi',
       type: 'user_preference',
-      content: "In the Backrooms context, the user's favorite entity is Skin-Stealer.",
+      content: 'In the Backrooms context, the user\'s favorite entity is Skin-Stealer.',
       confidence: 0.9,
       importance: 0.9,
       emotionalIntensity: 0.1,
@@ -231,8 +290,8 @@ describe('Lumi migrated context provider', () => {
       tags: ['backrooms', 'entity', 'favorite'],
       status: 'active',
     })
-    memoryStore.setLatestTopic('session-1', '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48', {
-      query: '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48\nResolved topic hints: Backrooms\nRecent topic window: Current topic is Backrooms entity preferences.',
+    memoryStore.setLatestTopic('session-1', '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48', {
+      query: '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48\nResolved topic hints: Backrooms\nRecent topic window: Current topic is Backrooms entity preferences.',
       topicWindow: 'Current topic is Backrooms entity preferences.',
       topicHints: ['Backrooms'],
       storagePrefix: 'In the Backrooms context',
@@ -240,7 +299,7 @@ describe('Lumi migrated context provider', () => {
 
     const context = createLumiContext({
       sessionId: 'session-1',
-      messageText: '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48',
+      messageText: '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48',
     })
 
     expect(context?.text).toContain('长期记忆是真实连续性')
@@ -255,8 +314,8 @@ describe('Lumi migrated context provider', () => {
 
     const memoryStore = useLumiMemoryStore()
     memoryStore.initialize()
-    memoryStore.setLatestTopic('session-1', '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48', {
-      query: '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48\nResolved topic hints: Backrooms\nRecent topic window: Current topic is Backrooms entity preferences.',
+    memoryStore.setLatestTopic('session-1', '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48', {
+      query: '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48\nResolved topic hints: Backrooms\nRecent topic window: Current topic is Backrooms entity preferences.',
       topicWindow: 'Current topic is Backrooms entity preferences.',
       topicHints: ['Backrooms'],
       storagePrefix: 'In the Backrooms context',
@@ -264,7 +323,7 @@ describe('Lumi migrated context provider', () => {
 
     const context = createLumiContext({
       sessionId: 'session-1',
-      messageText: '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48',
+      messageText: '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48',
     })
 
     expect(context?.text).toContain('如果 `lumi_memory_search` 没有返回可靠记忆')

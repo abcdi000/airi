@@ -14,6 +14,21 @@ chat:
     cloud-badge: Synced to cloud
     new-chat-fallback: New chat
     delete: Delete conversation
+    new-group: 新建群聊
+    group-create-title: 创建 Lumi 群聊
+    group-create-description: 选择可以共享此会话与群记忆的参与者。
+    group-edit-title: 编辑 Lumi 群聊
+    group-edit-description: 添加或移除参与者。被移除的设备将无法继续访问此会话。
+    group-name: 群聊名称
+    participants: 参与者
+    current-user: 当前用户
+    cancel: 取消
+    create-group: 创建群聊
+    save-group: 保存群聊
+    group-create-failed: 无法创建群聊
+    group-edit-failed: 无法更新群聊
+    edit-group: 编辑群聊参与者
+    group-badge: 群聊
 message: 说点什么...
 send-mode:
   title: 发送键值
@@ -97,3 +112,27 @@ websocket-status:
   connected: Connected
   disconnected: No connection
   open-settings: Open connection settings
+lumi-room:
+  title: Lumi 共享群聊
+  back: 返回
+  connected: 已连接主机
+  reconnecting: 正在重新连接
+  waiting: '{count} 条待确认'
+  sync: 同步群聊
+  empty: 这个共享群聊还没有消息。
+  participant: 参与者
+  composer-placeholder: 给 Lumi 和群聊中的大家发消息
+  send: 发送
+  start-voice: 录制语音
+  send-voice: 停止并发送语音
+  cancel-voice: 取消语音
+  uploading-voice: 正在上传语音消息
+  transcribing-voice: Lumi 正在转写这条语音
+  voice-message: 语音消息
+  voice-failed: 语音录制无法发送。
+  retry: 重试
+  not-paired-title: 群聊配对信息不可用
+  not-paired-description: 请先扫描 Lumi 桌面主机生成的设备配对码，再打开这个群聊。
+  open-pairing: 打开连接设置
+  history-truncated: 更早的历史已不可用
+  history-truncated-description: 主机当前保留了从序号 {sequence} 开始的群聊事件。

@@ -1,9 +1,9 @@
 import type { LlmStreamingControlCallManifest } from '@proj-airi/pipelines-audio'
-import type { WebSocketEventOf } from '@proj-airi/server-sdk'
+import type { LumiRoomAckEvent, LumiRoomSyncEvent, WebSocketEventOf } from '@proj-airi/server-sdk'
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { UserMessage } from '@xsai/shared-chat'
 
-import type { ChatStreamEvent, ChatStreamEventContext, ContextMessage } from '../../../types/chat'
+import type { ChatInteractionContext, ChatStreamEvent, ChatStreamEventContext, ContextMessage } from '../../../types/chat'
 import type { SparkNotifyPerformanceResult, SparkNotifyReactionOptions } from './spark-notify-reaction'
 
 import { errorMessageFrom } from '@moeru/std'
@@ -14,6 +14,7 @@ import { nanoid } from 'nanoid'
 import { defineStore, storeToRefs } from 'pinia'
 import { ref, toRaw, watch } from 'vue'
 
+import { lumiRoomLedgerRepo } from '../../../database/repos/lumi-room-ledger.repo'
 import { getEventSourceKey } from '../../../utils/event-source'
 import { useCharacterOrchestratorStore } from '../../character'
 import { useChatOrchestratorStore } from '../../chat'
@@ -23,7 +24,9 @@ import { useChatSessionStore } from '../../chat/session-store'
 import { useChatStreamStore } from '../../chat/stream-store'
 import { useContextObservabilityStore } from '../../devtools/context-observability'
 import { useLlmStreamingControlStore } from '../../llm-streaming-control'
+import { useLumiIdentityStore } from '../../lumi-identity'
 import { useConsciousnessStore } from '../../modules/consciousness'
+import { useHearingSpeechInputPipeline } from '../../modules/hearing'
 import { useProvidersStore } from '../../providers'
 import { useModsServerChannelStore } from './channel-server'
 
@@ -46,6 +49,8 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
     'input:text',
     'input:text:voice',
     'input:voice',
+    'lumi:room:sync:request',
+    'lumi:room:voice:cancel',
   ] as const
   const mutex = new Mutex()
 
@@ -55,8 +60,10 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
   const chatContext = useChatContextStore()
   const serverChannelStore = useModsServerChannelStore()
   const contextObservability = useContextObservabilityStore()
+  const lumiIdentityStore = useLumiIdentityStore()
   const characterOrchestratorStore = useCharacterOrchestratorStore()
   const consciousnessStore = useConsciousnessStore()
+  const hearingSpeechInputPipeline = useHearingSpeechInputPipeline()
   const providersStore = useProvidersStore()
   const { activeProvider, activeModel } = storeToRefs(consciousnessStore)
   const streamingControl = useLlmStreamingControlStore()
@@ -93,6 +100,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
   const disposeHookFns = ref<Array<() => void>>([])
   let remoteStreamGuard: { sessionId: string, generation: number } | null = null
   let initialized = false
+  const activeRoomVoiceJobs = new Map<string, AbortController>()
 
   function recordContextIngestRejected(options: {
     channel: 'server' | 'broadcast' | 'input'
@@ -358,6 +366,105 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
     return callback()
   }
 
+  function roomReplyRoute(sourceInstanceId: string | undefined) {
+    if (!sourceInstanceId)
+      return undefined
+    return {
+      destinations: [{ type: 'instance' as const, instances: [sourceInstanceId] }],
+    }
+  }
+
+  function sendRoomAck(sourceInstanceId: string | undefined, data: LumiRoomAckEvent) {
+    const route = roomReplyRoute(sourceInstanceId)
+    if (!route)
+      return
+    serverChannelStore.send({ type: 'lumi:room:ack', data, route })
+  }
+
+  function sendRoomSync(sourceInstanceId: string | undefined, data: LumiRoomSyncEvent) {
+    const route = roomReplyRoute(sourceInstanceId)
+    if (!route)
+      return
+    serverChannelStore.send({ type: 'lumi:room:sync', data, route })
+  }
+
+  function sendRoomAccessRevoked(sourceInstanceId: string | undefined, conversationId: string, reason: string) {
+    const route = roomReplyRoute(sourceInstanceId)
+    if (!route)
+      return
+    serverChannelStore.send({
+      type: 'lumi:room:access-revoked',
+      data: { conversationId, reason, revokedAt: Date.now() },
+      route,
+    })
+  }
+
+  async function rejectReliableRoomInput(
+    event: WebSocketEventOf<'input:text'> | WebSocketEventOf<'input:voice'>,
+    reason: string,
+    options?: { revokeAccess?: boolean },
+  ) {
+    const delivery = event.data.room
+    const conversationId = event.data.overrides?.sessionId ?? event.metadata?.auth?.claims?.conversationId
+    if (!delivery || !conversationId)
+      return
+
+    const latestSequence = (await lumiRoomLedgerRepo.get(conversationId)).latestSequence
+    sendRoomAck(event.metadata?.source?.id, {
+      conversationId,
+      messageId: delivery.messageId,
+      idempotencyKey: delivery.idempotencyKey,
+      status: 'rejected',
+      latestSequence,
+      reason,
+      acknowledgedAt: Date.now(),
+    })
+    if (options?.revokeAccess)
+      sendRoomAccessRevoked(event.metadata?.source?.id, conversationId, reason)
+  }
+
+  function roomOutputRoute(context: ChatStreamEventContext) {
+    if (!context.input?.data.room)
+      return undefined
+    return roomReplyRoute(context.input.metadata?.source?.id)
+  }
+
+  function isCredentialBoundRoomActor(
+    event: WebSocketEventOf<'input:text'> | WebSocketEventOf<'input:voice'> | WebSocketEventOf<'lumi:room:sync:request'> | WebSocketEventOf<'lumi:room:voice:cancel'>,
+  ) {
+    const actor = event.data.actor
+    const auth = event.metadata?.auth
+    const conversationId = event.type === 'input:text' || event.type === 'input:voice'
+      ? event.data.overrides?.sessionId
+      : event.data.conversationId
+    if (!actor)
+      return false
+    return Boolean(
+      auth
+      && (auth.scopes.includes('*') || auth.scopes.includes('lumi:chat'))
+      && auth.claims?.provider === actor.provider
+      && auth.claims?.providerInstanceId === actor.providerInstanceId
+      && auth.claims?.externalUserId === actor.externalUserId
+      && auth.claims?.conversationId === conversationId,
+    )
+  }
+
+  function toolScopesFor(event: WebSocketEventOf<'input:text'> | WebSocketEventOf<'input:voice'>): ChatInteractionContext['toolScopes'] {
+    const scopes = event.metadata?.auth?.scopes
+    if (!scopes)
+      return undefined
+    return scopes.includes('*') ? ['*'] : scopes.filter(scope => scope.startsWith('lumi:tool:'))
+  }
+
+  function roomVoiceJobKey(conversationId: string, idempotencyKey: string) {
+    return `${conversationId}:${idempotencyKey}`
+  }
+
+  async function fingerprintRoomVoice(audio: ArrayBuffer) {
+    const digest = await crypto.subtle.digest('SHA-256', audio)
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+  }
+
   async function withContextBridgeExclusiveLock<T>(key: string, callback: () => Promise<T>) {
     if (typeof navigator !== 'undefined' && 'locks' in navigator && typeof navigator.locks.request === 'function') {
       // BroadcastChannel delivers the same bridge request to every Stage window.
@@ -556,13 +663,254 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
         })
       }))
 
+      disposeHookFns.value.push(serverChannelStore.onEvent('lumi:room:sync:request', async (event) => {
+        const sourceInstanceId = event.metadata?.source?.id
+        if (!isCredentialBoundRoomActor(event)) {
+          console.warn('[context-bridge] rejected room sync whose actor claim is not bound to its device credential')
+          return
+        }
+        const actor = lumiIdentityStore.resolveExternalIdentity(event.data.actor)
+        if (!actor) {
+          console.warn('[context-bridge] rejected room sync from an unknown or inactive external Lumi identity')
+          sendRoomAccessRevoked(sourceInstanceId, event.data.conversationId, 'This device identity is no longer active.')
+          return
+        }
+
+        try {
+          const conversationId = await chatSession.ensureSessionForActor(actor.id, event.data.conversationId)
+          chatSession.getInteractionContextForActor(conversationId, actor.id)
+          await withContextBridgeLock(`lumi-room-ledger:${conversationId}`, async () => {
+            const replay = await lumiRoomLedgerRepo.replay(conversationId, event.data.afterSequence)
+            sendRoomSync(sourceInstanceId, replay)
+          })
+        }
+        catch (error) {
+          const reason = errorMessageFrom(error) ?? 'This user is no longer a participant in the Lumi room.'
+          console.warn('[context-bridge] rejected unauthorized Lumi room sync:', reason)
+          sendRoomAccessRevoked(sourceInstanceId, event.data.conversationId, reason)
+        }
+      }))
+
+      disposeHookFns.value.push(serverChannelStore.onEvent('lumi:room:voice:cancel', async (event) => {
+        const sourceInstanceId = event.metadata?.source?.id
+        const { conversationId, idempotencyKey, messageId } = event.data
+        if (!isCredentialBoundRoomActor(event)) {
+          console.warn('[context-bridge] rejected voice cancellation whose actor claim is not bound to its device credential')
+          return
+        }
+
+        const actor = lumiIdentityStore.resolveExternalIdentity(event.data.actor)
+        if (!actor) {
+          sendRoomAccessRevoked(sourceInstanceId, conversationId, 'This device identity is no longer active.')
+          return
+        }
+
+        try {
+          await chatSession.ensureSessionForActor(actor.id, conversationId)
+          activeRoomVoiceJobs.get(roomVoiceJobKey(conversationId, idempotencyKey))?.abort(
+            new DOMException('Room voice input was cancelled.', 'AbortError'),
+          )
+          const receipt = await withContextBridgeLock(`lumi-room-ledger:${conversationId}`, async () => {
+            return await lumiRoomLedgerRepo.cancelInput(conversationId, idempotencyKey, 'Voice input was cancelled by its sender.')
+          })
+          const snapshot = await lumiRoomLedgerRepo.get(conversationId)
+          sendRoomAck(sourceInstanceId, {
+            conversationId,
+            messageId,
+            idempotencyKey,
+            status: receipt?.status === 'cancelled' ? 'cancelled' : receipt?.status === 'completed' ? 'completed' : 'accepted',
+            inputSequence: receipt?.inputSequence,
+            outputSequence: receipt?.assistantSequence,
+            latestSequence: snapshot.latestSequence,
+            reason: receipt?.failureReason,
+            acknowledgedAt: Date.now(),
+          })
+        }
+        catch (error) {
+          const reason = errorMessageFrom(error) ?? 'This user is no longer a participant in the Lumi room.'
+          sendRoomAccessRevoked(sourceInstanceId, conversationId, reason)
+        }
+      }))
+
+      disposeHookFns.value.push(serverChannelStore.onEvent('input:voice', async (event) => {
+        const { actor: actorClaim, audio, mimeType, overrides, room: roomDelivery } = event.data
+        const sourceInstanceId = event.metadata?.source?.id
+        const conversationId = overrides?.sessionId
+        if (!roomDelivery || !conversationId || !actorClaim) {
+          console.warn('[context-bridge] ignored input:voice without reliable room metadata')
+          return
+        }
+        if (!activeProvider.value || !activeModel.value) {
+          await rejectReliableRoomInput(event, 'Lumi has no active consciousness model configured.')
+          return
+        }
+        if (!isCredentialBoundRoomActor(event)) {
+          await rejectReliableRoomInput(event, 'The device actor does not match its credential binding.')
+          return
+        }
+
+        const actor = lumiIdentityStore.resolveExternalIdentity(actorClaim)
+        if (!actor) {
+          await rejectReliableRoomInput(event, 'This device identity is no longer active.', { revokeAccess: true })
+          return
+        }
+
+        let targetSessionId: string
+        let interaction: ChatInteractionContext
+        let chatProvider: ChatProvider
+        try {
+          targetSessionId = await chatSession.ensureSessionForActor(actor.id, conversationId)
+          interaction = {
+            ...chatSession.getInteractionContextForActor(targetSessionId, actor.id),
+            toolScopes: toolScopesFor(event),
+            remoteDeviceId: event.metadata?.auth?.claims?.externalUserId,
+          }
+          chatProvider = await providersStore.getProviderInstance<ChatProvider>(activeProvider.value)
+        }
+        catch (error) {
+          const reason = errorMessageFrom(error) ?? 'Lumi could not authorize or initialize this voice input.'
+          await rejectReliableRoomInput(event, reason, { revokeAccess: true })
+          return
+        }
+
+        const payloadFingerprint = await fingerprintRoomVoice(audio)
+        const reservation = await withContextBridgeLock(`lumi-room-ledger:${targetSessionId}`, async () => {
+          return await lumiRoomLedgerRepo.reserveVoiceInput({
+            conversationId: targetSessionId,
+            messageId: roomDelivery.messageId,
+            idempotencyKey: roomDelivery.idempotencyKey,
+            actorId: interaction.actorId,
+            payloadFingerprint,
+            createdAt: Date.now(),
+          })
+        })
+        if (reservation.status === 'conflict') {
+          sendRoomAck(sourceInstanceId, {
+            conversationId: targetSessionId,
+            messageId: roomDelivery.messageId,
+            idempotencyKey: roomDelivery.idempotencyKey,
+            status: 'rejected',
+            latestSequence: reservation.latestSequence,
+            reason: reservation.reason,
+            acknowledgedAt: Date.now(),
+          })
+          return
+        }
+        if (reservation.status === 'duplicate') {
+          const receipt = reservation.receipt
+          sendRoomAck(sourceInstanceId, {
+            conversationId: targetSessionId,
+            messageId: roomDelivery.messageId,
+            idempotencyKey: roomDelivery.idempotencyKey,
+            status: receipt.status === 'accepted' ? 'duplicate' : receipt.status,
+            inputSequence: receipt.inputSequence,
+            outputSequence: receipt.assistantSequence,
+            latestSequence: reservation.latestSequence,
+            reason: receipt.failureReason,
+            acknowledgedAt: Date.now(),
+          })
+          return
+        }
+
+        sendRoomAck(sourceInstanceId, {
+          conversationId: targetSessionId,
+          messageId: roomDelivery.messageId,
+          idempotencyKey: roomDelivery.idempotencyKey,
+          status: 'transcribing',
+          latestSequence: reservation.latestSequence,
+          acknowledgedAt: Date.now(),
+        })
+
+        const jobKey = roomVoiceJobKey(targetSessionId, roomDelivery.idempotencyKey)
+        const abortController = new AbortController()
+        activeRoomVoiceJobs.set(jobKey, abortController)
+        try {
+          const transcription = await hearingSpeechInputPipeline.transcribeForRecording(
+            new Blob([audio], { type: mimeType }),
+            { signal: abortController.signal },
+          )
+          abortController.signal.throwIfAborted()
+          if (!transcription?.trim())
+            throw new Error('The host transcription provider returned no speech text.')
+
+          const accepted = await withContextBridgeLock(`lumi-room-ledger:${targetSessionId}`, async () => {
+            return await lumiRoomLedgerRepo.acceptReservedVoiceInput({
+              conversationId: targetSessionId,
+              idempotencyKey: roomDelivery.idempotencyKey,
+              actorDisplayName: interaction.actorDisplayName,
+              content: transcription,
+              createdAt: Date.now(),
+            })
+          })
+          sendRoomAck(sourceInstanceId, {
+            conversationId: targetSessionId,
+            messageId: roomDelivery.messageId,
+            idempotencyKey: roomDelivery.idempotencyKey,
+            status: accepted.status,
+            inputSequence: accepted.event.sequence,
+            latestSequence: accepted.latestSequence,
+            acknowledgedAt: Date.now(),
+          })
+          if (accepted.status === 'duplicate')
+            return
+
+          await withContextBridgeLock(`context-bridge:event:input:text:${targetSessionId}`, async () => {
+            await chatOrchestrator.ingest(transcription, {
+              model: activeModel.value,
+              chatProvider,
+              input: {
+                type: 'input:text:voice',
+                data: {
+                  transcription,
+                  actor: actorClaim,
+                  room: roomDelivery,
+                  overrides: { ...overrides, sessionId: targetSessionId },
+                },
+                metadata: event.metadata,
+              },
+              interaction,
+            }, targetSessionId)
+          })
+        }
+        catch (error) {
+          const reason = abortController.signal.aborted
+            ? 'Voice input was cancelled by its sender.'
+            : errorMessageFrom(error) ?? 'Voice transcription failed.'
+          const receipt = await withContextBridgeLock(`lumi-room-ledger:${targetSessionId}`, async () => {
+            if (abortController.signal.aborted)
+              return await lumiRoomLedgerRepo.cancelInput(targetSessionId, roomDelivery.idempotencyKey, reason)
+            return await lumiRoomLedgerRepo.failInput(targetSessionId, roomDelivery.idempotencyKey, reason)
+          })
+          sendRoomAck(sourceInstanceId, {
+            conversationId: targetSessionId,
+            messageId: roomDelivery.messageId,
+            idempotencyKey: roomDelivery.idempotencyKey,
+            status: receipt?.status === 'cancelled' ? 'cancelled' : 'failed',
+            inputSequence: receipt?.inputSequence,
+            latestSequence: (await lumiRoomLedgerRepo.get(targetSessionId)).latestSequence,
+            reason: receipt?.failureReason ?? reason,
+            acknowledgedAt: Date.now(),
+          })
+        }
+        finally {
+          activeRoomVoiceJobs.delete(jobKey)
+        }
+      }))
+
       disposeHookFns.value.push(serverChannelStore.onEvent('input:text', async (event) => {
         const {
           text,
           textRaw,
           overrides,
           contextUpdates,
+          room: roomDelivery,
         } = event.data
+        const sourceInstanceId = event.metadata?.source?.id
+
+        if (roomDelivery && (!activeProvider.value || !activeModel.value)) {
+          await rejectReliableRoomInput(event, 'Lumi has no active consciousness model configured.')
+          return
+        }
 
         const normalizedContextUpdates = contextUpdates?.map((update) => {
           const id = update.id ?? nanoid()
@@ -640,11 +988,50 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
           }
           catch (err) {
             console.error('[context-bridge] getProviderInstance failed for provider:', activeProvider.value, err)
+            if (roomDelivery)
+              await rejectReliableRoomInput(event, errorMessageFrom(err) ?? 'Lumi could not initialize the active model provider.')
             return
           }
 
           let messageText = text
-          const targetSessionId = overrides?.sessionId
+          let targetSessionId = overrides?.sessionId
+          let interaction: ChatInteractionContext | undefined
+
+          if (roomDelivery && !event.data.actor) {
+            console.warn('[context-bridge] rejected reliable room input without an external actor claim')
+            await rejectReliableRoomInput(event, 'Reliable Lumi room input requires a device actor identity.')
+            return
+          }
+          if (roomDelivery && !isCredentialBoundRoomActor(event)) {
+            console.warn('[context-bridge] rejected reliable room input whose actor claim is not bound to its device credential')
+            await rejectReliableRoomInput(event, 'The device actor does not match its credential binding.')
+            return
+          }
+
+          if (event.data.actor) {
+            const actor = lumiIdentityStore.resolveExternalIdentity(event.data.actor)
+            if (!actor) {
+              console.warn('[context-bridge] rejected input:text from an unknown or inactive external Lumi identity')
+              if (roomDelivery)
+                await rejectReliableRoomInput(event, 'This device identity is no longer active.', { revokeAccess: true })
+              return
+            }
+            try {
+              targetSessionId = await chatSession.ensureSessionForActor(actor.id, targetSessionId)
+              interaction = {
+                ...chatSession.getInteractionContextForActor(targetSessionId, actor.id),
+                toolScopes: toolScopesFor(event),
+                remoteDeviceId: event.metadata?.auth?.claims?.externalUserId,
+              }
+            }
+            catch (error) {
+              const reason = errorMessageFrom(error) ?? 'This user is no longer a participant in the Lumi room.'
+              console.warn('[context-bridge] rejected input:text for an unauthorized Lumi conversation:', reason)
+              if (roomDelivery)
+                await rejectReliableRoomInput(event, reason, { revokeAccess: true })
+              return
+            }
+          }
 
           if (overrides?.messagePrefix) {
             messageText = `${overrides.messagePrefix}${text}`
@@ -672,7 +1059,54 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
           // - https://chromestatus.com/feature/6265472244514816
           // - https://developer.mozilla.org/en-US/docs/Web/API/SharedWorker
           // - https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API
-          await withContextBridgeLock('context-bridge:event:input:text', async () => {
+          await withContextBridgeLock(`context-bridge:event:input:text:${targetSessionId ?? 'active'}`, async () => {
+            if (roomDelivery && interaction && targetSessionId) {
+              try {
+                const accepted = await withContextBridgeLock(`lumi-room-ledger:${targetSessionId}`, async () => {
+                  return await lumiRoomLedgerRepo.acceptInput({
+                    conversationId: targetSessionId,
+                    messageId: roomDelivery.messageId,
+                    idempotencyKey: roomDelivery.idempotencyKey,
+                    actorId: interaction.actorId,
+                    actorDisplayName: interaction.actorDisplayName,
+                    content: messageText,
+                    createdAt: Date.now(),
+                  })
+                })
+                if (accepted.status === 'conflict') {
+                  sendRoomAck(sourceInstanceId, {
+                    conversationId: targetSessionId,
+                    messageId: roomDelivery.messageId,
+                    idempotencyKey: roomDelivery.idempotencyKey,
+                    status: 'rejected',
+                    latestSequence: accepted.latestSequence,
+                    reason: accepted.reason,
+                    acknowledgedAt: Date.now(),
+                  })
+                  return
+                }
+
+                sendRoomAck(sourceInstanceId, {
+                  conversationId: targetSessionId,
+                  messageId: roomDelivery.messageId,
+                  idempotencyKey: roomDelivery.idempotencyKey,
+                  status: accepted.status,
+                  inputSequence: accepted.event.sequence,
+                  outputSequence: accepted.receipt.assistantSequence,
+                  latestSequence: accepted.latestSequence,
+                  reason: accepted.receipt.failureReason,
+                  acknowledgedAt: Date.now(),
+                })
+                if (accepted.status === 'duplicate')
+                  return
+              }
+              catch (error) {
+                console.warn('[context-bridge] rejected invalid reliable Lumi room input:', errorMessageFrom(error))
+                await rejectReliableRoomInput(event, errorMessageFrom(error) ?? 'The reliable Lumi room input is invalid.')
+                return
+              }
+            }
+
             try {
               await chatOrchestrator.ingest(messageText, {
                 model: activeModel.value,
@@ -683,14 +1117,38 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
                     ...event.data,
                     text,
                     textRaw,
-                    overrides,
+                    overrides: {
+                      ...overrides,
+                      ...(targetSessionId ? { sessionId: targetSessionId } : {}),
+                    },
                     contextUpdates: acceptedContextUpdates,
                   },
+                  metadata: event.metadata,
                 },
+                interaction,
               }, targetSessionId)
             }
             catch (err) {
               console.error('Error ingesting text input via context bridge:', err)
+              if (roomDelivery && targetSessionId) {
+                const receipt = await withContextBridgeLock(`lumi-room-ledger:${targetSessionId}`, async () => {
+                  return await lumiRoomLedgerRepo.failInput(
+                    targetSessionId,
+                    roomDelivery.idempotencyKey,
+                    errorMessageFrom(err) ?? 'Chat ingestion failed.',
+                  )
+                })
+                sendRoomAck(sourceInstanceId, {
+                  conversationId: targetSessionId,
+                  messageId: roomDelivery.messageId,
+                  idempotencyKey: roomDelivery.idempotencyKey,
+                  status: 'failed',
+                  inputSequence: receipt?.inputSequence,
+                  latestSequence: (await lumiRoomLedgerRepo.get(targetSessionId)).latestSequence,
+                  reason: receipt?.failureReason,
+                  acknowledgedAt: Date.now(),
+                })
+              }
             }
           })
         }
@@ -749,6 +1207,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
         chatOrchestrator.onAssistantMessage(async (message, _messageText, context) => {
           serverChannelStore.send({
             type: 'output:gen-ai:chat:message',
+            route: roomOutputRoute(context),
             data: {
               ...context.input?.data,
               message,
@@ -765,8 +1224,41 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
         }),
 
         chatOrchestrator.onChatTurnComplete(async (chat, context) => {
+          const roomDelivery = context.input?.data.room
+          const conversationId = context.input?.data.overrides?.sessionId
+          const sourceInstanceId = context.input?.metadata?.source?.id
+          if (roomDelivery && conversationId) {
+            try {
+              const completed = await withContextBridgeLock(`lumi-room-ledger:${conversationId}`, async () => {
+                return await lumiRoomLedgerRepo.completeInput({
+                  conversationId,
+                  idempotencyKey: roomDelivery.idempotencyKey,
+                  messageId: chat.output.id ?? `${roomDelivery.messageId}:assistant`,
+                  actorId: chat.output.actorId ?? 'lumi',
+                  actorDisplayName: chat.output.actorDisplayName ?? 'Lumi',
+                  content: chat.outputText,
+                  createdAt: chat.output.createdAt ?? Date.now(),
+                })
+              })
+              sendRoomAck(sourceInstanceId, {
+                conversationId,
+                messageId: roomDelivery.messageId,
+                idempotencyKey: roomDelivery.idempotencyKey,
+                status: 'completed',
+                inputSequence: completed.receipt.inputSequence,
+                outputSequence: completed.event.sequence,
+                latestSequence: completed.latestSequence,
+                acknowledgedAt: Date.now(),
+              })
+            }
+            catch (error) {
+              console.error('[context-bridge] failed to finalize Lumi room delivery:', error)
+            }
+          }
+
           serverChannelStore.send({
             type: 'output:gen-ai:chat:complete',
+            route: roomOutputRoute(context),
             data: {
               ...context.input?.data,
               'message': chat.output,

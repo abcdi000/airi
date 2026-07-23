@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useLampFlickerAnimation } from '@proj-airi/stage-ui/composables/use-lamp-flicker-animation'
-import { useModsServerChannelStore } from '@proj-airi/stage-ui/stores/mods/api/channel-server'
+import { useLumiOnlineStore } from '@proj-airi/stage-ui/stores/lumi-online'
 import { lampFlickerAnimationClass } from '@proj-airi/ui'
 import { storeToRefs } from 'pinia'
 import { computed } from 'vue'
@@ -9,7 +9,8 @@ import { useRouter } from 'vue-router'
 
 const { t } = useI18n()
 const router = useRouter()
-const { connected } = storeToRefs(useModsServerChannelStore())
+const { state } = storeToRefs(useLumiOnlineStore())
+const connected = computed(() => state.value.status === 'online')
 
 const { flickerStyle, onAnimationIteration } = useLampFlickerAnimation(() => !connected.value)
 

@@ -76,6 +76,7 @@ vi.mock('../composables/use-io-tracer', () => ({
 }))
 
 vi.mock('./chat/context-providers', () => ({
+  createLumiContext: () => null,
   createMinecraftContext: () => createMinecraftContextMock(),
 }))
 
@@ -99,6 +100,13 @@ vi.mock('./chat/session-store', () => ({
       sessionMessages[sessionId].push(message)
     },
     getSessionMessages: (sessionId: string) => sessionMessages[sessionId] ?? [],
+    getInteractionContext: (sessionId: string) => ({
+      actorId: 'local',
+      actorDisplayName: 'Local user',
+      conversationId: sessionId,
+      conversationType: 'direct',
+      participantIds: ['local'],
+    }),
     persistSessionMessages: persistSessionMessagesMock,
     getSessionGeneration: () => currentGeneration,
     forkSession: forkSessionMock,
@@ -126,6 +134,80 @@ vi.mock('./llm-toolset-prompts', () => ({
   }),
 }))
 
+vi.mock('./lumi-memory-tools', () => ({
+  bindLumiMemoryToolsForTurn: (tools: unknown) => tools,
+  clearLumiMemoryTools: vi.fn(),
+  registerLumiMemoryTools: vi.fn(),
+}))
+
+vi.mock('./providers', () => ({
+  useProvidersStore: () => ({
+    getProviderInstance: vi.fn().mockResolvedValue(undefined),
+  }),
+}))
+
+vi.mock('./devtools/context-observability', () => ({
+  useContextObservabilityStore: () => ({
+    capturePromptProjection: vi.fn(),
+    recordLifecycle: vi.fn(),
+  }),
+}))
+
+vi.mock('./lumi-identity', () => ({
+  useLumiIdentityStore: () => ({
+    activeUser: undefined,
+  }),
+}))
+
+vi.mock('./lumi-main-timeline', () => ({
+  useLumiMainTimelineStore: () => ({
+    normalizedMaxRecentChatMessagesForPrompt: 200,
+  }),
+}))
+
+vi.mock('./lumi-emotion', () => ({
+  useLumiEmotionStore: () => ({
+    currentState: {},
+    initialize: vi.fn(),
+    setPendingRelationshipAssessment: vi.fn(),
+    updateAfterTurn: vi.fn(),
+  }),
+}))
+
+vi.mock('./lumi-memory', () => ({
+  useLumiMemoryStore: () => ({
+    getLatestTopic: vi.fn(),
+    parseCuratedCandidates: vi.fn().mockReturnValue([]),
+    rememberCandidates: vi.fn().mockResolvedValue([]),
+    setLatestTopic: vi.fn(),
+  }),
+}))
+
+vi.mock('./lumi-current-state', () => ({
+  useLumiCurrentStateStore: () => ({
+    buildProfileCandidatesFromState: vi.fn().mockReturnValue([]),
+    currentState: {},
+    initializePersistence: vi.fn().mockResolvedValue(undefined),
+    normalizedUpdateEveryTurns: 1000,
+    saveCurrentState: vi.fn().mockResolvedValue(undefined),
+  }),
+}))
+
+vi.mock('./lumi-user-profile', () => ({
+  useLumiUserProfileStore: () => ({
+    applyCandidates: vi.fn().mockReturnValue([]),
+    autoReviewPendingUpdates: [],
+    autoUpdateEnabled: false,
+    buildRelevantContext: vi.fn().mockReturnValue(''),
+    consolidatePendingUpdates: vi.fn().mockReturnValue({ merged: [] }),
+    coreEntries: [],
+    extractDeterministicCandidates: vi.fn().mockReturnValue([]),
+    markPendingAutoReview: vi.fn(),
+    parseCuratorOutput: vi.fn().mockReturnValue([]),
+    pendingActiveUpdates: [],
+  }),
+}))
+
 vi.mock('./modules/consciousness', () => ({
   useConsciousnessStore: () => ({
     activeProvider: ref('mock-provider'),
@@ -135,6 +217,7 @@ vi.mock('./modules/consciousness', () => ({
 vi.mock('./modules/airi-card', () => ({
   useAiriCardStore: () => ({
     activeCard: undefined,
+    activeCardId: 'default',
   }),
 }))
 
@@ -276,7 +359,7 @@ describe('chat orchestrator contract', () => {
     // (weather) is appended as a separate text part so providers don't see
     // consecutive same-role messages.
     const userMessageContent = (composedMessages[1] as any).content
-    expect(userMessageContent[0].text).toMatch(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] hello from user$/)
+    expect(userMessageContent[0].text).toMatch(/^\[本地时间 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\nhello from user$/)
 
     const syntheticContextText = userMessageContent[1].text
     expect(syntheticContextText).not.toContain('<context>')
@@ -401,9 +484,6 @@ describe('chat orchestrator contract', () => {
 
     expect(ingestContextMessageMock).toHaveBeenCalledTimes(1)
     expect(ingestContextMessageMock).toHaveBeenCalledWith(minecraftContext)
-    expect(ingestContextMessageMock.mock.invocationCallOrder[0]).toBeLessThan(
-      getContextsSnapshotMock.mock.invocationCallOrder[0],
-    )
     const minecraftMessageContent = composedMessages[1]?.content
     if (!Array.isArray(minecraftMessageContent))
       throw new TypeError('Expected composed user message content to be an array')

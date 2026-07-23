@@ -5,19 +5,24 @@ import type { Format, LogLevelString } from '@guiiai/logg'
 import type { MutexInterface } from 'async-mutex'
 import type { BrowserWindow, DesktopCapturerSource, SourcesOptions } from 'electron'
 
+import process from 'node:process'
+
 import { useLogg } from '@guiiai/logg'
 import { defineInvokeHandler } from '@moeru/eventa'
 import { createContext } from '@moeru/eventa/adapters/electron/main'
+import { errorMessageFrom } from '@moeru/std'
 import { Mutex, withTimeout } from 'async-mutex'
 import { app, desktopCapturer, ipcMain, session as sessionModule } from 'electron'
 import { nanoid } from 'nanoid'
 
 import { screenCapture } from '..'
+import { sourceLookupOptions } from './source-options'
 import {
   checkMacOSScreenCapturePermission,
   requestMacOSScreenCapturePermission,
   toSerializableDesktopCapturerSource,
 } from './utils'
+import { captureWindowsWindow, disposeWindowsWindowCapture } from './windows-window-capture'
 
 export const defaultSourcesOptions: SourcesOptions = { types: ['screen'] }
 
@@ -119,6 +124,7 @@ export function initScreenCaptureForMain(options: InitMainOptions = {}): void {
   }
   initMainCalled = true
   setSourceMutex = withTimeout(new Mutex(), mutexAcquireTimeout)
+  app.once('before-quit', disposeWindowsWindowCapture)
 
   // Get other enabled features from the command line.
   const otherEnabledFeatures = app.commandLine.getSwitchValue(featureSwitchKey)?.split(',')
@@ -201,22 +207,46 @@ export function initScreenCaptureForWindow(window: BrowserWindow, options?: Init
   })
 
   defineInvokeHandler(context, screenCapture.captureSource, async (request) => {
-    const sources = await desktopCapturer.getSources(request.options)
-    const source = request.sourceId
-      ? sources.find(source => source.id === request.sourceId) ?? sources.find(source => source.id.startsWith('screen:'))
-      : sources.find(source => source.id.startsWith('screen:')) ?? sources[0]
+    let nativeCaptureError = ''
+    if (process.platform === 'win32' && request.sourceId?.startsWith('window:')) {
+      try {
+        // Chromium 146 always enables WGC for window streams. PrintWindow is a
+        // better first choice for Lumi's one-shot observation because it keeps
+        // the selected-window boundary without touching the failing WGC path.
+        return await captureWindowsWindow(request.sourceId)
+      }
+      catch (error) {
+        nativeCaptureError = errorMessageFrom(error) ?? String(error)
+      }
+    }
 
-    if (!source)
-      throw new Error('No screen capture source is available.')
-    if (!source.thumbnail || source.thumbnail.isEmpty())
-      throw new Error(`Capture source "${source.id}" did not provide an image.`)
+    let electronCaptureError = ''
+    try {
+      const sources = await desktopCapturer.getSources(sourceLookupOptions(request.options, request.sourceId, true))
+      const source = request.sourceId
+        ? sources.find(source => source.id === request.sourceId)
+        : sources.find(source => source.id.startsWith('screen:')) ?? sources[0]
 
-    const mimeType = request.mimeType || 'image/png'
-    const buffer = mimeType === 'image/jpeg'
-      ? source.thumbnail.toJPEG(request.quality ?? 90)
-      : source.thumbnail.toPNG()
+      if (!source)
+        throw new Error('No screen capture source is available.')
+      if (!source.thumbnail || source.thumbnail.isEmpty())
+        throw new Error(`Capture source "${source.id}" did not provide an image.`)
 
-    return `data:${mimeType};base64,${buffer.toString('base64')}`
+      const mimeType = request.mimeType || 'image/png'
+      const buffer = mimeType === 'image/jpeg'
+        ? source.thumbnail.toJPEG(request.quality ?? 90)
+        : source.thumbnail.toPNG()
+
+      return `data:${mimeType};base64,${buffer.toString('base64')}`
+    }
+    catch (error) {
+      electronCaptureError = errorMessageFrom(error) ?? String(error)
+    }
+
+    if (nativeCaptureError)
+      throw new Error(`Selected window capture failed. Native: ${nativeCaptureError} Electron fallback: ${electronCaptureError}`)
+
+    throw new Error(electronCaptureError)
   })
 
   defineInvokeHandler(context, screenCapture.setSource, async (request, eventaOptions) => {
@@ -239,7 +269,10 @@ export function initScreenCaptureForWindow(window: BrowserWindow, options?: Init
 
     try {
       session.setDisplayMediaRequestHandler(async (_request, callback) => {
-        const sources = await desktopCapturer.getSources(request.options)
+        // Source selection only needs the native source handle. Asking Chromium
+        // for thumbnails here makes it instantiate WGC for every unrelated
+        // window and produces E_INVALIDARG for stale or protected HWNDs.
+        const sources = await desktopCapturer.getSources(sourceLookupOptions(request.options, request.sourceId, false))
         const source = sources.find(source => source.id === request.sourceId)
         if (!source) {
           throw new Error(`Source with id ${request.sourceId} not found.`)

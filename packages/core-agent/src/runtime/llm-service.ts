@@ -278,7 +278,10 @@ export async function streamFrom({
     : []
   const customTools = supportedTools ? await resolveTools(options) : []
   const mergedTools = supportedTools ? dedupeToolsByName([...builtinTools, ...customTools]) : []
-  const tools = mergedTools.length > 0 ? mergedTools : undefined
+  const transformedTools = options?.toolTransform
+    ? await options.toolTransform(mergedTools)
+    : mergedTools
+  const tools = transformedTools.length > 0 ? transformedTools : undefined
   const capturedToolErrorByCallId = new Map<string, string>()
   const streamTools = options?.captureToolErrors && tools != null
     ? withCapturedToolErrors(tools, capturedToolErrorByCallId)

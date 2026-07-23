@@ -155,10 +155,8 @@ export function registerComputerUseTools(params: RegisterComputerUseToolsOptions
           policy: {
             approvalMode: runtime.config.approvalMode,
             allowedBounds: runtime.config.allowedBounds,
-            allowApps: runtime.config.allowApps,
             denyApps: runtime.config.denyApps,
             denyWindowTitles: runtime.config.denyWindowTitles,
-            openableApps: runtime.config.openableApps,
             maxOperations: runtime.config.maxOperations,
             maxOperationUnits: runtime.config.maxOperationUnits,
             defaultCaptureAfter: runtime.config.defaultCaptureAfter,
@@ -170,7 +168,7 @@ export function registerComputerUseTools(params: RegisterComputerUseToolsOptions
             : runtime.config.executor === 'linux-x11'
               ? 'remote X11 runner'
               : 'dry-run',
-          supportedAppsForOpenFocus: runtime.config.openableApps,
+          supportedAppsForOpenFocus: 'any application not matched by the configured deny lists',
           approvalUx: 'electron-dialog',
           coordScope: 'global-screen',
           appPolicy: 'deny-only',
@@ -256,7 +254,7 @@ export function registerComputerUseTools(params: RegisterComputerUseToolsOptions
   server.tool(
     'desktop_open_app',
     {
-      app: z.string().min(1).describe('Application name from COMPUTER_USE_OPENABLE_APPS'),
+      app: z.string().min(1).describe('Application name, executable, file, or registered URI not blocked by COMPUTER_USE_DENY_APPS'),
     },
     async (input: OpenAppActionInput) => executeAction({ kind: 'open_app', input }, 'desktop_open_app'),
   )
@@ -264,7 +262,7 @@ export function registerComputerUseTools(params: RegisterComputerUseToolsOptions
   server.tool(
     'desktop_focus_app',
     {
-      app: z.string().min(1).describe('Application name from COMPUTER_USE_OPENABLE_APPS'),
+      app: z.string().min(1).describe('Application or visible-window name not blocked by COMPUTER_USE_DENY_APPS'),
     },
     async (input: FocusAppActionInput) => executeAction({ kind: 'focus_app', input }, 'desktop_focus_app'),
   )

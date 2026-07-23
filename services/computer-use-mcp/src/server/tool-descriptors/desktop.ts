@@ -104,7 +104,7 @@ export const desktopDescriptors: ToolDescriptor[] = [
   {
     canonicalName: 'desktop_open_app',
     displayName: 'Desktop Open App',
-    summary: 'Open an application. Requires the app to be in COMPUTER_USE_OPENABLE_APPS configuration.',
+    summary: 'Open an application unless it is blocked by the configured application blacklist.',
     lane: 'desktop',
     kind: 'control',
     readOnly: false,
@@ -117,7 +117,7 @@ export const desktopDescriptors: ToolDescriptor[] = [
   {
     canonicalName: 'desktop_focus_app',
     displayName: 'Desktop Focus App',
-    summary: 'Focus an application window. Requires the app to be in COMPUTER_USE_OPENABLE_APPS configuration.',
+    summary: 'Focus an application window unless it is blocked by the configured application blacklist.',
     lane: 'desktop',
     kind: 'control',
     readOnly: false,

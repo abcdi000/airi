@@ -9,6 +9,7 @@ export default defineConfig({
       'packages/audio-pipelines-transcribe',
       'packages/cap-vite',
       'packages/core-agent',
+      'packages/electron-screen-capture',
       'packages/vishot-runner-browser',
       'packages/plugin-sdk',
       'packages/plugin-sdk-tamagotchi',

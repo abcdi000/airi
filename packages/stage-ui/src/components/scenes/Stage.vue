@@ -24,7 +24,7 @@ import { useBroadcastChannel } from '@vueuse/core'
 import { generateSpeech } from '@xsai/generate-speech'
 import { generateText } from '@xsai/generate-text'
 import { storeToRefs } from 'pinia'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useSettingsLive2d } from '../../../../stage-ui-live2d/src/composables/live2d/live2d'
 import { useAuthProviderSync } from '../../composables/use-auth-provider-sync'
@@ -39,7 +39,7 @@ import { useAudioContext, useSpeakingStore } from '../../stores/audio'
 import { useBackgroundStore } from '../../stores/background'
 import { useChatOrchestratorStore } from '../../stores/chat'
 import { useLlmStreamingControlStore } from '../../stores/llm-streaming-control'
-import { useAiriCardStore } from '../../stores/modules'
+import { useLumiOnlineStore } from '../../stores/lumi-online'
 import { useConsciousnessStore } from '../../stores/modules/consciousness'
 import { useSpeechStore } from '../../stores/modules/speech'
 import { useProvidersStore } from '../../stores/providers'
@@ -130,15 +130,15 @@ const live2dLipSync = ref<Live2DLipSync>()
 const live2dLipSyncOptions: Live2DLipSyncOptions = { mouthUpdateIntervalMs: 50, mouthLerpWindowMs: 50 }
 let lipSyncSetupPromise: Promise<void> | undefined
 
-const { activeCard } = storeToRefs(useAiriCardStore())
 const speechStore = useSpeechStore()
 const { ssmlEnabled, activeSpeechProvider, activeSpeechModel, activeSpeechVoice, pitch, normalizedPlaybackVolume } = storeToRefs(speechStore)
 const {
   activeProvider: activeConsciousnessProvider,
   activeModel: activeConsciousnessModel,
 } = storeToRefs(useConsciousnessStore())
-const activeCardId = computed(() => activeCard.value?.name ?? 'default')
 const speechRuntimeStore = useSpeechRuntimeStore()
+const lumiOnlineStore = useLumiOnlineStore()
+const { completedGeneration, runtimeMode } = storeToRefs(lumiOnlineStore)
 const ttsDebugStore = useTtsDebugStore()
 const backgroundStore = useBackgroundStore()
 const { activeBackgroundUrl } = storeToRefs(backgroundStore)
@@ -337,8 +337,18 @@ const playbackManager = createPlaybackManager<AudioBuffer>({
   ownerOverflowPolicy: 'steal-oldest',
 })
 
-let mimoSpeechBuffer = ''
-let mimoSpeechGeneration = 0
+interface StageSpeechTurn {
+  ownerId: string
+  mode: 'mimo' | 'session'
+  session: StageTtsSession | null
+  mimoBuffer: string
+  generation: number
+}
+
+const speechTurns = new WeakMap<object, StageSpeechTurn>()
+const activeSpeechTurns = new Set<StageSpeechTurn>()
+const speechSessions = new Map<string, StageTtsSession>()
+let nextSpeechGeneration = 0
 
 function isMimoSpeechActive() {
   return activeSpeechProvider.value === 'mimo-audio-speech'
@@ -361,8 +371,15 @@ function stripMimoTtsControlTags(text: string) {
 
 function cleanupMimoTtsMarkupOutput(text: string) {
   const trimmed = text.trim()
-  const fenceMatch = trimmed.match(/^```(?:text|txt|markdown)?\s*([\s\S]*?)\s*```$/i)
-  return (fenceMatch?.[1] ?? trimmed)
+  const firstLineEnd = trimmed.indexOf('\n')
+  const closingFenceStart = trimmed.lastIndexOf('```')
+  const fenceLanguage = firstLineEnd > 0 ? trimmed.slice(3, firstLineEnd).trim().toLowerCase() : ''
+  const unwrapped = trimmed.startsWith('```')
+    && closingFenceStart > firstLineEnd
+    && ['', 'text', 'txt', 'markdown'].includes(fenceLanguage)
+    ? trimmed.slice(firstLineEnd + 1, closingFenceStart).trim()
+    : trimmed
+  return unwrapped
     .replace(/^\s*(?:assistant|tts|语音文本|发声文本)\s*[:：]\s*/i, '')
     .trim()
 }
@@ -435,9 +452,9 @@ async function prepareMimoSpeechTextForTts(text: string) {
   }
 }
 
-async function synthesizeMimoSpeechAsSingleUtterance(text: string, generation: number) {
+async function synthesizeMimoSpeechAsSingleUtterance(text: string, turn: StageSpeechTurn) {
   const source = text.trim()
-  if (!source || generation !== mimoSpeechGeneration)
+  if (!source || !activeSpeechTurns.has(turn))
     return
 
   const providerId = activeSpeechProvider.value
@@ -464,7 +481,7 @@ async function synthesizeMimoSpeechAsSingleUtterance(text: string, generation: n
       voice: voiceId,
     })
 
-    if (generation !== mimoSpeechGeneration || !res || res.byteLength === 0)
+    if (!activeSpeechTurns.has(turn) || !res || res.byteLength === 0)
       return
 
     const audioBuffer = await audioContext.decodeAudioData(res)
@@ -475,7 +492,7 @@ async function synthesizeMimoSpeechAsSingleUtterance(text: string, generation: n
       intentId,
       segmentId: `${intentId}-0`,
       sequence: 0,
-      ownerId: activeCardId.value,
+      ownerId: turn.ownerId,
       priority: 0,
       text: source,
       special: null,
@@ -573,11 +590,11 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
       }
     }
 
-    const usesProviderConfiguredVoice = activeSpeechProvider.value === 'mimo-audio-speech' && isMimoProviderConfiguredVoiceModel(model)
-      || activeSpeechProvider.value === 'alibaba-cloud-model-studio'
-      && (model === 'cosyvoice-v3.5-flash' || model === 'cosyvoice-v3.5-plus')
-      && typeof providerConfig?.customVoiceId === 'string'
-      && providerConfig.customVoiceId.trim().length > 0
+    const usesProviderConfiguredVoice = (activeSpeechProvider.value === 'mimo-audio-speech' && isMimoProviderConfiguredVoiceModel(model))
+      || (activeSpeechProvider.value === 'alibaba-cloud-model-studio'
+        && (model === 'cosyvoice-v3.5-flash' || model === 'cosyvoice-v3.5-plus')
+        && typeof providerConfig?.customVoiceId === 'string'
+        && providerConfig.customVoiceId.trim().length > 0)
     if (!model || (!voice && !usesProviderConfiguredVoice))
       return null
 
@@ -648,17 +665,41 @@ speechPipeline.on('onTurnCancel', ({ turnId }) => {
   streamingControl.cancelTurn(turnId)
 })
 
+speechPipeline.on('onIntentEnd', (intentId) => {
+  speechSessions.delete(intentId)
+})
+
+speechPipeline.on('onIntentCancel', ({ intentId }) => {
+  speechSessions.delete(intentId)
+})
+
 playbackManager.onEnd(() => {
   nowSpeaking.value = false
   mouthOpenSize.value = 0
 })
 
+let captionOwnerId: string | undefined
+
 playbackManager.onStart(({ item }) => {
   ttsDebugStore.markPlaybackStart(item)
   nowSpeaking.value = true
-  const captionText = isMimoSpeechActive()
-    ? stripMimoTtsControlTags(item.text)
-    : item.text
+  if (captionOwnerId !== item.ownerId) {
+    captionOwnerId = item.ownerId
+    assistantCaption.value = ''
+    try {
+      postCaption({ type: 'caption-assistant', text: '' })
+    }
+    catch {
+      // BroadcastChannel may be closed - don't break playback
+    }
+    try {
+      postPresent({ type: 'assistant-reset' })
+    }
+    catch {
+      // BroadcastChannel may be closed - don't break playback
+    }
+  }
+  const captionText = stripMimoTtsControlTags(item.text)
   // NOTICE: postCaption and postPresent may throw errors if the BroadcastChannel is closed
   // (e.g., when navigating away from the page). We wrap these in try-catch to prevent
   // breaking playback when the channel is unavailable.
@@ -777,13 +818,12 @@ function setupAnalyser() {
   }
 }
 
-// One TTS session per LLM intent. The active provider determines which
+// One TTS session per LLM turn. The active provider determines which
 // adapter `createStageTtsSession` returns: the segmenter-based adapter for
 // every non-streaming provider, or the bidirectional WebSocket adapter
 // for the official streaming provider. Stage.vue intentionally does NOT
 // branch on provider id anywhere below — the factory is the single
 // decision point. See `packages/stage-ui/src/libs/speech/tts-session.ts`.
-let currentSession: StageTtsSession | null = null
 
 function buildQwen3HybridSnapshot(providerConfig: Record<string, unknown> | undefined): StreamingSessionSnapshot['hybrid'] | undefined {
   if (providerConfig?.hybridEnabled !== true)
@@ -818,7 +858,7 @@ function buildQwen3HybridSnapshot(providerConfig: Record<string, unknown> | unde
   }
 }
 
-function buildStreamingSnapshot(): StreamingSessionSnapshot | null {
+function buildStreamingSnapshot(ownerId: string): StreamingSessionSnapshot | null {
   // Snapshotted once per session, so a mid-session provider/voice swap
   // does not corrupt an in-flight session — the watcher below detects
   // changes and tears down explicitly. Returns `null` when streaming
@@ -852,7 +892,7 @@ function buildStreamingSnapshot(): StreamingSessionSnapshot | null {
       },
       hybrid: buildQwen3HybridSnapshot(providerConfig),
       onDebug: event => ttsDebugStore.recordEvent(event),
-      ownerId: activeCardId.value,
+      ownerId,
       onImmediateSpecial: playSpecialToken,
     }
   }
@@ -872,7 +912,7 @@ function buildStreamingSnapshot(): StreamingSessionSnapshot | null {
       audio: { sample_rate: 24000, bit_rate: 64000 },
     },
     onDebug: event => ttsDebugStore.recordEvent(event),
-    ownerId: activeCardId.value,
+    ownerId,
     onImmediateSpecial: playSpecialToken,
   }
 }
@@ -887,23 +927,22 @@ function resolveSpeechTransport(providerId: string | null | undefined): SpeechTr
   return getDefinedProvider(providerId)?.capabilities?.speech?.transport
 }
 
-function openTtsSession(): StageTtsSession {
-  // A session must only clear the module-level `currentSession` if it IS that
-  // session. Other in-flight speech intents finishing later must not null a
-  // still-active chat session and drop the rest of the reply.
+function openTtsSession(turn: StageSpeechTurn): StageTtsSession {
   let session: StageTtsSession | null = null
   const clearIfActive = () => {
-    if (session && currentSession === session && session.intentId.startsWith('stream-'))
-      currentSession = null
+    if (session && turn.session === session && session.intentId.startsWith('stream-')) {
+      speechSessions.delete(session.intentId)
+      turn.session = null
+    }
   }
   session = createStageTtsSession<AudioBuffer>({
     transport: resolveSpeechTransport(activeSpeechProvider.value),
-    streaming: buildStreamingSnapshot,
+    streaming: () => buildStreamingSnapshot(turn.ownerId),
     audioContext,
     playbackManager,
     openIntent: opts => speechRuntimeStore.openIntent(opts),
     intentOptions: () => ({
-      ownerId: activeCardId.value,
+      ownerId: turn.ownerId,
       priority: 'normal',
       behavior: 'queue',
     }),
@@ -925,77 +964,84 @@ function openTtsSession(): StageTtsSession {
       },
     },
   })
+  speechSessions.set(session.intentId, session)
   return session
 }
 
-chatHookCleanups.push(onBeforeMessageComposed(async () => {
-  playbackManager.stopAll('new-message')
-  mimoSpeechBuffer = ''
-  mimoSpeechGeneration += 1
+function getSpeechTurn(context: object) {
+  const turn = speechTurns.get(context)
+  return turn && activeSpeechTurns.has(turn) ? turn : undefined
+}
+
+chatHookCleanups.push(onBeforeMessageComposed(async (_message, context) => {
+  const turn: StageSpeechTurn = {
+    ownerId: context.message.id ?? `speech-turn-${Date.now().toString(36)}-${nextSpeechGeneration.toString(36)}`,
+    mode: isMimoSpeechActive() ? 'mimo' : 'session',
+    session: null,
+    mimoBuffer: '',
+    generation: nextSpeechGeneration += 1,
+  }
+  speechTurns.set(context, turn)
+  activeSpeechTurns.add(turn)
 
   setupAnalyser()
   void setupLipSync()
-  // Reset assistant caption for a new message
-  assistantCaption.value = ''
-  try {
-    postCaption({ type: 'caption-assistant', text: '' })
-  }
-  catch (error) {
-    // BroadcastChannel may be closed if user navigated away - don't break flow
-    console.warn('[Stage] Failed to post caption reset (channel may be closed)', { error })
-  }
-  try {
-    postPresent({ type: 'assistant-reset' })
-  }
-  catch (error) {
-    // BroadcastChannel may be closed if user navigated away - don't break flow
-    console.warn('[Stage] Failed to post present reset (channel may be closed)', { error })
-  }
-
-  currentSession?.cancel('new-message')
-  currentSession = isMimoSpeechActive() ? null : openTtsSession()
+  turn.session = turn.mode === 'mimo' ? null : openTtsSession(turn)
 }))
 
 chatHookCleanups.push(onBeforeSend(async () => {
   currentMotion.value = { group: EmotionThinkMotionName }
 }))
 
-chatHookCleanups.push(onTokenLiteral(async (literal) => {
-  if (isMimoSpeechActive()) {
-    mimoSpeechBuffer += literal
+chatHookCleanups.push(onTokenLiteral(async (literal, context) => {
+  const turn = getSpeechTurn(context)
+  if (!turn)
+    return
+
+  if (turn.mode === 'mimo') {
+    turn.mimoBuffer += literal
     return
   }
 
-  currentSession?.appendText(literal)
+  turn.session?.appendText(literal)
 }))
 
-chatHookCleanups.push(onTokenSpecial(async (special) => {
-  if (isMimoSpeechActive())
+chatHookCleanups.push(onTokenSpecial(async (special, context) => {
+  const turn = getSpeechTurn(context)
+  if (!turn || turn.mode === 'mimo')
     return
 
-  currentSession?.appendSpecial(special)
+  turn.session?.appendSpecial(special)
 }))
 
-chatHookCleanups.push(onStreamEnd(async () => {
-  if (isMimoSpeechActive())
+chatHookCleanups.push(onStreamEnd(async (context) => {
+  const turn = getSpeechTurn(context)
+  if (!turn || turn.mode === 'mimo')
     return
 
-  currentSession?.finishInput()
+  turn.session?.finishInput()
 }))
 
-chatHookCleanups.push(onAssistantResponseEnd(async (message) => {
-  if (isMimoSpeechActive()) {
-    const generation = mimoSpeechGeneration
-    const sourceText = (typeof message === 'string' ? message : mimoSpeechBuffer).trim() || mimoSpeechBuffer.trim()
+chatHookCleanups.push(onAssistantResponseEnd(async (message, context) => {
+  const turn = getSpeechTurn(context)
+  if (!turn)
+    return
+
+  if (turn.mode === 'mimo') {
+    const generation = turn.generation
+    const sourceText = (typeof message === 'string' ? message : turn.mimoBuffer).trim() || turn.mimoBuffer.trim()
     const preparedText = await prepareMimoSpeechTextForTts(sourceText)
-    if (generation !== mimoSpeechGeneration)
-      return
-    await synthesizeMimoSpeechAsSingleUtterance(preparedText, generation)
-    mimoSpeechBuffer = ''
+    if (activeSpeechTurns.has(turn) && generation === turn.generation)
+      await synthesizeMimoSpeechAsSingleUtterance(preparedText, turn)
+    turn.mimoBuffer = ''
+    activeSpeechTurns.delete(turn)
+    speechTurns.delete(context)
     return
   }
 
-  currentSession?.end()
+  turn.session?.end()
+  activeSpeechTurns.delete(turn)
+  speechTurns.delete(context)
   // Streaming sessions null-out via the onDone hook; segmenter sessions
   // stay around until the next `onBeforeMessageComposed` cancels them
   // (the segmenter pipeline's IntentHandle.end is idempotent and
@@ -1011,17 +1057,50 @@ chatHookCleanups.push(onAssistantResponseEnd(async (message) => {
   // await db.value?.execute(`INSERT INTO memory_test (vec) VALUES (${JSON.stringify(res.embedding)});`)
 }))
 
-// Mid-session provider / voice / model swaps would otherwise keep feeding
-// tokens to the OLD adapter (segmenter for the new provider, or stale ws
-// for the streaming provider). Cancel the active session so the next LLM
-// token after the swap falls through `currentSession?.` cleanly (silent
-// drop is acceptable — we don't try to fork-replay text into a new
-// adapter with potentially different voice/model).
+watch(completedGeneration, async (event) => {
+  const message = event?.payload.message
+  if (!event || runtimeMode.value !== 'online-client' || !message?.content.trim())
+    return
+
+  if (message.motion && stageModelRenderer.value === 'live2d')
+    currentMotion.value = { group: message.motion }
+
+  if (message.expression) {
+    const emotion = toStageEmotionPayload({ name: message.expression.toLowerCase(), intensity: 1 })
+    if (emotion)
+      emotionsQueue.enqueue(emotion)
+  }
+
+  const turn: StageSpeechTurn = {
+    ownerId: `lumi-online-${message.id}`,
+    mode: isMimoSpeechActive() ? 'mimo' : 'session',
+    session: null,
+    mimoBuffer: '',
+    generation: nextSpeechGeneration += 1,
+  }
+  setupAnalyser()
+  void setupLipSync()
+
+  if (turn.mode === 'mimo') {
+    activeSpeechTurns.add(turn)
+    const preparedText = await prepareMimoSpeechTextForTts(message.content)
+    await synthesizeMimoSpeechAsSingleUtterance(preparedText, turn)
+    activeSpeechTurns.delete(turn)
+    return
+  }
+
+  turn.session = openTtsSession(turn)
+  turn.session.appendText(message.content)
+  turn.session.finishInput()
+  turn.session.end()
+})
+
+// Mid-session provider, voice, or model swaps would otherwise keep feeding
+// old adapters. Invalidate every active turn and cancel all retained speech
+// sessions; already-synthesized audio may finish with its original voice.
 watch(
   [activeSpeechProvider, () => activeSpeechVoice.value?.id, activeSpeechModel],
   ([provider, voiceId, model], [prevProvider, prevVoiceId, prevModel]) => {
-    if (!currentSession)
-      return
     if (provider === prevProvider && voiceId === prevVoiceId && model === prevModel)
       return
     console.warn('[Speech Pipeline] provider/voice/model changed mid-session, tearing down', {
@@ -1032,8 +1111,14 @@ watch(
       model,
       prevModel,
     })
-    currentSession.cancel('provider-or-voice-changed')
-    currentSession = null
+    for (const turn of activeSpeechTurns) {
+      turn.generation += 1
+      turn.session = null
+    }
+    activeSpeechTurns.clear()
+    for (const session of speechSessions.values())
+      session.cancel('provider-or-voice-changed')
+    speechSessions.clear()
   },
 )
 
@@ -1152,8 +1237,14 @@ onUnmounted(() => {
   // feeding sentences into a playbackManager whose listeners still
   // mutate component refs (caption / nowSpeaking). Codex review: HIGH
   // #1 + MEDIUM #5.
-  currentSession?.cancel('unmount')
-  currentSession = null
+  for (const turn of activeSpeechTurns) {
+    turn.generation += 1
+    turn.session = null
+  }
+  activeSpeechTurns.clear()
+  for (const session of speechSessions.values())
+    session.cancel('unmount')
+  speechSessions.clear()
   playbackManager.stopAll('unmount')
 })
 

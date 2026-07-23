@@ -14,6 +14,16 @@ chat:
     cloud-badge: Synced to cloud
     new-chat-fallback: New chat
     delete: Delete conversation
+    new-group: New group
+    group-create-title: Create a Lumi group
+    group-create-description: Choose who shares this conversation and its group memories.
+    group-name: Group name
+    participants: Participants
+    current-user: Current user
+    cancel: Cancel
+    create-group: Create group
+    group-create-failed: Could not create the group conversation
+    group-badge: Group
 message: Dites quelque chose...
 send-mode:
   title: Send key

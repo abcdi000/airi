@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process'
 import { access } from 'node:fs/promises'
 
-import { chromium } from 'playwright'
+import { connectPlaywrightOverCdp } from '../playwright-backend'
 
 const chromePath = process.env.LUMI_CDP_CHROME_PATH
 const profileDir = process.env.LUMI_CDP_USER_DATA_DIR
@@ -52,7 +52,7 @@ try {
       throw new Error('Chrome CDP endpoint did not become available')
   }
 
-  const browser = await chromium.connectOverCDP(endpoint)
+  const browser = await connectPlaywrightOverCdp(endpoint)
   const context = browser.contexts()[0]
   if (!context)
     throw new Error('Chrome CDP endpoint did not expose a browser context')

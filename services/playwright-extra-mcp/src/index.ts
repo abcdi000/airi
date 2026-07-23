@@ -1,76 +1,128 @@
-import type { BrowserContext } from 'playwright'
+import type { BrowserBackend, BrowserContextLike } from './browser-contracts'
 import type { LauncherConfig } from './config'
+
+import process from 'node:process'
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createConnection } from '@playwright/mcp'
 
-import { createBrowserContext } from './browser'
+import { configureBrowserContext } from './browser'
+import { BrowserFactory } from './browser-factory'
 import { loadLauncherConfig } from './config'
 
 export {
+  configureBrowserContext,
   createBrowserContext,
   findIdentityMismatches,
+  installNavigationForensics,
   installNavigationReadinessPolicy,
-  installPlugins,
   verifyBrowserIdentity,
   waitForPageContentReady,
 } from './browser'
+export {
+  BrowserBackendCompatibilityError,
+  BrowserBackendError,
+  BrowserBackendUnavailableError,
+  BrowserProfileInUseError,
+} from './browser-contracts'
+export type {
+  BrowserBackend,
+  BrowserBackendName,
+  BrowserBackendRequest,
+  BrowserCapability,
+  BrowserContextLike,
+  BrowserLaunchSettings,
+  BrowserName,
+  BrowserPageLike,
+  BrowserRuntimeInfo,
+} from './browser-contracts'
+export { BrowserFactory } from './browser-factory'
 export { loadLauncherConfig, parseCliArgs } from './config'
-export type { BrowserBehaviorConfig, BrowserIdentityExpectation, LauncherConfig, LauncherFileConfig, PluginSpec } from './config'
+export type {
+  BrowserBackendFileConfig,
+  BrowserBehaviorConfig,
+  BrowserIdentityExpectation,
+  LauncherConfig,
+  LauncherFileConfig,
+  PluginSpec,
+} from './config'
+export { PatchrightBackend } from './patchright-backend'
+export { PlaywrightBackend } from './playwright-backend'
+
+function formatRuntimeInfo(backend: BrowserBackend): string {
+  const info = backend.getRuntimeInfo()
+  return JSON.stringify({
+    backend: info.backend,
+    backend_version: info.backendVersion,
+    browser_name: info.browserName,
+    browser_version: info.browserVersion,
+    channel: info.channel,
+    headless: info.headless,
+    persistent_context: info.persistentContext,
+    profile_path: info.profilePath,
+    platform: info.platform,
+    fallback_reason: info.fallbackReason,
+  })
+}
 
 export async function runPlaywrightExtraMcp(config: LauncherConfig): Promise<void> {
-  let contextPromise: Promise<BrowserContext> | undefined
-  let contextClosePromise: Promise<void> | undefined
+  let backendPromise: Promise<BrowserBackend> | undefined
+  let closePromise: Promise<void> | undefined
+  const factory = new BrowserFactory(config)
 
-  const getContext = async (): Promise<BrowserContext> => {
-    if (!contextPromise) {
-      contextClosePromise = undefined
-      contextPromise = createBrowserContext(config)
-      void contextPromise.then((context) => {
-        context.once('close', () => {
-          contextPromise = undefined
-        })
-      }, () => {
-        contextPromise = undefined
+  const getBackend = (): Promise<BrowserBackend> => {
+    if (!backendPromise) {
+      closePromise = undefined
+      backendPromise = factory.create(config.startupRequest).then(async (backend) => {
+        const context = await backend.getContext()
+        await configureBrowserContext(context, config)
+        console.error(`[lumi-browser] Browser session started: ${formatRuntimeInfo(backend)}`)
+        return backend
+      }, (error) => {
+        backendPromise = undefined
+        throw error
       })
     }
-    return contextPromise
+    return backendPromise
   }
 
-  const server = await createConnection(config.mcp, getContext)
+  const getContext = async (): Promise<BrowserContextLike> => {
+    return await (await getBackend()).getContext()
+  }
+  type McpContextGetter = NonNullable<Parameters<typeof createConnection>[1]>
+  const server = await createConnection(config.mcp, getContext as unknown as McpContextGetter)
   const transport = new StdioServerTransport()
 
-  const closeContext = (): Promise<void> => {
-    if (!contextClosePromise) {
-      contextClosePromise = (async () => {
-        const pendingContext = contextPromise
-        contextPromise = undefined
-        if (pendingContext) {
-          try {
-            const context = await pendingContext
-            await context.close()
-          }
-          catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
-            console.error(`[lumi-playwright] browser shutdown warning: ${message}`)
-          }
+  const closeBackend = (): Promise<void> => {
+    if (!closePromise) {
+      closePromise = (async () => {
+        const pendingBackend = backendPromise
+        backendPromise = undefined
+        if (!pendingBackend)
+          return
+        try {
+          await (await pendingBackend).close()
+        }
+        catch (error) {
+          const message = String(error)
+          console.error(`[lumi-browser] browser shutdown warning: ${message}`)
         }
       })()
     }
-    return contextClosePromise
+    return closePromise
   }
 
   transport.onclose = () => {
-    void closeContext()
+    void closeBackend()
   }
   process.stdin.once('end', () => {
-    void closeContext()
+    void closeBackend()
   })
   process.once('SIGINT', () => {
-    void closeContext().finally(() => process.exit(0))
+    void closeBackend().finally(() => process.exit(0))
   })
   process.once('SIGTERM', () => {
-    void closeContext().finally(() => process.exit(0))
+    void closeBackend().finally(() => process.exit(0))
   })
 
   await server.connect(transport)
@@ -78,7 +130,8 @@ export async function runPlaywrightExtraMcp(config: LauncherConfig): Promise<voi
 
 export async function runFromCommandLine(args: string[] = process.argv.slice(2)): Promise<void> {
   const config = await loadLauncherConfig(args)
-  console.error(`[lumi-playwright] playwright-extra enabled: ${config.plugins.map(plugin => plugin.module).join(', ') || 'none'}`)
-  console.error(`[lumi-playwright] browser channel=${config.browser.channel} headless=${config.browser.headless} profile=${config.userDataDir}`)
+  console.error(
+    `[lumi-browser] configured default=${config.browser.defaultBackend} fallback=${config.browser.fallbackBackend ?? 'disabled'} profile=${config.userDataDir}`,
+  )
   await runPlaywrightExtraMcp(config)
 }

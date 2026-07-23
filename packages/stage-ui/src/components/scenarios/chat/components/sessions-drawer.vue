@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import type { ChatSessionMeta } from '../../../../types/chat-session'
 
+import { errorMessageFrom } from '@moeru/std'
 import { useResizeObserver, useScreenSafeArea } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 import { DialogContent, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from 'reka-ui'
 import { DrawerContent, DrawerHandle, DrawerOverlay, DrawerPortal, DrawerRoot, DrawerTitle } from 'vaul-vue'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+
+import GroupSessionCreator from './groupSessionCreator.vue'
 
 import { useAnalytics } from '../../../../composables/use-analytics'
 import { useBreakpoints } from '../../../../composables/use-breakpoints'
 import { LUMI_AIRI_CARD_ID } from '../../../../constants/lumi-card'
+import { canUserAccessChatSession } from '../../../../libs/chat-conversation'
 import { extractMessageText } from '../../../../libs/chat-sync'
 import { useAuthStore } from '../../../../stores/auth'
 import { useChatSessionStore } from '../../../../stores/chat/session-store'
+import { useLumiIdentityStore } from '../../../../stores/lumi-identity'
 import { useAiriCardStore } from '../../../../stores/modules/airi-card'
 import { useConsciousnessStore } from '../../../../stores/modules/consciousness'
 
@@ -48,8 +53,10 @@ const { sessionMetas, sessionMessages, activeSessionId } = storeToRefs(chatSessi
 const { activeCardId } = storeToRefs(useAiriCardStore())
 const { userId } = storeToRefs(useAuthStore())
 const { activeModel } = storeToRefs(useConsciousnessStore())
+const { activeUserId: lumiActiveUserId, activeUsers: lumiActiveUsers, users: lumiUsers } = storeToRefs(useLumiIdentityStore())
 const { trackChatSessionStarted } = useAnalytics()
 const isLumiCard = computed(() => activeCardId.value === LUMI_AIRI_CARD_ID)
+const canCreateGroup = computed(() => isLumiCard.value && lumiActiveUsers.value.length >= 2 && Boolean(lumiActiveUserId.value))
 
 // Re-entry guard for the "new session" button. Without this, a rapid
 // double-click would call `createSession` twice (creating two orphan
@@ -57,7 +64,11 @@ const isLumiCard = computed(() => activeCardId.value === LUMI_AIRI_CARD_ID)
 // The async `createSession` includes IndexedDB writes + a cloud reconcile
 // kick-off, so even a single click can stay in flight long enough for a
 // second click to slip through.
-const isCreatingSession = ref(false)
+const isCreatingSession = shallowRef(false)
+const isCreatingGroup = shallowRef(false)
+const showGroupCreator = shallowRef(false)
+const editingGroupSessionId = shallowRef('')
+const groupCreationError = shallowRef('')
 
 useResizeObserver(document.documentElement, () => screenSafeArea.update())
 onMounted(() => screenSafeArea.update())
@@ -66,6 +77,9 @@ interface SessionRow {
   meta: ChatSessionMeta
   preview: string
   isActive: boolean
+  isGroup: boolean
+  canEditGroup: boolean
+  participantLabel: string
   updatedAtLabel: string
 }
 
@@ -80,9 +94,21 @@ interface SessionRow {
  *   defense in depth).
  */
 const ownedSessions = computed(() => {
-  const effectiveUserId = userId.value || 'local'
-  return Object.values(sessionMetas.value).filter(meta => meta.userId === effectiveUserId)
+  const effectiveUserId = isLumiCard.value
+    ? lumiActiveUserId.value
+    : userId.value || 'local'
+  return Object.values(sessionMetas.value).filter(meta => canUserAccessChatSession(meta, effectiveUserId))
 })
+
+const userNamesById = computed(() => new Map(lumiUsers.value.map(user => [user.id, user.displayName])))
+
+function participantLabelFor(meta: ChatSessionMeta) {
+  if (meta.conversationType !== 'group')
+    return ''
+  return meta.participantUserIds
+    .map(userId => userNamesById.value.get(userId) ?? userId)
+    .join(', ')
+}
 
 /**
  * Pull a 1-line preview from the first non-system message; falls back to the
@@ -143,11 +169,14 @@ function formatUpdatedAt(ts: number): string {
 
 const rows = computed<SessionRow[]>(() => {
   const list = ownedSessions.value
-    .filter(meta => !isLumiCard.value || meta.characterId !== LUMI_AIRI_CARD_ID || meta.timelineType === 'main')
+    .filter(meta => !isLumiCard.value || meta.characterId !== LUMI_AIRI_CARD_ID || meta.timelineType === 'main' || meta.conversationType === 'group')
     .map<SessionRow>(meta => ({
       meta,
       preview: previewFor(meta),
       isActive: meta.sessionId === activeSessionId.value,
+      isGroup: meta.conversationType === 'group',
+      canEditGroup: meta.conversationType === 'group' && meta.userId === lumiActiveUserId.value,
+      participantLabel: participantLabelFor(meta),
       updatedAtLabel: formatUpdatedAt(meta.updatedAt),
     }))
   // Most-recent first; the active session usually ends up at the top after a
@@ -181,6 +210,72 @@ async function startNewSession() {
   }
 }
 
+function openGroupCreator() {
+  groupCreationError.value = ''
+  editingGroupSessionId.value = ''
+  showGroupCreator.value = true
+}
+
+const editingGroupMeta = computed(() => editingGroupSessionId.value
+  ? sessionMetas.value[editingGroupSessionId.value]
+  : undefined)
+
+function closeGroupForm() {
+  showGroupCreator.value = false
+  editingGroupSessionId.value = ''
+  groupCreationError.value = ''
+}
+
+function openGroupEditor(event: Event, meta: ChatSessionMeta) {
+  event.stopPropagation()
+  if (meta.conversationType !== 'group' || meta.userId !== lumiActiveUserId.value)
+    return
+  groupCreationError.value = ''
+  showGroupCreator.value = false
+  editingGroupSessionId.value = meta.sessionId
+}
+
+async function startGroupSession(payload: { participantUserIds: string[], title: string }) {
+  if (isCreatingGroup.value)
+    return
+  isCreatingGroup.value = true
+  groupCreationError.value = ''
+  try {
+    await chatSession.createGroupSession(payload.participantUserIds, {
+      setActive: true,
+      title: payload.title,
+    })
+    trackChatSessionStarted(activeModel.value || 'unknown')
+    showGroupCreator.value = false
+    showDialog.value = false
+  }
+  catch (error) {
+    groupCreationError.value = errorMessageFrom(error) ?? t('stage.chat.sessions.group-create-failed')
+  }
+  finally {
+    isCreatingGroup.value = false
+  }
+}
+
+async function saveGroupSession(payload: { participantUserIds: string[], title: string }) {
+  if (isCreatingGroup.value || !editingGroupSessionId.value)
+    return
+  isCreatingGroup.value = true
+  groupCreationError.value = ''
+  try {
+    await chatSession.updateGroupSession(editingGroupSessionId.value, payload.participantUserIds, {
+      title: payload.title,
+    })
+    closeGroupForm()
+  }
+  catch (error) {
+    groupCreationError.value = errorMessageFrom(error) ?? t('stage.chat.sessions.group-edit-failed')
+  }
+  finally {
+    isCreatingGroup.value = false
+  }
+}
+
 async function deleteRow(event: Event, sessionId: string) {
   // Stop the parent button's click — otherwise we'd switch into the session
   // we are about to remove and immediately need a fallback.
@@ -200,8 +295,10 @@ let openGeneration = 0
 // fallback. `loadSession` is idempotent (`loadedSessions` set), so reopening
 // the drawer is cheap.
 watch(showDialog, async (open) => {
-  if (!open)
+  if (!open) {
+    closeGroupForm()
     return
+  }
   openGeneration += 1
   const myGeneration = openGeneration
   // Touch `rows` first so reactive labels reflect a fresh `Date.now()`.
@@ -239,20 +336,58 @@ watch(showDialog, async (open) => {
             <DialogTitle :class="['text-base font-medium text-neutral-700 dark:text-neutral-200']">
               {{ t('stage.chat.sessions.title') }}
             </DialogTitle>
-            <button
-              v-if="!isLumiCard"
-              :class="[
-                'rounded-lg px-3 py-1.5 text-xs font-medium',
-                'bg-primary-100/60 text-primary-700 dark:bg-primary-900/40 dark:text-primary-200',
-                'hover:bg-primary-200/70 dark:hover:bg-primary-800/50',
-                'transition-colors',
-              ]"
-              :disabled="isCreatingSession"
-              @click="startNewSession"
-            >
-              {{ t('stage.chat.sessions.new') }}
-            </button>
+            <div :class="['flex items-center gap-2']">
+              <button
+                v-if="canCreateGroup"
+                type="button"
+                :class="[
+                  'h-8 flex items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium',
+                  'bg-primary-100/60 text-primary-700 dark:bg-primary-900/40 dark:text-primary-200',
+                  'hover:bg-primary-200/70 dark:hover:bg-primary-800/50 transition-colors',
+                ]"
+                :disabled="isCreatingGroup"
+                @click="openGroupCreator"
+              >
+                <div class="i-solar:users-group-rounded-bold-duotone h-4 w-4" />
+                {{ t('stage.chat.sessions.new-group') }}
+              </button>
+              <button
+                v-if="!isLumiCard"
+                :class="[
+                  'rounded-lg px-3 py-1.5 text-xs font-medium',
+                  'bg-primary-100/60 text-primary-700 dark:bg-primary-900/40 dark:text-primary-200',
+                  'hover:bg-primary-200/70 dark:hover:bg-primary-800/50',
+                  'transition-colors',
+                ]"
+                :disabled="isCreatingSession"
+                @click="startNewSession"
+              >
+                {{ t('stage.chat.sessions.new') }}
+              </button>
+            </div>
           </div>
+          <GroupSessionCreator
+            v-if="showGroupCreator"
+            :users="lumiUsers"
+            :active-user-id="lumiActiveUserId"
+            :busy="isCreatingGroup"
+            :error="groupCreationError"
+            @cancel="closeGroupForm"
+            @submit="startGroupSession"
+          />
+          <GroupSessionCreator
+            v-else-if="editingGroupMeta"
+            :key="editingGroupMeta.sessionId"
+            mode="edit"
+            :users="lumiUsers"
+            :active-user-id="lumiActiveUserId"
+            :initial-participant-user-ids="editingGroupMeta.participantUserIds"
+            :initial-title="editingGroupMeta.title"
+            :busy="isCreatingGroup"
+            :error="groupCreationError"
+            @cancel="closeGroupForm"
+            @submit="saveGroupSession"
+          />
           <div :class="['flex-1 overflow-y-auto px-2 pb-4']">
             <div v-if="rows.length === 0" :class="['p-6 text-center text-sm text-neutral-500 dark:text-neutral-400']">
               {{ t('stage.chat.sessions.empty') }}
@@ -275,6 +410,13 @@ watch(showDialog, async (open) => {
                 <div :class="['flex items-center gap-2 text-sm font-medium text-neutral-700 dark:text-neutral-200']">
                   <span :class="['truncate flex-1']">{{ row.preview }}</span>
                   <span
+                    v-if="row.isGroup"
+                    :class="['shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium', 'bg-sky-500/12 text-sky-700 dark:text-sky-300']"
+                  >
+                    <div class="i-solar:users-group-rounded-bold-duotone h-3 w-3" />
+                    {{ t('stage.chat.sessions.group-badge') }}
+                  </span>
+                  <span
                     v-if="row.meta.cloudChatId"
                     :class="['shrink-0 text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5', 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300']"
                     :title="t('stage.chat.sessions.cloud-badge')"
@@ -282,11 +424,26 @@ watch(showDialog, async (open) => {
                     cloud
                   </span>
                   <!-- placeholder for trash icon to reserve hit space -->
-                  <span :class="['w-7']" />
+                  <span :class="[row.canEditGroup ? 'w-14' : 'w-7']" />
                 </div>
-                <div :class="['text-[11px] text-neutral-500 dark:text-neutral-400']">
-                  {{ row.updatedAtLabel }}
+                <div :class="['min-w-0 flex items-center gap-2 text-[11px] text-neutral-500 dark:text-neutral-400']">
+                  <span v-if="row.isGroup" :class="['truncate']">{{ row.participantLabel }}</span>
+                  <span :class="['shrink-0']">{{ row.updatedAtLabel }}</span>
                 </div>
+              </button>
+              <button
+                v-if="row.canEditGroup"
+                type="button"
+                :class="[
+                  'absolute right-9 top-2 h-7 w-7 flex items-center justify-center rounded-md',
+                  'opacity-0 group-hover:opacity-100 focus:opacity-100',
+                  'text-neutral-400 hover:text-primary-600 hover:bg-primary-500/10',
+                  'transition-opacity duration-150',
+                ]"
+                :title="t('stage.chat.sessions.edit-group')"
+                @click="openGroupEditor($event, row.meta)"
+              >
+                <div class="i-solar:pen-new-square-bold-duotone h-4 w-4" />
               </button>
               <button
                 :class="[
@@ -325,20 +482,58 @@ watch(showDialog, async (open) => {
           <DrawerTitle :class="['text-base font-medium text-neutral-700 dark:text-neutral-200']">
             {{ t('stage.chat.sessions.title') }}
           </DrawerTitle>
-          <button
-            v-if="!isLumiCard"
-            :class="[
-              'rounded-lg px-3 py-1.5 text-xs font-medium',
-              'bg-primary-100/60 text-primary-700 dark:bg-primary-900/40 dark:text-primary-200',
-              'hover:bg-primary-200/70 dark:hover:bg-primary-800/50',
-              'transition-colors',
-            ]"
-            :disabled="isCreatingSession"
-            @click="startNewSession"
-          >
-            {{ t('stage.chat.sessions.new') }}
-          </button>
+          <div :class="['flex items-center gap-2']">
+            <button
+              v-if="canCreateGroup"
+              type="button"
+              :class="[
+                'h-8 flex items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium',
+                'bg-primary-100/60 text-primary-700 dark:bg-primary-900/40 dark:text-primary-200',
+                'hover:bg-primary-200/70 dark:hover:bg-primary-800/50 transition-colors',
+              ]"
+              :disabled="isCreatingGroup"
+              @click="openGroupCreator"
+            >
+              <div class="i-solar:users-group-rounded-bold-duotone h-4 w-4" />
+              {{ t('stage.chat.sessions.new-group') }}
+            </button>
+            <button
+              v-if="!isLumiCard"
+              :class="[
+                'rounded-lg px-3 py-1.5 text-xs font-medium',
+                'bg-primary-100/60 text-primary-700 dark:bg-primary-900/40 dark:text-primary-200',
+                'hover:bg-primary-200/70 dark:hover:bg-primary-800/50',
+                'transition-colors',
+              ]"
+              :disabled="isCreatingSession"
+              @click="startNewSession"
+            >
+              {{ t('stage.chat.sessions.new') }}
+            </button>
+          </div>
         </div>
+        <GroupSessionCreator
+          v-if="showGroupCreator"
+          :users="lumiUsers"
+          :active-user-id="lumiActiveUserId"
+          :busy="isCreatingGroup"
+          :error="groupCreationError"
+          @cancel="closeGroupForm"
+          @submit="startGroupSession"
+        />
+        <GroupSessionCreator
+          v-else-if="editingGroupMeta"
+          :key="editingGroupMeta.sessionId"
+          mode="edit"
+          :users="lumiUsers"
+          :active-user-id="lumiActiveUserId"
+          :initial-participant-user-ids="editingGroupMeta.participantUserIds"
+          :initial-title="editingGroupMeta.title"
+          :busy="isCreatingGroup"
+          :error="groupCreationError"
+          @cancel="closeGroupForm"
+          @submit="saveGroupSession"
+        />
         <div :class="['flex-1 overflow-y-auto px-2 pb-2']">
           <div v-if="rows.length === 0" :class="['p-6 text-center text-sm text-neutral-500 dark:text-neutral-400']">
             {{ t('stage.chat.sessions.empty') }}
@@ -361,17 +556,39 @@ watch(showDialog, async (open) => {
               <div :class="['flex items-center gap-2 text-sm font-medium text-neutral-700 dark:text-neutral-200']">
                 <span :class="['truncate flex-1']">{{ row.preview }}</span>
                 <span
+                  v-if="row.isGroup"
+                  :class="['shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium', 'bg-sky-500/12 text-sky-700 dark:text-sky-300']"
+                >
+                  <div class="i-solar:users-group-rounded-bold-duotone h-3 w-3" />
+                  {{ t('stage.chat.sessions.group-badge') }}
+                </span>
+                <span
                   v-if="row.meta.cloudChatId"
                   :class="['shrink-0 text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5', 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300']"
                   :title="t('stage.chat.sessions.cloud-badge')"
                 >
                   cloud
                 </span>
-                <span :class="['w-7']" />
+                <span :class="[row.canEditGroup ? 'w-14' : 'w-7']" />
               </div>
-              <div :class="['text-[11px] text-neutral-500 dark:text-neutral-400']">
-                {{ row.updatedAtLabel }}
+              <div :class="['min-w-0 flex items-center gap-2 text-[11px] text-neutral-500 dark:text-neutral-400']">
+                <span v-if="row.isGroup" :class="['truncate']">{{ row.participantLabel }}</span>
+                <span :class="['shrink-0']">{{ row.updatedAtLabel }}</span>
               </div>
+            </button>
+            <button
+              v-if="row.canEditGroup"
+              type="button"
+              :class="[
+                'absolute right-9 top-2 h-7 w-7 flex items-center justify-center rounded-md',
+                'opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100',
+                'text-neutral-400 hover:text-primary-600 hover:bg-primary-500/10',
+                'transition-opacity duration-150',
+              ]"
+              :title="t('stage.chat.sessions.edit-group')"
+              @click="openGroupEditor($event, row.meta)"
+            >
+              <div class="i-solar:pen-new-square-bold-duotone h-4 w-4" />
             </button>
             <button
               :class="[

@@ -786,7 +786,6 @@ async function main() {
         ...env,
         COMPUTER_USE_EXECUTOR: 'macos-local',
         COMPUTER_USE_APPROVAL_MODE: 'never',
-        COMPUTER_USE_OPENABLE_APPS: 'Terminal,Cursor,Google Chrome,Electron,Discord',
         COMPUTER_USE_DENY_APPS: '1Password,Keychain,System Settings,Activity Monitor',
         COMPUTER_USE_BROWSER_DOM_BRIDGE_ENABLED: 'true',
         COMPUTER_USE_BROWSER_DOM_BRIDGE_HOST: env.COMPUTER_USE_BROWSER_DOM_BRIDGE_HOST || '127.0.0.1',

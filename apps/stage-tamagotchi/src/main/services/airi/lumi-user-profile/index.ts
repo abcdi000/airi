@@ -1,7 +1,9 @@
 import type { createContext } from '@moeru/eventa/adapters/electron/main'
 
-import { mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import type { ElectronLumiUserProfileSnapshot } from '../../../../shared/eventa'
+
+import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 
 import { defineInvokeHandler } from '@moeru/eventa'
 import { app } from 'electron'
@@ -19,8 +21,8 @@ import {
   electronLumiUserProfileSaveHistory,
   electronLumiUserProfileSavePendingUpdate,
   electronLumiUserProfileSetMeta,
+
   electronLumiUserProfileUpdateEntry,
-  type ElectronLumiUserProfileSnapshot,
 } from '../../../../shared/eventa'
 
 type SqliteValue = string | number | null
@@ -32,32 +34,52 @@ interface SqliteStatement {
 }
 
 interface SqliteDatabase {
+  close?: () => void
   exec: (sql: string) => void
   prepare: (sql: string) => SqliteStatement
 }
 
 interface SqliteModule {
-  DatabaseSync: new (path: string) => SqliteDatabase
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteDatabase
 }
 
-let dbInstance: SqliteDatabase | null = null
-let dbPathInstance = ''
+const DOGGY_USER_ID = 'lumi-user-00000000-0000-4000-8000-000000000001'
+const INTERNAL_USER_ID_PATTERN = /^lumi-user-[A-Za-z0-9-]{8,80}$/
+const LEGACY_SOURCE_MODE_KEY = 'legacy_source_mode_v1'
+const databaseByUser = new Map<string, { db: SqliteDatabase, path: string }>()
 
 async function loadSqlite(): Promise<SqliteModule> {
+  // NOTICE:
+  // The Function constructor keeps `node:sqlite` opaque to electron-vite so the
+  // runtime builtin is not rewritten into an application dependency.
+  // Static or directly analyzable imports were bundled incorrectly in packaged builds.
+  // Source/context: the desktop main-process SQLite loader in this file.
+  // Removal condition: electron-vite can preserve `node:sqlite` as a runtime builtin.
+  // eslint-disable-next-line no-new-func
   const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<SqliteModule>
   return await dynamicImport('node:sqlite')
 }
 
-async function getDatabase(): Promise<{ db: SqliteDatabase, path: string }> {
-  if (dbInstance)
-    return { db: dbInstance, path: dbPathInstance }
+async function getDatabase(userId: string): Promise<{ db: SqliteDatabase, path: string }> {
+  if (!INTERNAL_USER_ID_PATTERN.test(userId))
+    throw new Error('Invalid Lumi user ID for profile storage')
+  const existing = databaseByUser.get(userId)
+  if (existing)
+    return existing
 
   const sqlite = await loadSqlite()
-  dbPathInstance = join(app.getPath('userData'), 'lumi-user-profile.sqlite3')
-  mkdirSync(dirname(dbPathInstance), { recursive: true })
-  dbInstance = new sqlite.DatabaseSync(dbPathInstance)
-  migrate(dbInstance)
-  return { db: dbInstance, path: dbPathInstance }
+  const dbPath = join(app.getPath('userData'), userId === DOGGY_USER_ID ? 'lumi-user-profile.sqlite3' : `lumi-user-profile.${userId}.sqlite3`)
+  const databaseExisted = existsSync(dbPath)
+  mkdirSync(dirname(dbPath), { recursive: true })
+  const db = new sqlite.DatabaseSync(dbPath)
+  migrate(db)
+  const legacySourceMode = getMeta(db, LEGACY_SOURCE_MODE_KEY) ?? (databaseExisted ? 'recover' : 'fresh')
+  setMetaWithDb(db, LEGACY_SOURCE_MODE_KEY, legacySourceMode)
+  if (userId === DOGGY_USER_ID && legacySourceMode === 'recover')
+    mergeLegacyProfileSources(sqlite, db, dbPath)
+  const result = { db, path: dbPath }
+  databaseByUser.set(userId, result)
+  return result
 }
 
 function migrate(db: SqliteDatabase) {
@@ -175,23 +197,94 @@ function addOptionalColumn(db: SqliteDatabase, table: string, column: string, ty
 export function createLumiUserProfileService(params: {
   context: ReturnType<typeof createContext>['context']
 }) {
-  defineInvokeHandler(params.context, electronLumiUserProfileGetSnapshot, async () => loadProfileFromDatabase())
-  defineInvokeHandler(params.context, electronLumiUserProfileReplaceSnapshot, async snapshot => migrateLocalProfileToDatabase(snapshot))
-  defineInvokeHandler(params.context, electronLumiUserProfileSaveEntry, async entry => saveProfileEntry(entry))
-  defineInvokeHandler(params.context, electronLumiUserProfileUpdateEntry, async entry => updateProfileEntry(entry))
-  defineInvokeHandler(params.context, electronLumiUserProfileArchiveEntry, async ({ id }) => archiveProfileEntry(id))
-  defineInvokeHandler(params.context, electronLumiUserProfileDeleteEntry, async ({ id }) => deleteProfileEntry(id))
-  defineInvokeHandler(params.context, electronLumiUserProfileSaveEvidence, async payload => saveEvidence(payload.entryId, payload.evidence))
-  defineInvokeHandler(params.context, electronLumiUserProfileSaveHistory, async payload => saveHistory(payload))
-  defineInvokeHandler(params.context, electronLumiUserProfileSavePendingUpdate, async pending => savePendingUpdate(pending))
-  defineInvokeHandler(params.context, electronLumiUserProfileApprovePendingUpdate, async payload => approvePendingUpdate(payload.id, payload.entry))
-  defineInvokeHandler(params.context, electronLumiUserProfileRejectPendingUpdate, async ({ id }) => rejectPendingUpdate(id))
-  defineInvokeHandler(params.context, electronLumiUserProfileSetMeta, async payload => setMeta(payload.key, payload.value))
-  defineInvokeHandler(params.context, electronLumiUserProfileClear, async () => clearDatabase())
+  defineInvokeHandler(params.context, electronLumiUserProfileGetSnapshot, async ({ userId }) => loadProfileFromDatabase(userId))
+  defineInvokeHandler(params.context, electronLumiUserProfileReplaceSnapshot, async ({ userId, snapshot }) => migrateLocalProfileToDatabase(userId, snapshot))
+  defineInvokeHandler(params.context, electronLumiUserProfileSaveEntry, async ({ userId, entry }) => saveProfileEntry(userId, entry))
+  defineInvokeHandler(params.context, electronLumiUserProfileUpdateEntry, async ({ userId, entry }) => updateProfileEntry(userId, entry))
+  defineInvokeHandler(params.context, electronLumiUserProfileArchiveEntry, async ({ userId, id }) => archiveProfileEntry(userId, id))
+  defineInvokeHandler(params.context, electronLumiUserProfileDeleteEntry, async ({ userId, id }) => deleteProfileEntry(userId, id))
+  defineInvokeHandler(params.context, electronLumiUserProfileSaveEvidence, async payload => saveEvidence(payload.userId, payload.entryId, payload.evidence))
+  defineInvokeHandler(params.context, electronLumiUserProfileSaveHistory, async payload => saveHistory(payload.userId, payload))
+  defineInvokeHandler(params.context, electronLumiUserProfileSavePendingUpdate, async ({ userId, pending }) => savePendingUpdate(userId, pending))
+  defineInvokeHandler(params.context, electronLumiUserProfileApprovePendingUpdate, async payload => approvePendingUpdate(payload.userId, payload.id, payload.entry))
+  defineInvokeHandler(params.context, electronLumiUserProfileRejectPendingUpdate, async ({ userId, id }) => rejectPendingUpdate(userId, id))
+  defineInvokeHandler(params.context, electronLumiUserProfileSetMeta, async payload => setMeta(payload.userId, payload.key, payload.value))
+  defineInvokeHandler(params.context, electronLumiUserProfileClear, async ({ userId }) => clearDatabase(userId))
 }
 
-export async function loadProfileFromDatabase(): Promise<ElectronLumiUserProfileSnapshot> {
-  const { db, path } = await getDatabase()
+function legacyProfileSourcePaths(targetPath: string) {
+  const appData = app.getPath('appData')
+  const normalizedTarget = resolve(targetPath).toLowerCase()
+  return [...new Set([
+    join(appData, 'lumi', 'lumi-user-profile.sqlite3'),
+    join(appData, '@proj-airi', 'stage-tamagotchi', 'lumi-user-profile.sqlite3'),
+  ].map(path => resolve(path)))]
+    .filter(path => path.toLowerCase() !== normalizedTarget && existsSync(path))
+}
+
+/** Imports missing or newer historical Doggy profile records from read-only databases. */
+function mergeLegacyProfileSources(sqlite: SqliteModule, target: SqliteDatabase, targetPath: string) {
+  for (const sourcePath of legacyProfileSourcePaths(targetPath)) {
+    const sourceStat = statSync(sourcePath)
+    const fingerprint = `${sourceStat.size}:${sourceStat.mtimeMs}`
+    const markerKey = `legacy_profile_source:${sourcePath.toLowerCase()}`
+    if (getMeta(target, markerKey) === JSON.stringify(fingerprint))
+      continue
+
+    const source = new sqlite.DatabaseSync(sourcePath, { readOnly: true })
+    try {
+      const hasEntries = source.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name = \'profile_entries\'').get()
+      if (!hasEntries)
+        continue
+
+      const sourceEvidence = loadEvidenceByEntry(source)
+      const sourceHistory = loadHistoryByEntry(source)
+      target.exec('BEGIN IMMEDIATE')
+      try {
+        for (const row of source.prepare('SELECT * FROM profile_entries').all()) {
+          const entry = rowToEntry(row, sourceEvidence, sourceHistory)
+          const current = target.prepare('SELECT updated_at FROM profile_entries WHERE id = ?').get(entry.id)
+          if (current && stringField(current.updated_at) >= entry.updatedAt)
+            continue
+          saveProfileEntryWithDb(target, entry)
+        }
+
+        for (const row of source.prepare('SELECT * FROM pending_profile_updates').all()) {
+          const pending = rowToPendingUpdate(row)
+          if (!target.prepare('SELECT id FROM pending_profile_updates WHERE id = ?').get(pending.id))
+            savePendingUpdateWithDb(target, pending)
+        }
+
+        for (const row of source.prepare('SELECT * FROM profile_events ORDER BY created_at DESC LIMIT 200').all()) {
+          const event = rowToEvent(row)
+          if (!target.prepare('SELECT id FROM profile_events WHERE id = ?').get(event.id))
+            saveEventWithDb(target, event)
+        }
+
+        for (const row of source.prepare('SELECT key, value_json FROM profile_meta').all()) {
+          const key = stringField(row.key)
+          if (key && !getMeta(target, key))
+            setMetaWithDb(target, key, parseJson(row.value_json, null))
+        }
+        setMetaWithDb(target, markerKey, fingerprint)
+        target.exec('COMMIT')
+      }
+      catch (error) {
+        target.exec('ROLLBACK')
+        throw error
+      }
+    }
+    catch (error) {
+      console.warn(`[lumi-user-profile] failed to merge legacy source ${sourcePath}`, error)
+    }
+    finally {
+      source.close?.()
+    }
+  }
+}
+
+export async function loadProfileFromDatabase(userId: string): Promise<ElectronLumiUserProfileSnapshot> {
+  const { db, path } = await getDatabase(userId)
   cleanupExpiredDailyState(db)
 
   const sourcesByEntry = loadEvidenceByEntry(db)
@@ -216,14 +309,15 @@ export async function loadProfileFromDatabase(): Promise<ElectronLumiUserProfile
     bootstrapVersion: parseJson(getMeta(db, 'bootstrap_version'), ''),
     dbPath: path,
     meta: loadMeta(db),
+    canImportLegacyLocalData: userId === DOGGY_USER_ID,
   }
 }
 
-export async function migrateLocalProfileToDatabase(snapshot: ElectronLumiUserProfileSnapshot): Promise<ElectronLumiUserProfileSnapshot> {
-  const { db } = await getDatabase()
+export async function migrateLocalProfileToDatabase(userId: string, snapshot: ElectronLumiUserProfileSnapshot): Promise<ElectronLumiUserProfileSnapshot> {
+  const { db } = await getDatabase(userId)
   replaceSnapshotWithDb(db, snapshot)
   setMetaWithDb(db, 'last_migration_at', new Date().toISOString())
-  return await loadProfileFromDatabase()
+  return await loadProfileFromDatabase(userId)
 }
 
 function replaceSnapshotWithDb(db: SqliteDatabase, snapshot: ElectronLumiUserProfileSnapshot) {
@@ -252,17 +346,17 @@ function replaceSnapshotWithDb(db: SqliteDatabase, snapshot: ElectronLumiUserPro
   }
 }
 
-export async function saveProfileEntry(entry: Record<string, any>) {
-  const { db } = await getDatabase()
+export async function saveProfileEntry(userId: string, entry: Record<string, any>) {
+  const { db } = await getDatabase(userId)
   saveProfileEntryWithDb(db, entry)
 }
 
-export async function updateProfileEntry(entry: Record<string, any>) {
-  await saveProfileEntry(entry)
+export async function updateProfileEntry(userId: string, entry: Record<string, any>) {
+  await saveProfileEntry(userId, entry)
 }
 
-export async function archiveProfileEntry(id: string) {
-  const { db } = await getDatabase()
+export async function archiveProfileEntry(userId: string, id: string) {
+  const { db } = await getDatabase(userId)
   db.prepare(`
     UPDATE profile_entries
     SET status = 'archived', archived = 1, updated_at = ?
@@ -278,8 +372,8 @@ export async function archiveProfileEntry(id: string) {
   })
 }
 
-export async function deleteProfileEntry(id: string) {
-  const { db } = await getDatabase()
+export async function deleteProfileEntry(userId: string, id: string) {
+  const { db } = await getDatabase(userId)
   const row = db.prepare('SELECT value_json FROM profile_entries WHERE id = ?').get(id)
   db.prepare('DELETE FROM profile_entries WHERE id = ?').run(id)
   saveHistoryWithDb(db, {
@@ -293,38 +387,39 @@ export async function deleteProfileEntry(id: string) {
   })
 }
 
-export async function saveEvidence(entryId: string, evidence: Record<string, any>) {
-  const { db } = await getDatabase()
+export async function saveEvidence(userId: string, entryId: string, evidence: Record<string, any>) {
+  const { db } = await getDatabase(userId)
   saveEvidenceWithDb(db, entryId, evidence, 1)
 }
 
-export async function saveHistory(payload: {
+export async function saveHistory(userId: string, payload: {
+  userId?: string
   entryId?: string
   history?: Record<string, any>
   event?: Record<string, any>
 }) {
-  const { db } = await getDatabase()
+  const { db } = await getDatabase(userId)
   if (payload.history)
     saveHistoryWithDb(db, { ...payload.history, entryId: payload.entryId ?? payload.history.entryId })
   if (payload.event)
     saveEventWithDb(db, payload.event)
 }
 
-export async function loadPendingUpdates() {
-  const { db } = await getDatabase()
+export async function loadPendingUpdates(userId: string) {
+  const { db } = await getDatabase(userId)
   return db.prepare(`
     SELECT * FROM pending_profile_updates
     ORDER BY created_at DESC
   `).all().map(rowToPendingUpdate)
 }
 
-export async function savePendingUpdate(pending: Record<string, any>) {
-  const { db } = await getDatabase()
+export async function savePendingUpdate(userId: string, pending: Record<string, any>) {
+  const { db } = await getDatabase(userId)
   savePendingUpdateWithDb(db, pending)
 }
 
-export async function approvePendingUpdate(id: string, entry?: Record<string, any>) {
-  const { db } = await getDatabase()
+export async function approvePendingUpdate(userId: string, id: string, entry?: Record<string, any>) {
+  const { db } = await getDatabase(userId)
   db.prepare(`
     UPDATE pending_profile_updates
     SET status = 'approved', resolved_at = ?
@@ -341,8 +436,8 @@ export async function approvePendingUpdate(id: string, entry?: Record<string, an
   })
 }
 
-export async function rejectPendingUpdate(id: string) {
-  const { db } = await getDatabase()
+export async function rejectPendingUpdate(userId: string, id: string) {
+  const { db } = await getDatabase(userId)
   db.prepare(`
     UPDATE pending_profile_updates
     SET status = 'rejected', resolved_at = ?
@@ -357,13 +452,13 @@ export async function rejectPendingUpdate(id: string) {
   })
 }
 
-async function setMeta(key: string, value: unknown) {
-  const { db } = await getDatabase()
+async function setMeta(userId: string, key: string, value: unknown) {
+  const { db } = await getDatabase(userId)
   setMetaWithDb(db, key, value)
 }
 
-async function clearDatabase() {
-  const { db } = await getDatabase()
+async function clearDatabase(userId: string) {
+  const { db } = await getDatabase(userId)
   db.exec(`
     DELETE FROM profile_events;
     DELETE FROM pending_profile_updates;

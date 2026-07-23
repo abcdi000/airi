@@ -136,7 +136,7 @@ describe('evaluateActionPolicy', () => {
     expect(decision.reasons[0]).toContain('foreground app denied')
   })
 
-  it('denies opening apps outside the configured openable list', () => {
+  it('allows opening an unlisted app under the deny-only policy', () => {
     const decision = evaluateActionPolicy({
       action: {
         kind: 'open_app',
@@ -153,11 +153,10 @@ describe('evaluateActionPolicy', () => {
       operationUnitsConsumed: 0,
     })
 
-    expect(decision.allowed).toBe(false)
-    expect(decision.reasons[0]).toContain('COMPUTER_USE_OPENABLE_APPS')
+    expect(decision.allowed).toBe(true)
   })
 
-  it('allows app aliases when the canonical app is configured', () => {
+  it('allows app aliases without requiring a configured allow list', () => {
     const decision = evaluateActionPolicy({
       action: {
         kind: 'open_app',
@@ -175,6 +174,53 @@ describe('evaluateActionPolicy', () => {
     })
 
     expect(decision.allowed).toBe(true)
+  })
+
+  it('denies opening apps matched by the application blacklist', () => {
+    const decision = evaluateActionPolicy({
+      action: {
+        kind: 'open_app',
+        input: {
+          app: 'AIRI Settings',
+        },
+      },
+      config: baseConfig,
+      context: {
+        available: false,
+        platform: 'darwin',
+      },
+      operationsExecuted: 0,
+      operationUnitsConsumed: 0,
+    })
+
+    expect(decision.allowed).toBe(false)
+    expect(decision.reasons[0]).toContain('COMPUTER_USE_DENY_APPS')
+  })
+
+  it('denies interaction when the foreground window title matches the blacklist', () => {
+    const decision = evaluateActionPolicy({
+      action: {
+        kind: 'type_text',
+        input: {
+          text: 'secret',
+        },
+      },
+      config: {
+        ...baseConfig,
+        denyWindowTitles: ['payment confirmation'],
+      },
+      context: {
+        available: true,
+        appName: 'Google Chrome',
+        windowTitle: 'Bank - Payment Confirmation',
+        platform: 'win32',
+      },
+      operationsExecuted: 0,
+      operationUnitsConsumed: 0,
+    })
+
+    expect(decision.allowed).toBe(false)
+    expect(decision.reasons[0]).toContain('foreground window denied')
   })
 
   it('denies app actions on the legacy linux-x11 executor', () => {

@@ -1,6 +1,8 @@
 import type { Tool } from '@xsai/shared-chat'
 import type { JsonSchema } from 'xsschema'
 
+import type { LumiToolExecuteOptionsExtension } from '../libs/lumi-tool-permissions'
+
 import { errorMessageFrom } from '@moeru/std'
 import { rawTool, tool } from '@xsai/tool'
 import { z } from 'zod'
@@ -964,6 +966,7 @@ export async function createMcpRuntimeTools(runtime: McpToolRuntime): Promise<To
                   modelToolName: name,
                   modelToolCallId: executeOptions?.toolCallId,
                   mcpTarget: descriptor.name,
+                  lumiResourceLease: (executeOptions as typeof executeOptions & LumiToolExecuteOptionsExtension)?.lumiResourceLease,
                 }
               : undefined,
           })

@@ -23,6 +23,10 @@ const onContextUpdateMock = vi.fn((callback: HookCallback) => registerHook(conte
 const onEventMock = vi.fn((eventName: string, callback: HookCallback) => registerServerEventHook(eventName, callback))
 const getProviderInstanceMock = vi.fn()
 const recordLifecycleMock = vi.fn()
+const ensureSessionForActorMock = vi.fn()
+const getInteractionContextForActorMock = vi.fn()
+const resolveExternalIdentityMock = vi.fn()
+const transcribeForRecordingMock = vi.fn()
 
 const activeProviderRef = ref<string | null>(null)
 const activeModelRef = ref<string | null>(null)
@@ -173,10 +177,14 @@ vi.mock('pinia', async () => {
   }
 })
 
-vi.mock('@proj-airi/stage-shared', () => ({
-  isStageWeb: () => true,
-  isStageTamagotchi: () => false,
-}))
+vi.mock('@proj-airi/stage-shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@proj-airi/stage-shared')>()
+  return {
+    ...actual,
+    isStageWeb: () => true,
+    isStageTamagotchi: () => false,
+  }
+})
 
 vi.mock('es-toolkit', async (importOriginal) => {
   const actual = await importOriginal<typeof import('es-toolkit')>()
@@ -216,6 +224,8 @@ vi.mock('../../chat/session-store', () => ({
     get activeSessionId() {
       return activeSessionIdRef.value
     },
+    ensureSessionForActor: ensureSessionForActorMock,
+    getInteractionContextForActor: getInteractionContextForActorMock,
     getSessionGenerationValue: () => currentGeneration,
   }),
 }))
@@ -239,6 +249,18 @@ vi.mock('../../modules/consciousness', () => ({
   useConsciousnessStore: () => ({
     activeProvider: activeProviderRef,
     activeModel: activeModelRef,
+  }),
+}))
+
+vi.mock('../../modules/hearing', () => ({
+  useHearingSpeechInputPipeline: () => ({
+    transcribeForRecording: transcribeForRecordingMock,
+  }),
+}))
+
+vi.mock('../../lumi-identity', () => ({
+  useLumiIdentityStore: () => ({
+    resolveExternalIdentity: resolveExternalIdentityMock,
   }),
 }))
 
@@ -282,6 +304,10 @@ describe('context bridge contract', () => {
     onEventMock.mockClear()
     getProviderInstanceMock.mockReset()
     recordLifecycleMock.mockReset()
+    ensureSessionForActorMock.mockReset()
+    getInteractionContextForActorMock.mockReset()
+    resolveExternalIdentityMock.mockReset()
+    transcribeForRecordingMock.mockReset()
     chatOrchestratorMock.ingest.mockReset()
 
     activeProviderRef.value = null
@@ -432,6 +458,81 @@ describe('context bridge contract', () => {
         text: 'input weather',
       }),
     ])
+
+    await store.dispose()
+  })
+
+  /**
+   * @example
+   * A reconnect that resends the same room voice payload does not transcribe or ingest it twice.
+   */
+  it('transcribes and ingests one reliable room voice delivery exactly once', async () => {
+    activeProviderRef.value = 'mock-provider'
+    activeModelRef.value = 'mock-model'
+    getProviderInstanceMock.mockResolvedValue({})
+    resolveExternalIdentityMock.mockReturnValue({ id: 'moussy', displayName: 'Moussy' })
+    ensureSessionForActorMock.mockResolvedValue('voice-room-contract')
+    getInteractionContextForActorMock.mockReturnValue({
+      actorId: 'moussy',
+      actorDisplayName: 'Moussy',
+      conversationId: 'voice-room-contract',
+    })
+    transcribeForRecordingMock.mockResolvedValue('Lumi，今天一起玩吗？')
+    const store = useContextBridgeStore()
+    await store.initialize()
+
+    const audio = new Uint8Array([1, 2, 3, 4]).buffer
+    const event = {
+      type: 'input:voice',
+      source: 'plugin-module-host',
+      metadata: {
+        ...createMetadata('lumi-pocket', 'moussy-phone'),
+        auth: {
+          subject: 'device-moussy',
+          scopes: ['lumi:chat'],
+          claims: {
+            provider: 'lumi-lan',
+            providerInstanceId: 'home-host',
+            externalUserId: 'moussy-device',
+            conversationId: 'voice-room-contract',
+          },
+        },
+      },
+      data: {
+        audio,
+        mimeType: 'audio/wav',
+        byteLength: audio.byteLength,
+        durationMs: 1_000,
+        actor: {
+          provider: 'lumi-lan',
+          providerInstanceId: 'home-host',
+          externalUserId: 'moussy-device',
+        },
+        room: {
+          messageId: 'voice-message-contract',
+          idempotencyKey: 'voice-delivery-contract',
+        },
+        overrides: { sessionId: 'voice-room-contract' },
+      },
+    }
+
+    await emitServerEvent('input:voice', event)
+    await emitServerEvent('input:voice', event)
+
+    expect(transcribeForRecordingMock).toHaveBeenCalledTimes(1)
+    expect(chatOrchestratorMock.ingest).toHaveBeenCalledTimes(1)
+    expect(chatOrchestratorMock.ingest).toHaveBeenCalledWith(
+      'Lumi，今天一起玩吗？',
+      expect.objectContaining({
+        input: expect.objectContaining({ type: 'input:text:voice' }),
+        interaction: expect.objectContaining({ actorId: 'moussy' }),
+      }),
+      'voice-room-contract',
+    )
+    expect(serverSendMock).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'lumi:room:ack',
+      data: expect.objectContaining({ status: 'duplicate' }),
+    }))
 
     await store.dispose()
   })

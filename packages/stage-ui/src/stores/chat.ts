@@ -2,34 +2,36 @@ import type { ChatOrchestratorRuntimeState, ChatOrchestratorSendOptions, StreamE
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { Message } from '@xsai/shared-chat'
 
-import type { ChatHistoryItem } from '../types/chat'
+import type { ChatHistoryItem, ChatInteractionContext } from '../types/chat'
 import type { LumiUserProfileEntry, LumiUserProfilePendingUpdate, LumiUserProfileSourceKind } from './lumi-user-profile'
 
-import {
-  analyzeLumiConversationGuard,
-  assessLumiRelationshipFallback,
-  buildLumiRelationshipAssessmentPrompt,
-  buildLumiMemoryTopicAnalyzerPrompt,
-  buildLumiMemoryTopicAnalyzerUserPayload,
-  buildLumiContextualMemoryQuery,
-  buildLumiMemoryCuratorPrompt,
-  buildLumiMemoryCuratorUserPayload,
-  mergeLumiRelationshipAssessmentWithSafetyFloor,
-  isLumiQuestionLikeMemorySource,
-  isContextDependentMemoryText,
-  parseLumiRelationshipAssessment,
-  parseLumiMemoryTopicAnalysis,
-} from '../../../lumi-runtime/src'
+import { errorMessageFrom } from '@moeru/std'
 import { createChatOrchestratorRuntime } from '@proj-airi/core-agent'
 import { IOAttributes, IOEvents, IOSpanNames, IOSubsystems } from '@proj-airi/stage-shared'
 import { nanoid } from 'nanoid'
 import { defineStore, storeToRefs } from 'pinia'
 import { ref, toRaw, watch } from 'vue'
 
+import {
+  analyzeLumiConversationGuard,
+  assessLumiRelationshipFallback,
+  buildLumiContextualMemoryQuery,
+  buildLumiMemoryCuratorPrompt,
+  buildLumiMemoryCuratorUserPayload,
+  buildLumiMemoryTopicAnalyzerPrompt,
+  buildLumiMemoryTopicAnalyzerUserPayload,
+  buildLumiRelationshipAssessmentPrompt,
+  isContextDependentMemoryText,
+  isLumiQuestionLikeMemorySource,
+  mergeLumiRelationshipAssessmentWithSafetyFloor,
+  parseLumiMemoryTopicAnalysis,
+  parseLumiRelationshipAssessment,
+} from '../../../lumi-runtime/src'
 import { useAnalytics } from '../composables'
-import { activeTurnSpan, startSpan } from '../composables/use-io-tracer'
+import { startSpan } from '../composables/use-io-tracer'
 import { LUMI_AIRI_CARD_ID } from '../constants/lumi-card'
 import { extractMessageText, isCloudSyncableMessage } from '../libs/chat-sync'
+import { createLumiRemoteToolTransform } from '../libs/lumi-tool-permissions'
 import { createLumiContext, createMinecraftContext } from './chat/context-providers'
 import { useChatContextStore } from './chat/context-store'
 import { useChatSessionStore } from './chat/session-store'
@@ -37,7 +39,6 @@ import { useChatStreamStore } from './chat/stream-store'
 import { useContextObservabilityStore } from './devtools/context-observability'
 import { useLLM } from './llm'
 import { useLlmToolsetPromptsStore } from './llm-toolset-prompts'
-import { clearLumiMemoryTools, registerLumiMemoryTools } from './lumi-memory-tools'
 import {
   buildLumiCurrentStateUpdatePrompt,
   buildLumiCurrentStateUpdateUserPayload,
@@ -45,13 +46,17 @@ import {
   useLumiCurrentStateStore,
 } from './lumi-current-state'
 import { useLumiEmotionStore } from './lumi-emotion'
+import { useLumiIdentityStore } from './lumi-identity'
 import { useLumiMainTimelineStore } from './lumi-main-timeline'
 import { useLumiMemoryStore } from './lumi-memory'
+import { bindLumiMemoryToolsForTurn, clearLumiMemoryTools, registerLumiMemoryTools } from './lumi-memory-tools'
+import { useLumiOnlineStore } from './lumi-online'
+import { bindLumiToolMeshToolsForTurn } from './lumi-tool-mesh'
 import {
-  buildLumiUserProfilePendingAutoReviewPrompt,
-  buildLumiUserProfilePendingAutoReviewUserPayload,
   buildLumiUserProfileCuratorPrompt,
   buildLumiUserProfileCuratorUserPayload,
+  buildLumiUserProfilePendingAutoReviewPrompt,
+  buildLumiUserProfilePendingAutoReviewUserPayload,
   parseLumiUserProfilePendingAutoReviewOutput,
   useLumiUserProfileStore,
 } from './lumi-user-profile'
@@ -88,8 +93,10 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   const artistryAutonomousStore = useAutonomousArtistryStore()
   const providersStore = useProvidersStore()
   const lumiEmotionStore = useLumiEmotionStore()
+  const lumiIdentityStore = useLumiIdentityStore()
   const lumiCurrentStateStore = useLumiCurrentStateStore()
   const lumiMemoryStore = useLumiMemoryStore()
+  const lumiOnlineStore = useLumiOnlineStore()
   const lumiUserProfileStore = useLumiUserProfileStore()
   const lumiMainTimelineStore = useLumiMainTimelineStore()
   const { activeProvider, activeModel } = storeToRefs(consciousnessStore)
@@ -112,7 +119,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
   const sending = ref(false)
   const pendingQueuedSendCount = ref(0)
-  let ownedActiveTurnSpan: typeof activeTurnSpan.value
   let lumiMemoryToolsRegistered = false
 
   function syncLumiMemoryToolRegistration() {
@@ -140,15 +146,8 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     options?: StreamOptions,
   ) {
     let llmTextLength = 0
-
-    const hadExistingTurn = !!activeTurnSpan.value
-    if (!hadExistingTurn) {
-      const turnSpan = startSpan(IOSpanNames.InteractionTurn)
-      activeTurnSpan.value = turnSpan
-      ownedActiveTurnSpan = turnSpan
-    }
-
-    const llmSpan = startSpan(IOSpanNames.LLMInference, activeTurnSpan.value, {
+    const turnSpan = startSpan(IOSpanNames.InteractionTurn)
+    const llmSpan = startSpan(IOSpanNames.LLMInference, turnSpan, {
       [IOAttributes.Subsystem]: IOSubsystems.LLM,
       [IOAttributes.GenAIRequestModel]: model,
     })
@@ -177,22 +176,13 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     }
     finally {
       llmSpan.end()
+      turnSpan.end()
     }
   }
 
   function syncRuntimeState(state: ChatOrchestratorRuntimeState) {
     sending.value = state.sending
     pendingQueuedSendCount.value = state.pendingQueuedSendCount
-  }
-
-  function settleOwnedActiveTurnSpan() {
-    if (!ownedActiveTurnSpan)
-      return
-
-    ownedActiveTurnSpan.end()
-    if (activeTurnSpan.value === ownedActiveTurnSpan)
-      activeTurnSpan.value = undefined
-    ownedActiveTurnSpan = undefined
   }
 
   const runtime = createChatOrchestratorRuntime({
@@ -227,7 +217,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     createId: nanoid,
     unwrapMessage: message => toRaw(message),
     onStateChange: syncRuntimeState,
-    onSendSettled: settleOwnedActiveTurnSpan,
     onTrackFirstMessage: trackFirstMessage,
     onMessageSendStarted: ({ source, model }) => trackMessageSendStarted({
       source,
@@ -272,8 +261,8 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       }
     },
     onUserTurnReady: async (event) => {
-      const { messageText, sessionMessages, hasAttachments } = event
-      await prepareLumiRelationshipAssessment(messageText, sessionMessages)
+      const { messageText, sessionMessages, hasAttachments, interaction } = event
+      await prepareLumiRelationshipAssessment(messageText, sessionMessages, interaction)
       if (hasAttachments)
         return
       const autonomousTarget = cardStore.activeCard?.extensions?.airi?.modules?.artistry?.autonomousTarget || 'user'
@@ -281,21 +270,22 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         void artistryAutonomousStore.runArtistTask(messageText, toProviderHistory(sessionMessages))
     },
     onAssistantTurnReady: (event) => {
-      const { messageText, sessionMessages, hasAttachments, hiddenUserMessage } = event
+      const { messageText, sessionMessages, hasAttachments, hiddenUserMessage, interaction } = event
       const sessionId = getRuntimeEventSessionId(event)
       void runLumiUserProfileAfterTurn(
         messageText,
         sessionMessages,
         hiddenUserMessage ? 'screen_observation' : 'chat',
+        interaction,
       )
-      void runLumiCurrentStateAfterTurn(sessionMessages)
+      void runLumiCurrentStateAfterTurn(sessionMessages, false, interaction)
       if (hiddenUserMessage)
         return
       const artistry = cardStore.activeCard?.extensions?.airi?.modules?.artistry
       if (!hasAttachments && artistry?.autonomousEnabled && artistry?.autonomousTarget === 'assistant')
         void artistryAutonomousStore.runArtistTask(messageText, toProviderHistory(sessionMessages))
-      runLumiEmotionAfterTurn(messageText, sessionMessages)
-      void runLumiAutoMemoryAfterTurn(messageText, sessionMessages, sessionId)
+      runLumiEmotionAfterTurn(messageText, sessionMessages, interaction)
+      void runLumiAutoMemoryAfterTurn(messageText, sessionMessages, sessionId, interaction)
     },
   })
 
@@ -304,12 +294,103 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       runtime.setSending(next)
   })
 
+  watch(
+    () => lumiOnlineStore.generation[activeSessionId.value],
+    (generation) => {
+      if (lumiOnlineStore.runtimeMode !== 'online-client')
+        return
+      sending.value = generation?.state === 'started' || generation?.state === 'delta'
+    },
+  )
+
+  watch(
+    () => lumiOnlineStore.failedGeneration,
+    (delivery, previous) => {
+      if (
+        lumiOnlineStore.runtimeMode !== 'online-client'
+        || !delivery
+        || delivery.deliveryId === previous?.deliveryId
+      )
+        return
+      chatSession.appendSessionMessage(delivery.payload.conversationId, {
+        role: 'error',
+        content: delivery.payload.error || 'Lumi Server 生成回复失败，请查看 Server Manager 日志。',
+      })
+    },
+  )
+
   async function ingest(
     sendingMessage: string,
     options: ChatOrchestratorSendOptions,
     targetSessionId?: string,
   ) {
-    return runtime.ingest(sendingMessage, withLumiCorrectionProviderTransform(sendingMessage, options), targetSessionId)
+    const sessionId = targetSessionId ?? activeSessionId.value
+    if (cardStore.activeCardId === LUMI_AIRI_CARD_ID && lumiOnlineStore.runtimeMode === 'online-client') {
+      if (options.hiddenUserMessage)
+        throw new Error('Online Lumi background tasks run on the server and cannot be started by the client')
+      if (!lumiOnlineStore.isOnline)
+        throw new Error('Lumi Server is disconnected. Reconnect before sending this online message.')
+      sending.value = true
+      try {
+        await lumiOnlineStore.sendText(sessionId, sendingMessage)
+      }
+      catch (error) {
+        sending.value = false
+        throw error
+      }
+      return
+    }
+    const interaction: ChatInteractionContext | undefined = options.interaction ?? chatSession.getInteractionContext(sessionId)
+    if (cardStore.activeCardId === LUMI_AIRI_CARD_ID && interaction?.actorId) {
+      await Promise.all([
+        lumiUserProfileStore.ensureUserProfileLoaded(interaction.actorId),
+        lumiCurrentStateStore.ensureUserStateLoaded(interaction.actorId),
+        lumiMemoryStore.ensureUserMemoryLoaded(interaction.actorId),
+      ])
+    }
+    const scopedOptions: ChatOrchestratorSendOptions = {
+      ...options,
+      interaction,
+      ...(cardStore.activeCardId === LUMI_AIRI_CARD_ID
+        ? {
+            assistantActorId: LUMI_AIRI_CARD_ID,
+            assistantActorDisplayName: 'Lumi',
+            // Direct conversations serialize by actor; group conversations
+            // serialize by timeline so two participants cannot interleave one
+            // shared history while independent users can still run concurrently.
+            executionLane: interaction?.conversationType === 'group'
+              ? `lumi-conversation:${sessionId}`
+              : `lumi-user:${interaction?.actorId ?? sessionId}`,
+          }
+        : {}),
+    }
+    if (cardStore.activeCardId === LUMI_AIRI_CARD_ID) {
+      scopedOptions.tools = bindLumiMemoryToolsForTurn(scopedOptions.tools, {
+        appendDebug: appendLumiMemoryDebug,
+        interaction,
+        sessionId,
+      })
+      const existingTransform = scopedOptions.toolTransform
+      const remoteTransform = interaction?.toolScopes
+        ? createLumiRemoteToolTransform(interaction.toolScopes, {
+            actorId: interaction.actorId,
+            conversationId: interaction.conversationId,
+            deviceId: interaction.remoteDeviceId,
+          })
+        : undefined
+      scopedOptions.toolTransform = async (tools) => {
+        const transformed = existingTransform ? await existingTransform(tools) : tools
+        const interactionBound = bindLumiToolMeshToolsForTurn(transformed, interaction, {
+          allowPrivateLumiTools: Boolean(options.hiddenUserMessage),
+        })
+        return remoteTransform ? remoteTransform(interactionBound) : interactionBound
+      }
+    }
+    return runtime.ingest(
+      sendingMessage,
+      withLumiCorrectionProviderTransform(sendingMessage, scopedOptions),
+      sessionId,
+    )
   }
 
   async function ingestOnFork(
@@ -376,8 +457,16 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       : activeSessionId.value
   }
 
-  function runLumiEmotionAfterTurn(assistantText: string, sessionMessages: ChatHistoryItem[]) {
+  function runLumiEmotionAfterTurn(
+    assistantText: string,
+    sessionMessages: ChatHistoryItem[],
+    interaction?: ChatInteractionContext,
+  ) {
     if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
+      return
+    if (!interaction?.actorId)
+      return
+    if (interaction.conversationType === 'group')
       return
 
     const userMessage = findLatestUserMessage(sessionMessages)
@@ -388,15 +477,24 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     lumiEmotionStore.updateAfterTurn({
       userText,
       assistantText,
-    })
+    }, interaction.actorId)
   }
 
-  async function prepareLumiRelationshipAssessment(userText: string, sessionMessages: ChatHistoryItem[]) {
+  async function prepareLumiRelationshipAssessment(
+    userText: string,
+    sessionMessages: ChatHistoryItem[],
+    interaction?: ChatInteractionContext,
+  ) {
     if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
       return
+    if (!interaction?.actorId)
+      return
+    if (interaction.conversationType === 'group')
+      return
 
-    lumiEmotionStore.initialize()
-    const state = lumiEmotionStore.currentState
+    const userId = interaction.actorId
+    lumiEmotionStore.initialize(userId)
+    const state = lumiEmotionStore.getStateForUser(userId)
     if (!state)
       return
 
@@ -404,14 +502,14 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     const providerId = activeProvider.value
     const modelId = activeModel.value
     if (!providerId || !modelId) {
-      lumiEmotionStore.setPendingRelationshipAssessment(userText, fallback)
+      lumiEmotionStore.setPendingRelationshipAssessment(userText, fallback, userId)
       return
     }
 
     try {
       const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
       if (!chatProvider) {
-        lumiEmotionStore.setPendingRelationshipAssessment(userText, fallback)
+        lumiEmotionStore.setPendingRelationshipAssessment(userText, fallback, userId)
         return
       }
 
@@ -439,16 +537,23 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       const assessment = parsed
         ? mergeLumiRelationshipAssessmentWithSafetyFloor(parsed, fallback, state)
         : fallback
-      lumiEmotionStore.setPendingRelationshipAssessment(userText, assessment)
+      lumiEmotionStore.setPendingRelationshipAssessment(userText, assessment, userId)
     }
     catch (error) {
       console.warn('[lumi-emotion] relationship curator failed; using fallback', error)
-      lumiEmotionStore.setPendingRelationshipAssessment(userText, fallback)
+      lumiEmotionStore.setPendingRelationshipAssessment(userText, fallback, userId)
     }
   }
 
-  async function runLumiAutoMemoryAfterTurn(assistantText: string, sessionMessages: ChatHistoryItem[], sessionId: string) {
+  async function runLumiAutoMemoryAfterTurn(
+    assistantText: string,
+    sessionMessages: ChatHistoryItem[],
+    sessionId: string,
+    interaction?: ChatInteractionContext,
+  ) {
     if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
+      return
+    if (!interaction?.actorId)
       return
 
     const userMessage = findLatestUserMessage(sessionMessages)
@@ -460,14 +565,14 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       appendLumiMemoryDebug('memory_write', [
         'status: skipped',
         'reason: message too short or routine acknowledgement',
-      ])
+      ], sessionId)
       return
     }
 
     appendLumiMemoryDebug('memory_write', [
       'status: checking',
       `source: ${previewText(userText)}`,
-    ])
+    ], sessionId)
 
     const sourceMessageId = userMessage.id
     const contextual = buildLumiContextualMemoryQuery({
@@ -493,6 +598,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         sessionMessages,
         topicWindow: memoryTopic.topicWindow,
         sourceSignals: buildLumiMemorySourceSignals(userText),
+        interaction,
       }),
     ], memoryTopic.topicHints, memoryTopicStoragePrefix)
 
@@ -504,16 +610,22 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         'reviewer: consciousness_model',
         'candidates: 0',
         'stored: 0',
-      ])
+      ], sessionId)
       return
     }
 
-    const stored = lumiMemoryStore.rememberCandidates(uniqueCandidates, {
-      conversationId: sessionId,
-      sourceMessageId,
-      userId: 'local',
-      personaId: LUMI_AIRI_CARD_ID,
-    })
+    const stored = []
+    for (const candidate of uniqueCandidates) {
+      const commonOptions = {
+        conversationId: sessionId,
+        conversationType: interaction.conversationType,
+        participantUserIds: interaction.participantIds,
+        sourceMessageId,
+        userId: interaction.actorId,
+        personaId: LUMI_AIRI_CARD_ID,
+      }
+      stored.push(...await lumiMemoryStore.rememberCandidatesForUser(interaction.actorId, [candidate], commonOptions))
+    }
 
     appendLumiMemoryDebug('memory_write', [
       `status: ${stored.length ? 'stored' : 'rejected_or_duplicate'}`,
@@ -522,17 +634,25 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       `candidates: ${uniqueCandidates.length}`,
       `stored: ${stored.length}`,
       ...stored.slice(0, 3).map(memory => `- ${memory.type}/${memory.status}: ${previewText(memory.content, 90)}`),
-    ])
+    ], sessionId)
   }
 
   async function runLumiUserProfileAfterTurn(
     assistantText: string,
     sessionMessages: ChatHistoryItem[],
     sourceKind: LumiUserProfileSourceKind,
+    interaction?: ChatInteractionContext,
   ) {
     if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
       return
-    if (!lumiUserProfileStore.autoUpdateEnabled)
+    if (!interaction?.actorId)
+      return
+    if (interaction.conversationType === 'group')
+      return
+
+    const userId = interaction.actorId
+    await lumiUserProfileStore.ensureUserProfileLoaded(userId)
+    if (!lumiUserProfileStore.isAutoUpdateEnabledForUser(userId))
       return
 
     const userMessage = findLatestUserMessage(sessionMessages)
@@ -541,7 +661,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     const userText = extractMessageText(userMessage).trim()
     if (!shouldConsiderForProfile(userText)) {
-      await runLumiUserProfileBacklogReviewNotice(sessionMessages)
+      await runLumiUserProfileBacklogReviewNotice(sessionMessages, userId)
       return
     }
 
@@ -554,15 +674,17 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     })
     const candidates = dedupeProfileCandidates([...deterministic, ...curated])
     if (!candidates.length) {
-      await runLumiUserProfileBacklogReviewNotice(sessionMessages)
+      await runLumiUserProfileBacklogReviewNotice(sessionMessages, userId)
       return
     }
 
-    const results = lumiUserProfileStore.applyCandidates(candidates, {
+    const results = await lumiUserProfileStore.applyCandidatesForUser(userId, candidates, {
       sourceKind,
       sourceMessageId: userMessage.id,
     })
-    const autoReview = await runLumiUserProfilePendingAutoReview(sessionMessages)
+    const autoReview = userId === lumiIdentityStore.activeUserId
+      ? await runLumiUserProfilePendingAutoReview(sessionMessages)
+      : { consolidated: 0, reviewed: 0, approved: 0, rejected: 0, kept: 0 }
     const stored = results.filter(result => result.status === 'stored').length
     const pending = results.filter(result => result.status === 'pending').length
     const skipped = results.filter(result => result.status === 'skipped').length
@@ -581,18 +703,27 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     ])
   }
 
-  async function runLumiCurrentStateAfterTurn(sessionMessages: ChatHistoryItem[], force = false) {
+  async function runLumiCurrentStateAfterTurn(
+    sessionMessages: ChatHistoryItem[],
+    force = false,
+    interaction?: ChatInteractionContext,
+  ) {
     if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
       return { status: 'skipped:not_lumi' as const }
+    if (!interaction?.actorId)
+      return { status: 'skipped:missing_actor' as const }
+    if (interaction.conversationType === 'group')
+      return { status: 'skipped:group_uses_group_memory' as const }
 
-    await lumiCurrentStateStore.initializePersistence()
-    const previousState = { ...lumiCurrentStateStore.currentState }
+    const userId = interaction.actorId
+    await lumiCurrentStateStore.ensureUserStateLoaded(userId)
+    const previousState = { ...lumiCurrentStateStore.getStateForUser(userId) }
     const nextTurnCount = previousState.turnCount + 1
     if (!force && nextTurnCount % lumiCurrentStateStore.normalizedUpdateEveryTurns !== 0) {
       await lumiCurrentStateStore.saveCurrentState({
         turnCount: nextTurnCount,
         updatedAt: previousState.updatedAt || new Date().toISOString(),
-      })
+      }, userId)
       return { status: 'skipped:interval' as const }
     }
 
@@ -605,7 +736,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     const profileContext = lumiUserProfileStore.buildRelevantContext({
       messageText: latestUser ? extractMessageText(latestUser) : '',
       limit: 6,
-    })
+    }, interaction?.actorId)
     const sourceMessageIds = sessionMessages
       .slice(-16)
       .map(message => message.id)
@@ -625,6 +756,8 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
             previousState,
             profileContext,
             recentMessages: sessionMessages,
+            userDisplayName: interaction?.actorDisplayName
+              ?? lumiIdentityStore.users.find(user => user.id === interaction?.actorId)?.displayName,
           }),
         },
       ], {
@@ -635,14 +768,14 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       })
 
       const nextState = parseLumiCurrentStateUpdateOutput(buffer, previousState, sourceMessageIds)
-      await lumiCurrentStateStore.saveCurrentState(nextState)
+      await lumiCurrentStateStore.saveCurrentState(nextState, userId)
 
-      const candidates = lumiCurrentStateStore.buildProfileCandidatesFromState()
+      const candidates = lumiCurrentStateStore.buildProfileCandidatesFromState(userId)
       const results = candidates.length
-        ? lumiUserProfileStore.applyCandidates(candidates, {
-          sourceKind: 'current_state',
-          sourceMessageId: sourceMessageIds.at(-1),
-        })
+        ? await lumiUserProfileStore.applyCandidatesForUser(userId, candidates, {
+            sourceKind: 'current_state',
+            sourceMessageId: sourceMessageIds.at(-1),
+          })
         : []
 
       appendLumiSystemNotice([
@@ -663,13 +796,15 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       appendLumiSystemNotice([
         'title: 短期意识状态',
         'status: failed',
-        `error: ${error instanceof Error ? error.message : String(error)}`,
+        `error: ${errorMessageFrom(error) ?? 'Unknown error'}`,
       ])
       return { status: 'failed' as const }
     }
   }
 
-  async function runLumiUserProfileBacklogReviewNotice(sessionMessages: ChatHistoryItem[]) {
+  async function runLumiUserProfileBacklogReviewNotice(sessionMessages: ChatHistoryItem[], userId: string) {
+    if (userId !== lumiIdentityStore.activeUserId)
+      return
     const autoReview = await runLumiUserProfilePendingAutoReview(sessionMessages)
     if (!autoReview.reviewed && !autoReview.consolidated)
       return
@@ -845,11 +980,11 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     }
   }
 
-  function appendLumiMemoryDebug(kind: 'memory_search' | 'memory_write', lines: string[]) {
+  function appendLumiMemoryDebug(kind: 'memory_search' | 'memory_write', lines: string[], targetSessionId?: string) {
     if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
       return
 
-    const sessionId = activeSessionId.value
+    const sessionId = targetSessionId ?? activeSessionId.value
     if (!sessionId)
       return
 
@@ -891,6 +1026,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     retrievedMemories?: Array<{ content: string }>
     topicWindow?: string
     sourceSignals?: string[]
+    interaction: ChatInteractionContext
   }) {
     const providerId = activeProvider.value
     const modelId = activeModel.value
@@ -919,6 +1055,11 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
             recentMessages: toRecentMemoryCuratorMessages(input.sessionMessages, input.retrievedMemories),
             topicWindow: input.topicWindow,
             sourceSignals: input.sourceSignals,
+            actorId: input.interaction.actorId,
+            actorDisplayName: input.interaction.actorDisplayName,
+            conversationId: input.interaction.conversationId,
+            conversationType: input.interaction.conversationType,
+            participantUserIds: input.interaction.participantIds,
           }),
         },
       ], {
@@ -1050,22 +1191,22 @@ function isLumiMemoryDebugText(text: string) {
 function shouldConsiderForMemory(text: string) {
   if (text.length < 6)
     return false
-  return !/^(hi|hello|hey|ok|thanks|\u597d\u7684|\u8c22\u8c22|\u55ef)$/i.test(text.trim())
+  return !/^(?:hi|hello|hey|ok|thanks|\u597D\u7684|\u8C22\u8C22|\u55EF)$/i.test(text.trim())
 }
 
 function buildLumiMemorySourceSignals(text: string): string[] {
   const signals: string[] = []
   const normalized = text.trim()
 
-  if (/\bremember that\b|\u8bb0\u4f4f|\u522b\u5fd8\u4e86|\u5e2e\u6211\u8bb0/i.test(normalized))
+  if (/\bremember that\b|\u8BB0\u4F4F|\u522B\u5FD8\u4E86|\u5E2E\u6211\u8BB0/i.test(normalized))
     signals.push('explicit_remember_request')
-  if (/\bI (?:really )?(?:like|dislike|hate|prefer|enjoy)s?\b/i.test(normalized) || /\u6211(?:\u5f88|\u975e\u5e38|\u771f\u7684|\u6700)?(?:\u559c\u6b22|\u4e0d\u559c\u6b22|\u8ba8\u538c|\u5e0c\u671b|\u60f3|\u9700\u8981|\u4e0d\u60f3|\u4e0d\u5e0c\u671b|\u4e0d\u9700\u8981)|\u522b|\u4e0d\u8981|\u5c11/.test(normalized))
+  if (/\bI (?:really )?(?:like|dislike|hate|prefer|enjoy)s?\b/i.test(normalized) || /\u6211(?:\u5F88|\u975E\u5E38|\u771F\u7684|\u6700)?(?:\u559C\u6B22|\u4E0D\u559C\u6B22|\u8BA8\u538C|\u5E0C\u671B|\u60F3|\u9700\u8981|\u4E0D\u60F3|\u4E0D\u5E0C\u671B|\u4E0D\u9700\u8981)|\u522B|\u4E0D\u8981|\u5C11/.test(normalized))
     signals.push('preference_keyword')
-  if (/\u6211(?:\u73b0\u5728|\u6700\u8fd1|\u76ee\u524d|\u4eca\u5929|\u6b63\u5728|\u5df2\u7ecf|\u51c6\u5907|\u6253\u7b97|\u62a5\u540d|\u53c2\u52a0|\u5b66\u4e60|\u7814\u7a76|\u5f00\u53d1|\u6709|\u6ca1\u6709)/.test(normalized))
+  if (/\u6211(?:\u73B0\u5728|\u6700\u8FD1|\u76EE\u524D|\u4ECA\u5929|\u6B63\u5728|\u5DF2\u7ECF|\u51C6\u5907|\u6253\u7B97|\u62A5\u540D|\u53C2\u52A0|\u5B66\u4E60|\u7814\u7A76|\u5F00\u53D1|\u6709|\u6CA1\u6709)/.test(normalized))
     signals.push('current_state_keyword')
-  if (/\b(project|repo|backend|frontend|api|sqlite|fastapi|airi|lumi)\b|\u9879\u76ee|\u540e\u7aef|\u524d\u7aef|\u63a5\u53e3|\u8fc1\u79fb|\u63d2\u4ef6|\u8bb0\u5fc6|\u7528\u6237\u753b\u50cf/i.test(normalized))
+  if (/\b(?:project|repo|backend|frontend|api|sqlite|fastapi|airi|lumi)\b|\u9879\u76EE|\u540E\u7AEF|\u524D\u7AEF|\u63A5\u53E3|\u8FC1\u79FB|\u63D2\u4EF6|\u8BB0\u5FC6|\u7528\u6237\u753B\u50CF/i.test(normalized))
     signals.push('project_keyword')
-  if (/\u6211\u4eec|\u4e00\u8d77|\u4e0a\u6b21|\u4eca\u5929|\u6628\u5929|\u90a3\u5929|\u521a\u624d|\u4e4b\u524d|\u524d\u9762/.test(normalized))
+  if (/\u6211\u4EEC|\u4E00\u8D77|\u4E0A\u6B21|\u4ECA\u5929|\u6628\u5929|\u90A3\u5929|\u521A\u624D|\u4E4B\u524D|\u524D\u9762/.test(normalized))
     signals.push('relationship_or_shared_event_keyword')
   if (isLumiQuestionLikeMemorySource(normalized))
     signals.push('question_like_source_review_carefully')
@@ -1078,7 +1219,7 @@ function buildLumiMemorySourceSignals(text: string): string[] {
 function shouldConsiderForProfile(text: string) {
   if (text.length < 4)
     return false
-  if (/^(hi|hello|hey|ok|thanks|\u597d\u7684|\u8c22\u8c22|\u55ef|\u54c8\u54c8+)$/i.test(text.trim()))
+  if (/^(?:hi|hello|hey|ok|thanks|\u597D\u7684|\u8C22\u8C22|\u55EF|\u54C8{2,})$/i.test(text.trim()))
     return false
   if (isLumiQuestionLikeMemorySource(text) && !/我现在|我最近|我目前|我今天|我在|压力|难受|崩溃|废了/.test(text))
     return false
@@ -1105,7 +1246,7 @@ function toRecentMemoryCuratorMessages(messages: ChatHistoryItem[], retrievedMem
     .slice(-8)
     .map(message => ({
       role: message.role,
-      content: extractMessageText(message).slice(0, 1200),
+      content: actorLabeledContent(message, 1200),
     }))
     .filter(message => message.content.trim())
 
@@ -1125,7 +1266,7 @@ function toRecentRelationshipCuratorMessages(messages: ChatHistoryItem[]) {
     .slice(-6)
     .map(message => ({
       role: message.role,
-      content: sanitizeRelationshipCuratorText(extractMessageText(message)).slice(0, 1200),
+      content: sanitizeRelationshipCuratorText(actorLabeledContent(message, 1200)),
     }))
     .filter(message => message.content.trim())
 }
@@ -1144,9 +1285,18 @@ function toRecentMemoryContextMessages(messages: ChatHistoryItem[]) {
     .slice(-8)
     .map(message => ({
       role: message.role,
-      content: extractMessageText(message).slice(0, 600),
+      content: actorLabeledContent(message, 600),
     }))
     .filter(message => message.content.trim())
+}
+
+function actorLabeledContent(
+  message: Extract<ChatHistoryItem, { role: 'user' | 'assistant' }>,
+  limit: number,
+) {
+  const content = extractMessageText(message)
+  const speaker = message.actorDisplayName || message.actorId
+  return `${speaker ? `[Speaker: ${speaker}]\n` : ''}${content}`.slice(0, limit)
 }
 
 function suppressDisputedAssistantForCorrectionTurn(messages: Message[]): Message[] {

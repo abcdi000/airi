@@ -7,6 +7,11 @@ import {
   exportLumiLocalStorageSnapshot,
   isLumiDataArchivePayload,
   LUMI_DATA_ARCHIVE_FORMAT,
+  LUMI_DATA_ARCHIVE_FORMAT_V1,
+  LUMI_DATA_ARCHIVE_FORMAT_V2,
+  LUMI_DATA_ARCHIVE_FORMAT_V3,
+  LUMI_DATA_ARCHIVE_FORMAT_V4,
+  LUMI_DATA_ARCHIVE_FORMAT_V5,
   restoreLumiLocalStorageSnapshot,
   serializeBackgroundEntries,
 } from './lumi-archive'
@@ -71,6 +76,36 @@ describe('lumi data archive helpers', () => {
   it('recognizes the versioned Lumi archive envelope', () => {
     expect(isLumiDataArchivePayload({
       format: LUMI_DATA_ARCHIVE_FORMAT,
+      version: 6,
+      sections: {},
+    })).toBe(true)
+
+    expect(isLumiDataArchivePayload({
+      format: LUMI_DATA_ARCHIVE_FORMAT_V5,
+      version: 5,
+      sections: {},
+    })).toBe(true)
+
+    expect(isLumiDataArchivePayload({
+      format: LUMI_DATA_ARCHIVE_FORMAT_V4,
+      version: 4,
+      sections: {},
+    })).toBe(true)
+
+    expect(isLumiDataArchivePayload({
+      format: LUMI_DATA_ARCHIVE_FORMAT_V3,
+      version: 3,
+      sections: {},
+    })).toBe(true)
+
+    expect(isLumiDataArchivePayload({
+      format: LUMI_DATA_ARCHIVE_FORMAT_V2,
+      version: 2,
+      sections: {},
+    })).toBe(true)
+
+    expect(isLumiDataArchivePayload({
+      format: LUMI_DATA_ARCHIVE_FORMAT_V1,
       version: 1,
       sections: {},
     })).toBe(true)

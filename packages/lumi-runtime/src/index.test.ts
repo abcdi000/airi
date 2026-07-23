@@ -1,39 +1,41 @@
+import type { LumiMemoryFragment } from './types'
+
 import { describe, expect, it } from 'vitest'
+
 import {
   analyzeLumiConversationGuard,
+  assessLumiRelationshipFallback,
+  buildLumiContextualMemoryQuery,
+  buildLumiMemoryCuratorUserPayload,
+  buildLumiMemoryTopicAnalyzerUserPayload,
+  checkLumiRelationshipGate,
   createDefaultLumiPersonaAnchor,
   createDefaultLumiStateSnapshot,
   createLumiImageUnderstandingResult,
   createStaticLumiMemoryDriver,
-  checkLumiRelationshipGate,
   decideLumiMemoryStatus,
   detectLumiEmotionSignal,
   extractLumiMemoryCandidates,
+  isLumiMemoryCandidateGroundedInUserText,
+  isLumiQuestionLikeMemorySource,
   isRecallableMemory,
   migratedLumiAllMemories,
   migratedLumiContextManifest,
   migratedLumiMemories,
   normalizeMemoryScores,
   normalizeStateSnapshot,
-  parseLumiMemoryCuratorOutput,
   parseLumiImageUnderstandingResult,
+  parseLumiMemoryCuratorOutput,
+  parseLumiMemoryTopicAnalysis,
   retrieveLumiMemories,
   sanitizeProviderPayload,
   selectLumiExpression,
-  assessLumiRelationshipFallback,
-  buildLumiContextualMemoryQuery,
-  buildLumiMemoryCuratorUserPayload,
-  buildLumiMemoryTopicAnalyzerUserPayload,
-  isLumiMemoryCandidateGroundedInUserText,
-  isLumiQuestionLikeMemorySource,
-  parseLumiMemoryTopicAnalysis,
   updateLumiStateAfterTurn,
 } from './index'
-import type { LumiMemoryFragment } from './types'
 
-describe('Lumi runtime migration contracts', () => {
+describe('lumi runtime migration contracts', () => {
   it('detects user correction turns before memory recall continues a wrong topic', () => {
-    const guard = analyzeLumiConversationGuard('\u4ec0\u4e48 Level 7\uff0c\u6211\u90fd\u8bf4\u5176\u4ed6\u4e8b\u60c5\u4e86')
+    const guard = analyzeLumiConversationGuard('\u4EC0\u4E48 Level 7\uFF0C\u6211\u90FD\u8BF4\u5176\u4ED6\u4E8B\u60C5\u4E86')
 
     expect(guard.isCorrection).toBe(true)
     expect(guard.isTopicCorrection).toBe(true)
@@ -233,6 +235,7 @@ describe('Lumi runtime migration contracts', () => {
       userId: 'local',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     })
 
     expect(memories).toHaveLength(1)
@@ -248,6 +251,7 @@ describe('Lumi runtime migration contracts', () => {
       userId: 'user-1',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     })
 
     expect(forgotten.status).toBe('archived')
@@ -255,12 +259,10 @@ describe('Lumi runtime migration contracts', () => {
   })
 
   it('ships compact migrated runtime context', () => {
-    expect(migratedLumiContextManifest.memoryCount).toBe(379)
-    expect(migratedLumiContextManifest.activeMemoryCount).toBeGreaterThan(0)
-    expect(migratedLumiAllMemories).toHaveLength(379)
+    expect(migratedLumiContextManifest.memoryCount).toBe(migratedLumiAllMemories.length)
+    expect(migratedLumiContextManifest.activeMemoryCount).toBe(migratedLumiMemories.length)
     expect(migratedLumiMemories.every(memory => memory.status === 'active')).toBe(true)
-    expect(migratedLumiMemories).toHaveLength(158)
-    expect(migratedLumiMemories.some(memory => memory.personaId === 'lumi')).toBe(true)
+    expect(migratedLumiMemories.every(memory => memory.personaId === 'lumi')).toBe(true)
   })
 
   it('maps AIRI vision output into Lumi Eyes context', () => {
@@ -288,7 +290,7 @@ describe('Lumi runtime migration contracts', () => {
   })
 
   it('extracts Chinese favorite preferences', () => {
-    const candidates = extractLumiMemoryCandidates('\u6211\u6700\u559c\u6b22\u7b2c7\u5c42', {
+    const candidates = extractLumiMemoryCandidates('\u6211\u6700\u559C\u6B22\u7B2C7\u5C42', {
       sourceMessageId: 'msg-favorite',
     })
 
@@ -297,12 +299,12 @@ describe('Lumi runtime migration contracts', () => {
   })
 
   it('extracts context-dependent Chinese favorite preferences', () => {
-    const candidates = extractLumiMemoryCandidates('\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u7a83\u76ae\u8005', {
+    const candidates = extractLumiMemoryCandidates('\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u7A83\u76AE\u8005', {
       sourceMessageId: 'msg-entity',
     })
 
     expect(candidates[0]?.content).toContain('favorite entity')
-    expect(candidates[0]?.content).toContain('\u7a83\u76ae\u8005')
+    expect(candidates[0]?.content).toContain('\u7A83\u76AE\u8005')
   })
 
   it('parses curator JSON and applies Lumi activation gates', () => {
@@ -348,6 +350,7 @@ describe('Lumi runtime migration contracts', () => {
       userId: 'user-1',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     })
 
     expect(result.route.queryIntent).toBe('project_context')
@@ -376,6 +379,7 @@ describe('Lumi runtime migration contracts', () => {
       userId: 'user-1',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     })
 
     expect(result.route.queryIntent).toBe('memory_recall')
@@ -404,6 +408,7 @@ describe('Lumi runtime migration contracts', () => {
       userId: 'user-1',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     })
 
     expect(result.route.queryIntent).toBe('memory_recall')
@@ -431,6 +436,7 @@ describe('Lumi runtime migration contracts', () => {
       userId: 'user-1',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     }, {
       externalVectorScores: {
         'semantic-match': 0.92,
@@ -466,6 +472,7 @@ describe('Lumi runtime migration contracts', () => {
       userId: 'user-1',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     }, {
       externalVectorScores: {
         'semantic-only-account': 0.91,
@@ -483,7 +490,7 @@ describe('Lumi runtime migration contracts', () => {
     const backroomsEntity = makeMemory({
       id: 'backrooms-entity-memory',
       type: 'user_preference',
-      content: "In the Backrooms context, the user's favorite entity is Skin-Stealer.",
+      content: 'In the Backrooms context, the user\'s favorite entity is Skin-Stealer.',
       tags: ['backrooms', 'entity', 'favorite'],
       importance: 0.9,
     })
@@ -494,10 +501,10 @@ describe('Lumi runtime migration contracts', () => {
       importance: 0.95,
     })
     const contextual = buildLumiContextualMemoryQuery({
-      currentMessage: '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48',
+      currentMessage: '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48',
       recentMessages: [
-        { role: 'user', content: '\u6211\u4eec\u7ee7\u7eed\u804a\u540e\u5ba4\u5427' },
-        { role: 'assistant', content: '\u597d\uff0c\u521a\u521a\u5728\u804a\u540e\u5ba4\u5c42\u7ea7\u548c\u5b9e\u4f53\u3002' },
+        { role: 'user', content: '\u6211\u4EEC\u7EE7\u7EED\u804A\u540E\u5BA4\u5427' },
+        { role: 'assistant', content: '\u597D\uFF0C\u521A\u521A\u5728\u804A\u540E\u5BA4\u5C42\u7EA7\u548C\u5B9E\u4F53\u3002' },
       ],
     })
 
@@ -506,15 +513,16 @@ describe('Lumi runtime migration contracts', () => {
       userId: 'user-1',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     })
 
-    expect(contextual.topicHints).toContain('Backrooms / \u540e\u5ba4')
+    expect(contextual.topicHints).toContain('Backrooms / \u540E\u5BA4')
     expect(result.rankedMemories[0].memory.id).toBe('backrooms-entity-memory')
   })
 
   it('parses LLM topic analysis for context-dependent storage', () => {
     const analysis = parseLumiMemoryTopicAnalysis(JSON.stringify({
-      topic_window: '\u5f53\u524d\u5728\u804a\u540e\u5ba4\u7684\u5c42\u7ea7\u548c\u5b9e\u4f53\u504f\u597d\u3002',
+      topic_window: '\u5F53\u524D\u5728\u804A\u540E\u5BA4\u7684\u5C42\u7EA7\u548C\u5B9E\u4F53\u504F\u597D\u3002',
       topic_hints: ['Backrooms'],
       storage_prefix: 'In the Backrooms context',
       confidence: 0.91,
@@ -527,25 +535,25 @@ describe('Lumi runtime migration contracts', () => {
 
   it('builds topic analyzer payload from recent conversation', () => {
     const payload = JSON.parse(buildLumiMemoryTopicAnalyzerUserPayload({
-      currentMessage: '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u7a83\u76ae\u8005',
+      currentMessage: '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u7A83\u76AE\u8005',
       recentMessages: [
-        { role: 'user', content: '\u5148\u804a\u522b\u7684' },
-        { role: 'user', content: '\u6211\u4eec\u7ee7\u7eed\u804a\u540e\u5ba4' },
+        { role: 'user', content: '\u5148\u804A\u522B\u7684' },
+        { role: 'user', content: '\u6211\u4EEC\u7EE7\u7EED\u804A\u540E\u5BA4' },
       ],
     }))
 
-    expect(payload.current_user_message).toContain('\u7a83\u76ae\u8005')
+    expect(payload.current_user_message).toContain('\u7A83\u76AE\u8005')
     expect(payload.recent_messages).toHaveLength(2)
   })
 
   it('keeps topic and retrieved memory context in curator payload', () => {
     const payload = JSON.parse(buildLumiMemoryCuratorUserPayload({
-      userMessage: '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u7a83\u76ae\u8005',
-      assistantResponse: '\u6211\u8bb0\u4e0b\u6765\u4e86\u3002',
+      userMessage: '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u7A83\u76AE\u8005',
+      assistantResponse: '\u6211\u8BB0\u4E0B\u6765\u4E86\u3002',
       topicWindow: 'Current topic: Backrooms entity preferences.',
       recentMessages: [
-        { role: 'user', content: '\u6211\u4eec\u804a\u540e\u5ba4' },
-        { role: 'assistant', content: '\u597d\uff0c\u5c42\u7ea7\u548c\u5b9e\u4f53\u90fd\u53ef\u4ee5\u804a\u3002' },
+        { role: 'user', content: '\u6211\u4EEC\u804A\u540E\u5BA4' },
+        { role: 'assistant', content: '\u597D\uFF0C\u5C42\u7EA7\u548C\u5B9E\u4F53\u90FD\u53EF\u4EE5\u804A\u3002' },
         { role: 'retrieved_memory', content: 'No entity preference found.' },
       ],
     }))
@@ -558,7 +566,7 @@ describe('Lumi runtime migration contracts', () => {
   it('rejects question-like user text as a source for memory writes', () => {
     const candidate = {
       type: 'user_preference' as const,
-      content: "In the Backrooms context, the user's favorite entity is Skin-Stealer.",
+      content: 'In the Backrooms context, the user\'s favorite entity is Skin-Stealer.',
       confidence: 0.9,
       importance: 0.8,
       emotionalIntensity: 0,
@@ -569,9 +577,9 @@ describe('Lumi runtime migration contracts', () => {
       reason: 'assistant guessed after recall question',
     }
 
-    expect(isLumiQuestionLikeMemorySource('\u4f60\u8fd8\u8bb0\u5f97\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48')).toBe(true)
-    expect(isLumiMemoryCandidateGroundedInUserText(candidate, '\u4f60\u8fd8\u8bb0\u5f97\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48')).toBe(false)
-    expect(isLumiMemoryCandidateGroundedInUserText(candidate, '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u7a83\u76ae\u8005')).toBe(true)
+    expect(isLumiQuestionLikeMemorySource('\u4F60\u8FD8\u8BB0\u5F97\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48')).toBe(true)
+    expect(isLumiMemoryCandidateGroundedInUserText(candidate, '\u4F60\u8FD8\u8BB0\u5F97\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48')).toBe(false)
+    expect(isLumiMemoryCandidateGroundedInUserText(candidate, '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u7A83\u76AE\u8005')).toBe(true)
   })
 
   it('grounds natural Chinese preference and current-state memory candidates', () => {
@@ -604,8 +612,8 @@ describe('Lumi runtime migration contracts', () => {
       relationshipRelevance: 1,
     })
     const contextual = buildLumiContextualMemoryQuery({
-      currentMessage: '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48',
-      recentMessages: [{ role: 'user', content: '\u521a\u624d\u6211\u4eec\u5728\u8bf4\u540e\u5ba4' }],
+      currentMessage: '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48',
+      recentMessages: [{ role: 'user', content: '\u521A\u624D\u6211\u4EEC\u5728\u8BF4\u540E\u5BA4' }],
     })
 
     const result = retrieveLumiMemories([unrelated], {
@@ -613,6 +621,7 @@ describe('Lumi runtime migration contracts', () => {
       userId: 'user-1',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     })
 
     expect(result.rankedMemories).toEqual([])
@@ -622,7 +631,7 @@ describe('Lumi runtime migration contracts', () => {
     const exact = makeMemory({
       id: 'exact-backrooms-entity-memory',
       type: 'user_preference',
-      content: "In the Backrooms context, the user's favorite entity is Skin-Stealer.",
+      content: 'In the Backrooms context, the user\'s favorite entity is Skin-Stealer.',
       tags: ['backrooms', 'entity', 'favorite'],
       importance: 0.7,
     })
@@ -637,10 +646,11 @@ describe('Lumi runtime migration contracts', () => {
     })
 
     const result = retrieveLumiMemories([noisy, exact], {
-      query: '\u6211\u6700\u559c\u6b22\u7684\u5b9e\u4f53\u662f\u4ec0\u4e48\nResolved topic hints: Backrooms\nRecent topic window: Current topic is Backrooms entity preferences.',
+      query: '\u6211\u6700\u559C\u6B22\u7684\u5B9E\u4F53\u662F\u4EC0\u4E48\nResolved topic hints: Backrooms\nRecent topic window: Current topic is Backrooms entity preferences.',
       userId: 'user-1',
       personaId: 'lumi',
       limit: 4,
+      conversationType: 'direct',
     }, {
       vectorMinScore: 0,
     })

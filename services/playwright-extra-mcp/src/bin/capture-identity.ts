@@ -1,10 +1,10 @@
 import type { BrowserIdentityExpectation, LauncherFileConfig } from '../config'
 
-import { chromium } from 'playwright'
-
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+
+import { PatchrightBackend } from '../patchright-backend'
 
 function requiredOption(name: string): string {
   const index = process.argv.indexOf(name)
@@ -17,15 +17,20 @@ function requiredOption(name: string): string {
 const outputPath = resolve(requiredOption('--output'))
 const userDataDir = resolve(requiredOption('--user-data-dir'))
 const temporaryProfile = await mkdtemp(join(tmpdir(), 'lumi-browser-identity-'))
-let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined
+const backend = new PatchrightBackend({
+  browserName: 'chromium',
+  channel: 'chrome',
+  headless: false,
+  persistentContext: true,
+  noViewport: true,
+  profilePath: temporaryProfile,
+  launchOptions: {
+    args: ['--start-maximized'],
+  },
+})
 
 try {
-  context = await chromium.launchPersistentContext(temporaryProfile, {
-    channel: 'chrome',
-    headless: false,
-    viewport: null,
-    args: ['--start-maximized'],
-  })
+  const context = await backend.getContext()
   const page = context.pages()[0] ?? await context.newPage()
   await page.waitForTimeout(500)
   const identity = await page.evaluate((): BrowserIdentityExpectation => ({
@@ -53,12 +58,17 @@ try {
   const config: LauncherFileConfig = {
     userDataDir,
     browser: {
-      channel: 'chrome',
-      headless: false,
-      launchOptions: {
-        timezoneId: identity.timeZone,
-        viewport: null,
-        args: ['--start-maximized'],
+      defaultBackend: 'patchright',
+      fallbackBackend: 'playwright',
+      patchright: {
+        channel: 'chrome',
+        headless: false,
+        persistentContext: true,
+        noViewport: true,
+        launchOptions: {
+          timezoneId: identity.timeZone,
+          args: ['--start-maximized'],
+        },
       },
     },
     identity,
@@ -74,6 +84,6 @@ try {
   console.log(JSON.stringify({ outputPath, identity }, null, 2))
 }
 finally {
-  await context?.close()
+  await backend.close()
   await rm(temporaryProfile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }

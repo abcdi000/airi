@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import { isStageWeb } from '@proj-airi/stage-shared'
 import { Alert, ErrorContainer, RadioCardManySelect, RadioCardSimple } from '@proj-airi/stage-ui/components'
 import { useAnalytics } from '@proj-airi/stage-ui/composables'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
 import { storeToRefs } from 'pinia'
-import { watch } from 'vue'
+import { computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink, useRouter } from 'vue-router'
 
@@ -25,6 +26,9 @@ const {
 const { t } = useI18n()
 const { trackProviderClick } = useAnalytics()
 const router = useRouter()
+const selectableChatProvidersMetadata = computed(() => persistedChatProvidersMetadata.value.filter((metadata) => {
+  return isStageWeb() || !metadata.id.startsWith('official-provider')
+}))
 
 watch(activeProvider, async (provider, oldProvider) => {
   if (!provider)
@@ -74,13 +78,13 @@ function goToProviderSettings(providerId: string) {
           See also: https://stackoverflow.com/a/33737340
         -->
           <fieldset
-            v-if="persistedChatProvidersMetadata.length > 0"
+            v-if="selectableChatProvidersMetadata.length > 0"
             flex="~ row gap-4"
             min-w-0 of-x-auto scroll-smooth
             role="radiogroup"
           >
             <RadioCardSimple
-              v-for="metadata in persistedChatProvidersMetadata"
+              v-for="metadata in selectableChatProvidersMetadata"
               :id="metadata.id"
               :key="metadata.id"
               v-model="activeProvider"

@@ -12,9 +12,11 @@ import type {
   SetupPluginHostOptions,
 } from '../types'
 
-import { cp, lstat, mkdir, readdir, readFile, rm, symlink } from 'node:fs/promises'
-import { dirname, join, normalize, relative } from 'node:path'
 import process from 'node:process'
+
+import { existsSync } from 'node:fs'
+import { cp, lstat, mkdir, readdir, readFile, rm, symlink } from 'node:fs/promises'
+import { dirname, join, normalize, relative, resolve } from 'node:path'
 
 import { useLogg } from '@guiiai/logg'
 import { PluginHost } from '@proj-airi/plugin-sdk/plugin-host'
@@ -74,8 +76,19 @@ function resolveDefaultPluginsRoot() {
   if (override)
     return override
 
-  if (!app.isPackaged)
+  if (!app.isPackaged) {
+    let current = resolve(process.cwd())
+    for (let depth = 0; depth < 8; depth += 1) {
+      const candidate = join(current, 'external-plugins')
+      if (existsSync(join(current, 'pnpm-workspace.yaml')) && existsSync(candidate))
+        return candidate
+      const parent = dirname(current)
+      if (parent === current)
+        break
+      current = parent
+    }
     return join(process.cwd(), 'external-plugins')
+  }
 
   return join(dirname(app.getPath('exe')), 'plugins', 'v1')
 }

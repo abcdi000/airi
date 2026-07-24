@@ -4,6 +4,7 @@ import type { AiriExtension } from '@proj-airi/stage-ui/stores/modules/airi-card
 
 import kebabcase from '@stdlib/string-base-kebabcase'
 
+import { LUMI_AIRI_CARD_ID } from '@proj-airi/stage-ui/constants/lumi-card'
 import { DEFAULT_ARTISTRY_WIDGET_INSTRUCTION } from '@proj-airi/stage-ui/constants/prompts/artistry-instruction'
 import { useDisplayModelsStore } from '@proj-airi/stage-ui/stores/display-models'
 import { useAiriCardStore } from '@proj-airi/stage-ui/stores/modules/airi-card'
@@ -271,12 +272,6 @@ function saveCard(card: Card): boolean {
     errorMessage.value = t('settings.pages.card.creation.errors.name')
     return false
   }
-  else if (!/^(?:\d+\.)+\d+$/.test(rawCard.version)) {
-    // Invalid version
-    showError.value = true
-    errorMessage.value = t('settings.pages.card.creation.errors.version')
-    return false
-  }
   else if (!((rawCard.description?.length ?? 0) > 0)) {
     // No description
     showError.value = true
@@ -316,7 +311,7 @@ function saveCard(card: Card): boolean {
         throw new Error('Not an object')
       }
     }
-    catch (e) {
+    catch {
       showError.value = true
       errorMessage.value = t('settings.pages.card.creation.errors.invalid_artistry_json')
       return false
@@ -338,17 +333,32 @@ function saveCard(card: Card): boolean {
   }
 
   // Build card with modules extension
+  const existingAiriExtension = rawCard.extensions?.airi as AiriExtension | undefined
   const cardWithModules = {
     ...rawCard,
+    // Character Card V3 requires this metadata, but editing Lumi should not
+    // require users to understand or manually maintain a technical version.
+    version: rawCard.version?.trim() || '1.0.0',
     extensions: {
       ...rawCard.extensions,
       airi: {
+        ...existingAiriExtension,
+        card: props.cardId === LUMI_AIRI_CARD_ID
+          ? {
+              ...existingAiriExtension?.card,
+              customized: true,
+              basedOnVersion: rawCard.version?.trim() || '1.0.0',
+            }
+          : existingAiriExtension?.card,
         modules: {
+          ...existingAiriExtension?.modules,
           consciousness: {
+            ...existingAiriExtension?.modules?.consciousness,
             provider: selectedConsciousnessProvider.value || consciousnessProvider.value,
             model: selectedConsciousnessModel.value || defaultConsciousnessModel.value,
           },
           speech: {
+            ...existingAiriExtension?.modules?.speech,
             provider: selectedSpeechProvider.value || speechProvider.value,
             model: selectedSpeechModel.value || defaultSpeechModel.value,
             voice_id: selectedSpeechVoiceId.value || defaultSpeechVoiceId.value,
@@ -365,7 +375,7 @@ function saveCard(card: Card): boolean {
             autonomousThreshold: selectedArtistryAutonomousThreshold.value,
           },
         },
-        agents: {},
+        agents: existingAiriExtension?.agents ?? {},
       } as AiriExtension,
     },
   }
@@ -478,7 +488,6 @@ const cardGreetings = computed({
   },
 })
 
-const cardVersion = makeComputed('version')
 const cardSystemPrompt = makeComputed('systemPrompt')
 const cardPostHistoryInstructions = makeComputed('postHistoryInstructions')
 
@@ -494,7 +503,17 @@ function getDefaultPlaceholder(defaultValue: string | undefined): string {
   <DialogRoot :open="modelValue" @update:open="emit('update:modelValue', $event)">
     <DialogPortal>
       <DialogOverlay class="fixed inset-0 z-100 bg-black/50 backdrop-blur-sm data-[state=closed]:animate-fadeOut data-[state=open]:animate-fadeIn" />
-      <DialogContent class="fixed left-1/2 top-1/2 z-100 m-0 max-h-[90vh] max-w-6xl w-[92vw] flex flex-col overflow-auto border border-neutral-200 rounded-xl bg-white p-5 shadow-xl 2xl:w-[60vw] lg:w-[80vw] md:w-[85vw] xl:w-[70vw] -translate-x-1/2 -translate-y-1/2 data-[state=closed]:animate-contentHide data-[state=open]:animate-contentShow dark:border-neutral-700 dark:bg-neutral-800 sm:p-6" @interact-outside.prevent>
+      <DialogContent
+        :class="[
+          'fixed left-1/2 top-1/2 z-100 m-0',
+          'max-h-[90vh] w-[min(94vw,960px)] max-w-[960px]',
+          'flex flex-col overflow-y-auto border border-neutral-200 rounded-lg',
+          'bg-white p-5 shadow-xl dark:border-neutral-700 dark:bg-neutral-800 sm:p-7',
+          '-translate-x-1/2 -translate-y-1/2',
+          'data-[state=closed]:animate-contentHide data-[state=open]:animate-contentShow',
+        ]"
+        @interact-outside.prevent
+      >
         <div class="w-full flex flex-col gap-5">
           <DialogTitle text-2xl font-normal class="from-primary-500 to-primary-400 bg-gradient-to-r bg-clip-text text-transparent">
             {{ isEditMode ? t("settings.pages.card.edit_card") : t("settings.pages.card.create_card") }}
@@ -503,7 +522,7 @@ function getDefaultPlaceholder(defaultValue: string | undefined): string {
           <!-- Dialog tabs -->
           <div class="mt-4">
             <div class="border-b border-neutral-200 dark:border-neutral-700">
-              <div class="flex justify-center -mb-px sm:justify-start space-x-1">
+              <div :class="['flex justify-start gap-1 overflow-x-auto -mb-px']">
                 <button
                   v-for="tab in tabs"
                   :key="tab.id"
@@ -525,8 +544,9 @@ function getDefaultPlaceholder(defaultValue: string | undefined): string {
           </div>
 
           <!-- Error div -->
-          <div v-if="showError" class="w-full rounded-xl bg-red900">
-            <p class="w-full p-4">
+          <div v-if="showError" :class="['w-full flex items-start gap-3 rounded-lg bg-red-100 p-4 text-red-800 dark:bg-red-950 dark:text-red-100']">
+            <div :class="['i-solar:danger-triangle-bold mt-0.5 shrink-0 text-lg']" />
+            <p class="min-w-0">
               {{ errorMessage }}
             </p>
           </div>
@@ -649,11 +669,28 @@ function getDefaultPlaceholder(defaultValue: string | undefined): string {
             </div>
           </div>
           <!-- Settings -->
-          <div v-else-if="activeTab === 'settings'" class="tab-content ml-auto mr-auto w-95%">
-            <div class="input-list ml-auto mr-auto w-90% flex flex-row flex-wrap justify-center gap-8">
-              <FieldInput v-model="cardSystemPrompt" :label="t('settings.pages.card.systemprompt')" :single-line="false" :required="true" :description="t('settings.pages.card.creation.fields_info.systemprompt')" />
-              <FieldInput v-model="cardPostHistoryInstructions" :label="t('settings.pages.card.posthistoryinstructions')" :single-line="false" :required="true" :description="t('settings.pages.card.creation.fields_info.posthistoryinstructions')" />
-              <FieldInput v-model="cardVersion" :label="t('settings.pages.card.creation.version')" :required="true" :description="t('settings.pages.card.creation.fields_info.version')" />
+          <div v-else-if="activeTab === 'settings'" :class="['tab-content mx-auto w-full max-w-[820px]']">
+            <div :class="['mb-6 flex items-start gap-3 rounded-lg bg-primary-50 p-4 text-sm text-neutral-700 dark:bg-primary-950/30 dark:text-neutral-200']">
+              <div :class="['i-solar:shield-user-bold-duotone mt-0.5 shrink-0 text-xl text-primary-500']" />
+              <p>{{ t('settings.pages.card.creation.fields_info.persona_editor') }}</p>
+            </div>
+            <div :class="['flex w-full flex-col gap-7']">
+              <FieldInput
+                v-model="cardSystemPrompt"
+                :label="t('settings.pages.card.systemprompt')"
+                :single-line="false"
+                :required="true"
+                :description="t('settings.pages.card.creation.fields_info.systemprompt')"
+                input-class="min-h-64 resize-y px-4 py-3 text-[15px] leading-6"
+              />
+              <FieldInput
+                v-model="cardPostHistoryInstructions"
+                :label="t('settings.pages.card.posthistoryinstructions')"
+                :single-line="false"
+                :required="true"
+                :description="t('settings.pages.card.creation.fields_info.posthistoryinstructions')"
+                input-class="min-h-40 resize-y px-4 py-3 text-[15px] leading-6"
+              />
             </div>
           </div>
           <!-- Artistry -->
@@ -671,7 +708,7 @@ function getDefaultPlaceholder(defaultValue: string | undefined): string {
             :default-artistry-provider-placeholder="getDefaultPlaceholder(defaultArtistryProvider)"
           />
 
-          <div class="ml-auto mr-1 flex flex-row gap-2">
+          <div :class="['ml-auto mr-1 flex flex-row gap-2 pt-2']">
             <Button
               variant="secondary"
               icon="i-solar:undo-left-bold-duotone"
@@ -695,11 +732,12 @@ function getDefaultPlaceholder(defaultValue: string | undefined): string {
 
 <style scoped>
 .input-list > * {
-    min-width: 45%;
-  }
+  flex: 1 1 20rem;
+  min-width: min(100%, 20rem);
+}
 
-  @media (max-width: 641px) {
-  .input-list * {
+@media (max-width: 641px) {
+  .input-list > * {
     min-width: unset;
     width: 100%;
   }

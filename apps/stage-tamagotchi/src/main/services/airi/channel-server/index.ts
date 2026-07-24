@@ -146,7 +146,8 @@ function getServerChannelQrPayload(config: ElectronServerChannelConfig, serverCh
   })
 }
 
-async function getChannelServerConfig(): Promise<ElectronServerChannelConfig> {
+/** Returns the authenticated local channel coordinates for trusted main-process integrations. */
+export async function getChannelServerConfig(): Promise<ElectronServerChannelConfig> {
   const config = channelServerConfigStore.get() || { hostname: '127.0.0.1', authToken: '', tlsConfig: null }
 
   return {

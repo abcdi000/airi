@@ -1,3 +1,5 @@
+import type { AiriExtension } from './airi-card'
+
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -157,6 +159,44 @@ describe('airi-card store', () => {
     expect(lumi?.extensions.airi.modules.consciousness.model).toBe('deepseek-chat')
     expect(lumi?.extensions.airi.modules.speech.voice_id).toBe('voice-local')
     expect(lumi?.extensions.airi.modules.displayModelId).toBe('display-model-user')
+  })
+
+  /**
+   * @example
+   * it('preserves a manually customized Lumi persona across initialization', () => {})
+   */
+  it('preserves a manually customized Lumi persona across initialization', () => {
+    const cardStore = useAiriCardStore()
+
+    cardStore.cards.set('lumi', {
+      name: 'Lumi',
+      version: 'personal-draft',
+      description: 'Doggy customized this card.',
+      personality: 'Keep this exact custom personality.',
+      scenario: 'Custom scenario.',
+      greetings: ['Custom greeting.'],
+      messageExample: [],
+      systemPrompt: 'Keep this exact custom system prompt.',
+      postHistoryInstructions: 'Keep this exact custom guidance.',
+      extensions: {
+        airi: {
+          card: {
+            customized: true,
+            basedOnVersion: '1.0.4-lumi-browser-rhythm',
+          },
+          modules: {} as AiriExtension['modules'],
+          agents: {},
+        },
+      },
+    })
+
+    cardStore.initialize()
+
+    const lumi = cardStore.getCard('lumi')
+    expect(lumi?.version).toBe('personal-draft')
+    expect(lumi?.systemPrompt).toBe('Keep this exact custom system prompt.')
+    expect(lumi?.postHistoryInstructions).toBe('Keep this exact custom guidance.')
+    expect(lumi?.extensions.airi.card?.customized).toBe(true)
   })
 
   it('does not let a stale Lumi speech-noop module wipe the active speech configuration', () => {

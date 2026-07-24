@@ -18,6 +18,18 @@ import { useConsciousnessStore } from './consciousness'
 import { useSpeechStore } from './speech'
 
 export interface AiriExtension {
+  card?: {
+    /**
+     * Prevents built-in persona refreshes from overwriting a card that the
+     * user intentionally edited.
+     *
+     * @default false
+     */
+    customized?: boolean
+    /** Built-in card version from which this customization originated. */
+    basedOnVersion?: string
+  }
+
   modules: {
     consciousness: {
       provider: string // Example: "openai"
@@ -222,6 +234,7 @@ export const useAiriCardStore = defineStore('airi-card', () => {
 
     // Merge existing extension with defaults
     return {
+      card: existingExtension.card,
       modules: {
         consciousness: {
           provider: existingExtension.modules?.consciousness?.provider ?? defaultModules.consciousness.provider,
@@ -309,10 +322,13 @@ export const useAiriCardStore = defineStore('airi-card', () => {
       return
     }
 
+    const existingExtension = resolveAiriExtension(existing)
+    if (existingExtension.card?.customized)
+      return
+
     if (existing.version === latest.version)
       return
 
-    const existingExtension = resolveAiriExtension(existing)
     cards.value.set(LUMI_AIRI_CARD_ID, {
       ...existing,
       name: latest.name,

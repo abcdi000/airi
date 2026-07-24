@@ -1,6 +1,6 @@
 import type { LlmStreamingControlCallManifest } from '@proj-airi/pipelines-audio'
 import type { LumiRoomAckEvent, LumiRoomSyncEvent, WebSocketEventOf } from '@proj-airi/server-sdk'
-import type { ChatProvider } from '@xsai-ext/providers/utils'
+import type { ChatProvider, SpeechProviderWithExtraOptions } from '@xsai-ext/providers/utils'
 import type { UserMessage } from '@xsai/shared-chat'
 
 import type { ChatInteractionContext, ChatStreamEvent, ChatStreamEventContext, ContextMessage } from '../../../types/chat'
@@ -24,11 +24,27 @@ import { useChatSessionStore } from '../../chat/session-store'
 import { useChatStreamStore } from '../../chat/stream-store'
 import { useContextObservabilityStore } from '../../devtools/context-observability'
 import { useLlmStreamingControlStore } from '../../llm-streaming-control'
+import { useLumiEyesStore } from '../../lumi-eyes'
 import { useLumiIdentityStore } from '../../lumi-identity'
 import { useConsciousnessStore } from '../../modules/consciousness'
-import { useHearingSpeechInputPipeline } from '../../modules/hearing'
+import { useHearingSpeechInputPipeline, useHearingStore } from '../../modules/hearing'
+import { useSpeechStore } from '../../modules/speech'
+import { useVisionStore } from '../../modules/vision'
 import { useProvidersStore } from '../../providers'
 import { useModsServerChannelStore } from './channel-server'
+
+type ExternalPerceptionFailureCode = 'vision_unavailable' | 'hearing_unavailable'
+
+class ExternalPerceptionProcessingError extends Error {
+  constructor(
+    readonly code: ExternalPerceptionFailureCode,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'ExternalPerceptionProcessingError'
+  }
+}
 
 export function normalizeContextSnapshot<C extends Pick<ChatStreamEventContext, 'contexts'>>(contexts: C): C {
   return {
@@ -44,6 +60,52 @@ export function normalizeContextSnapshot<C extends Pick<ChatStreamEventContext, 
   }
 }
 
+function decodeExternalMedia(encoded: string, declaredSize: number, maximum: number) {
+  if (!encoded || !Number.isInteger(declaredSize) || declaredSize <= 0 || declaredSize > maximum)
+    throw new Error('External media size is invalid')
+
+  let binary: string
+  try {
+    binary = atob(encoded)
+  }
+  catch {
+    throw new Error('External media is not valid base64')
+  }
+  if (binary.length !== declaredSize || binary.length > maximum)
+    throw new Error('External media size does not match its payload')
+
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index++)
+    bytes[index] = binary.charCodeAt(index)
+  return bytes
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  return btoa(binary)
+}
+
+function detectSpeechMime(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer)
+  if (bytes.length >= 12
+    && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF'
+    && String.fromCharCode(...bytes.subarray(8, 12)) === 'WAVE') {
+    return 'audio/wav'
+  }
+  if (bytes.length >= 4 && String.fromCharCode(...bytes.subarray(0, 4)) === 'OggS')
+    return 'audio/ogg'
+  if (bytes.length >= 3 && String.fromCharCode(...bytes.subarray(0, 3)) === 'ID3')
+    return 'audio/mpeg'
+  if (bytes.length >= 2 && bytes[0] === 0xFF && (bytes[1]! & 0xE0) === 0xE0)
+    return 'audio/mpeg'
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp')
+    return 'audio/mp4'
+  return 'audio/mpeg'
+}
+
 export const useContextBridgeStore = defineStore('mods:api:context-bridge', () => {
   const consumerRegistrationEvents = [
     'input:text',
@@ -51,6 +113,8 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
     'input:voice',
     'lumi:room:sync:request',
     'lumi:room:voice:cancel',
+    'lumi:external:runtime:status:request',
+    'lumi:external:speech:request',
   ] as const
   const mutex = new Mutex()
 
@@ -63,10 +127,23 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
   const lumiIdentityStore = useLumiIdentityStore()
   const characterOrchestratorStore = useCharacterOrchestratorStore()
   const consciousnessStore = useConsciousnessStore()
+  const hearingStore = useHearingStore()
+  const visionStore = useVisionStore()
   const hearingSpeechInputPipeline = useHearingSpeechInputPipeline()
+  const speechStore = useSpeechStore()
   const providersStore = useProvidersStore()
   const { activeProvider, activeModel } = storeToRefs(consciousnessStore)
+  const { configured: hearingConfigured } = storeToRefs(hearingStore)
+  const { configured: visionConfigured } = storeToRefs(visionStore)
+  const {
+    activeSpeechModel,
+    activeSpeechProvider,
+    activeSpeechVoice,
+    activeSpeechVoiceId,
+    ssmlEnabled,
+  } = storeToRefs(speechStore)
   const streamingControl = useLlmStreamingControlStore()
+  const lumiEyes = useLumiEyesStore()
 
   const { post: broadcastContext, data: incomingContext } = useBroadcastChannel<ContextMessage, ContextMessage>({ name: CONTEXT_CHANNEL_NAME })
   const { post: broadcastStreamEvent, data: incomingStreamEvent } = useBroadcastChannel<ChatStreamEvent, ChatStreamEvent>({ name: CHAT_STREAM_CHANNEL_NAME })
@@ -424,9 +501,128 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
   }
 
   function roomOutputRoute(context: ChatStreamEventContext) {
+    if (context.input?.type === 'input:text' && context.input.data.perception)
+      return roomReplyRoute(context.input.metadata?.source?.id)
     if (!context.input?.data.room)
       return undefined
     return roomReplyRoute(context.input.metadata?.source?.id)
+  }
+
+  function sendExternalPerceptionFailure(
+    sourceInstanceId: string | undefined,
+    eventId: string,
+    code: 'invalid_event' | 'vision_unavailable' | 'hearing_unavailable' | 'generation_failed',
+    message: string,
+  ) {
+    const route = roomReplyRoute(sourceInstanceId)
+    if (!route)
+      return
+    serverChannelStore.send({
+      type: 'lumi:external:perception:failed',
+      data: { eventId, code, message },
+      route,
+    })
+  }
+
+  async function buildExternalPerception(
+    perception: NonNullable<WebSocketEventOf<'input:text'>['data']['perception']>,
+    userText: string,
+  ) {
+    if (!perception.eventId.trim() || !perception.segments.length || perception.segments.length > 32)
+      throw new Error('External perception event is invalid')
+
+    const ordered: Array<Record<string, unknown>> = []
+    const displayTextSegments: string[] = []
+    const attachments: Array<{ type: 'image', data: string, mimeType: string }> = []
+    for (const segment of perception.segments) {
+      if (segment.type === 'text') {
+        if (!segment.text.trim())
+          continue
+        ordered.push({ type: 'text', text: segment.text, metadata: segment.metadata ?? {} })
+        displayTextSegments.push(segment.text)
+        continue
+      }
+
+      const maximum = segment.type === 'image' ? 10 * 1024 * 1024 : 25 * 1024 * 1024
+      const bytes = decodeExternalMedia(segment.dataBase64, segment.sizeBytes, maximum)
+      if (segment.type === 'image') {
+        if (!segment.mimeType.toLowerCase().startsWith('image/'))
+          throw new Error('External image media type is invalid')
+        let result: Awaited<ReturnType<typeof lumiEyes.analyzeAttachmentsForChat>>
+        try {
+          result = await lumiEyes.analyzeAttachmentsForChat({
+            attachments: [{
+              type: 'image',
+              data: segment.dataBase64,
+              mimeType: segment.mimeType,
+            }],
+            userMessage: userText,
+            publishContext: false,
+          })
+          if (!result.results.length)
+            throw new Error(result.errors[0] || 'Lumi vision returned no result')
+        }
+        catch (error) {
+          throw new ExternalPerceptionProcessingError(
+            'vision_unavailable',
+            errorMessageFrom(error) ?? 'Lumi vision could not process the image.',
+            { cause: error },
+          )
+        }
+        attachments.push({
+          type: 'image',
+          data: segment.dataBase64,
+          mimeType: segment.mimeType,
+        })
+        ordered.push({
+          type: 'visual_perception',
+          perception: result.results[0],
+          metadata: segment.metadata ?? {},
+        })
+        continue
+      }
+
+      if (!segment.mimeType.toLowerCase().startsWith('audio/')
+        && !['video/webm', 'video/mp4', 'application/ogg'].includes(segment.mimeType.toLowerCase())) {
+        throw new Error('External audio media type is invalid')
+      }
+      let transcript = ''
+      try {
+        const result = await hearingSpeechInputPipeline.transcribeForRecording(
+          new Blob([bytes], { type: segment.mimeType }),
+          { throwOnError: true },
+        )
+        if (!result?.trim())
+          throw new Error('Lumi hearing returned no transcription')
+        transcript = result.trim()
+      }
+      catch (error) {
+        throw new ExternalPerceptionProcessingError(
+          'hearing_unavailable',
+          errorMessageFrom(error) ?? 'Lumi hearing could not process the audio.',
+          { cause: error },
+        )
+      }
+      displayTextSegments.push(transcript.trim())
+      ordered.push({
+        type: 'auditory_perception',
+        transcript: transcript.trim(),
+        duration_ms: segment.durationMs,
+        metadata: segment.metadata ?? {},
+      })
+    }
+
+    if (!ordered.length)
+      throw new Error('External perception event has no usable segments')
+    return {
+      attachments,
+      displayText: displayTextSegments.join('\n').trim(),
+      providerContext: [
+        '[Lumi trusted ordered perception]',
+        JSON.stringify(ordered),
+        '[/Lumi trusted ordered perception]',
+      ].join('\n'),
+    }
   }
 
   function isCredentialBoundRoomActor(
@@ -907,6 +1103,16 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
         } = event.data
         const sourceInstanceId = event.metadata?.source?.id
 
+        if (event.data.perception && (!activeProvider.value || !activeModel.value)) {
+          sendExternalPerceptionFailure(
+            sourceInstanceId,
+            event.data.perception.eventId,
+            'generation_failed',
+            'Lumi has no active local consciousness model configured.',
+          )
+          return
+        }
+
         if (roomDelivery && (!activeProvider.value || !activeModel.value)) {
           await rejectReliableRoomInput(event, 'Lumi has no active consciousness model configured.')
           return
@@ -988,14 +1194,42 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
           }
           catch (err) {
             console.error('[context-bridge] getProviderInstance failed for provider:', activeProvider.value, err)
+            if (event.data.perception) {
+              sendExternalPerceptionFailure(
+                sourceInstanceId,
+                event.data.perception.eventId,
+                'generation_failed',
+                errorMessageFrom(err) ?? 'Lumi could not initialize the active local model provider.',
+              )
+            }
             if (roomDelivery)
               await rejectReliableRoomInput(event, errorMessageFrom(err) ?? 'Lumi could not initialize the active model provider.')
             return
           }
 
           let messageText = text
+          let externalPerception: Awaited<ReturnType<typeof buildExternalPerception>> | undefined
           let targetSessionId = overrides?.sessionId
           let interaction: ChatInteractionContext | undefined
+
+          if (event.data.perception) {
+            try {
+              externalPerception = await buildExternalPerception(event.data.perception, text)
+              messageText = externalPerception.displayText
+            }
+            catch (error) {
+              const reason = errorMessageFrom(error) ?? 'Lumi could not process the external perception event.'
+              sendExternalPerceptionFailure(
+                sourceInstanceId,
+                event.data.perception.eventId,
+                error instanceof ExternalPerceptionProcessingError
+                  ? error.code
+                  : 'invalid_event',
+                reason,
+              )
+              return
+            }
+          }
 
           if (roomDelivery && !event.data.actor) {
             console.warn('[context-bridge] rejected reliable room input without an external actor claim')
@@ -1111,6 +1345,9 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
               await chatOrchestrator.ingest(messageText, {
                 model: activeModel.value,
                 chatProvider,
+                attachments: externalPerception?.attachments,
+                providerUserContext: externalPerception?.providerContext,
+                sendAttachmentsToProvider: externalPerception ? false : undefined,
                 input: {
                   type: 'input:text',
                   data: {
@@ -1130,6 +1367,14 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
             }
             catch (err) {
               console.error('Error ingesting text input via context bridge:', err)
+              if (event.data.perception) {
+                sendExternalPerceptionFailure(
+                  sourceInstanceId,
+                  event.data.perception.eventId,
+                  'generation_failed',
+                  errorMessageFrom(err) ?? 'Lumi local generation failed.',
+                )
+              }
               if (roomDelivery && targetSessionId) {
                 const receipt = await withContextBridgeLock(`lumi-room-ledger:${targetSessionId}`, async () => {
                   return await lumiRoomLedgerRepo.failInput(
@@ -1150,6 +1395,84 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
                 })
               }
             }
+          })
+        }
+      }))
+
+      disposeHookFns.value.push(serverChannelStore.onEvent('lumi:external:runtime:status:request', (event) => {
+        const route = roomReplyRoute(event.metadata?.source?.id)
+        if (!route)
+          return
+        const consciousness = Boolean(activeProvider.value && activeModel.value)
+        serverChannelStore.send({
+          type: 'lumi:external:runtime:status',
+          data: {
+            requestId: event.data.requestId,
+            available: consciousness,
+            consciousness,
+            vision: visionConfigured.value,
+            hearing: hearingConfigured.value,
+            ...(!consciousness
+              ? { detail: 'Lumi local consciousness is not ready. Select and save an active provider and model.' }
+              : {}),
+          },
+          route,
+        })
+      }))
+
+      disposeHookFns.value.push(serverChannelStore.onEvent('lumi:external:speech:request', async (event) => {
+        const route = roomReplyRoute(event.metadata?.source?.id)
+        if (!route)
+          return
+        const requestId = event.data.requestId
+        try {
+          const text = event.data.text.trim()
+          if (!text || text.length > 20_000)
+            throw new Error('Speech text is empty or too long')
+          const providerId = activeSpeechProvider.value
+          if (!providerId || providerId === 'speech-noop')
+            throw new Error('Lumi speech is not configured')
+          const providerConfig = providersStore.getProviderConfig(providerId)
+          const model = activeSpeechModel.value || String(providerConfig?.model || '')
+          if (!model)
+            throw new Error('Lumi speech model is not configured')
+          const provider = await providersStore.getProviderInstance(providerId) as SpeechProviderWithExtraOptions
+          const usesConfiguredVoice = speechStore.usesProviderConfiguredVoice(providerId, model)
+          const voice = usesConfiguredVoice
+            ? providerId === 'alibaba-cloud-model-studio'
+              ? String(providerConfig?.customVoiceId || '')
+              : ''
+            : activeSpeechVoice.value?.id
+              || activeSpeechVoiceId.value
+              || String(providerConfig?.voice || providerConfig?.voiceId || '')
+          if (!usesConfiguredVoice && !voice)
+            throw new Error('Lumi speech voice is not configured')
+          const input = ssmlEnabled.value && activeSpeechVoice.value
+            ? speechStore.generateSSML(text, activeSpeechVoice.value, providerConfig)
+            : text
+          const audio = await speechStore.speech(provider, model, input, voice, providerConfig)
+          if (!audio.byteLength)
+            throw new Error('Lumi speech returned empty audio')
+          serverChannelStore.send({
+            type: 'lumi:external:speech:result',
+            data: {
+              requestId,
+              ok: true,
+              dataBase64: arrayBufferToBase64(audio),
+              mimeType: detectSpeechMime(audio),
+            },
+            route,
+          })
+        }
+        catch (error) {
+          serverChannelStore.send({
+            type: 'lumi:external:speech:result',
+            data: {
+              requestId,
+              ok: false,
+              message: errorMessageFrom(error) ?? 'Lumi speech synthesis failed',
+            },
+            route,
           })
         }
       }))

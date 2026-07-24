@@ -4,6 +4,24 @@ import { dirname, resolve } from 'node:path'
 
 import * as v from 'valibot'
 
+const DOGGY_PERSON_ID = 'lumi-user-00000000-0000-4000-8000-000000000001'
+const MOUSSY_PERSON_ID = 'lumi-user-00000000-0000-4000-8000-000000000002'
+
+function defaultAstrBotIdentityBindings() {
+  return [
+    ...['1770249418', '1931972861', '2986464928'].map(externalUserId => ({
+      platformInstanceId: 'default',
+      externalUserId,
+      personId: DOGGY_PERSON_ID,
+    })),
+    ...['1428755063', '3884583060', '3274405364'].map(externalUserId => ({
+      platformInstanceId: 'default',
+      externalUserId,
+      personId: MOUSSY_PERSON_ID,
+    })),
+  ]
+}
+
 const McpServerSchema = v.object({
   command: v.optional(v.string()),
   url: v.optional(v.pipe(v.string(), v.url())),
@@ -53,6 +71,25 @@ const ServerConfigSchema = v.object({
     language: v.optional(v.string()),
     prompt: v.optional(v.string()),
     maxVoiceBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100 * 1024 * 1024)), 25 * 1024 * 1024),
+  })),
+  vision: v.optional(v.object({
+    enabled: v.optional(v.boolean(), false),
+    baseURL: v.pipe(v.string(), v.url()),
+    apiKey: v.optional(v.string()),
+    model: v.pipe(v.string(), v.nonEmpty()),
+  })),
+  astrbot: v.optional(v.object({
+    enabled: v.optional(v.boolean(), false),
+    apiToken: v.pipe(v.string(), v.minLength(32)),
+    identityBindings: v.optional(v.array(v.object({
+      platformInstanceId: v.pipe(v.string(), v.nonEmpty()),
+      externalUserId: v.pipe(v.string(), v.nonEmpty()),
+      personId: v.pipe(v.string(), v.nonEmpty()),
+    })), []),
+    maxImageBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100 * 1024 * 1024)), 10 * 1024 * 1024),
+    maxAudioBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100 * 1024 * 1024)), 25 * 1024 * 1024),
+    responseTimeoutMs: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(600_000)), 120_000),
+    maxRequestBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_024), v.maxValue(200 * 1024 * 1024)), 50 * 1024 * 1024),
   })),
   mcp: v.optional(v.object({
     mcpServers: v.record(v.string(), McpServerSchema),
@@ -146,6 +183,59 @@ export async function loadLumiServerConfig(path: string): Promise<LumiServerProc
   }
 }
 
+/**
+ * Adds newly required integration defaults to an existing Server config.
+ *
+ * Use when:
+ * - Server Manager opens a config created by an older Lumi version
+ *
+ * Expects:
+ * - A valid JSON object at `path`
+ *
+ * Returns:
+ * - Whether the file was changed
+ */
+export async function upgradeLumiServerConfig(path: string): Promise<boolean> {
+  const configPath = resolve(path)
+  const raw = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>
+  const migrations = (
+    raw._managerMigrations
+    && typeof raw._managerMigrations === 'object'
+    && !Array.isArray(raw._managerMigrations)
+      ? raw._managerMigrations
+      : {}
+  ) as Record<string, unknown>
+  let changed = false
+  if (!raw.astrbot) {
+    raw.astrbot = {
+      enabled: false,
+      apiToken: randomBytes(48).toString('base64url'),
+      identityBindings: defaultAstrBotIdentityBindings(),
+      maxImageBytes: 10 * 1024 * 1024,
+      maxAudioBytes: 25 * 1024 * 1024,
+      responseTimeoutMs: 120_000,
+      maxRequestBytes: 50 * 1024 * 1024,
+    }
+    changed = true
+  }
+  if (!migrations.astrbotIdentityDefaultsV1) {
+    const astrbot = raw.astrbot as Record<string, unknown>
+    if (!Array.isArray(astrbot.identityBindings) || astrbot.identityBindings.length === 0)
+      astrbot.identityBindings = defaultAstrBotIdentityBindings()
+    migrations.astrbotIdentityDefaultsV1 = true
+    raw._managerMigrations = migrations
+    changed = true
+  }
+  if (!changed)
+    return false
+
+  await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  })
+  return true
+}
+
 /** Creates a private starter config without replacing an existing file. */
 export async function initializeLumiServerConfig(path: string): Promise<string> {
   const configPath = resolve(path)
@@ -181,6 +271,21 @@ export async function initializeLumiServerConfig(path: string): Promise<string> 
       model: 'whisper-1',
       language: 'zh',
       maxVoiceBytes: 25 * 1024 * 1024,
+    },
+    vision: {
+      enabled: false,
+      baseURL: 'https://api.openai.com/v1/',
+      apiKey: '',
+      model: 'gpt-4o-mini',
+    },
+    astrbot: {
+      enabled: false,
+      apiToken: randomBytes(48).toString('base64url'),
+      identityBindings: defaultAstrBotIdentityBindings(),
+      maxImageBytes: 10 * 1024 * 1024,
+      maxAudioBytes: 25 * 1024 * 1024,
+      responseTimeoutMs: 120_000,
+      maxRequestBytes: 50 * 1024 * 1024,
     },
     mcp: { mcpServers: {} },
     plugins: { enabled: [], settings: {} },

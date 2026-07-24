@@ -2,7 +2,39 @@ import type { ChatHistoryItem } from '../../../types/chat'
 
 import { describe, expect, it } from 'vitest'
 
-import { getChatHistoryItemKey } from './utils'
+import { getChatHistoryItemCopyText, getChatHistoryItemKey, getUserMessageDisplayText, getUserMessageImageUrls } from './utils'
+
+describe('user message media projection', () => {
+  it('renders an image-only message without exposing its base64 JSON', () => {
+    const imageUrl = 'data:image/png;base64,iVBORw0KGgo='
+    const message = {
+      role: 'user',
+      content: [
+        { type: 'text', text: '' },
+        { type: 'image_url', image_url: { url: imageUrl } },
+      ],
+    } as ChatHistoryItem
+
+    expect(getUserMessageDisplayText(message)).toBe('')
+    expect(getUserMessageImageUrls(message)).toEqual([imageUrl])
+    expect(getChatHistoryItemCopyText(message)).toBe('')
+  })
+
+  it('keeps text and image order projections separate for mixed input', () => {
+    const imageUrl = 'data:image/jpeg;base64,/9j/'
+    const message = {
+      role: 'user',
+      content: [
+        { type: 'text', text: '看看这张图' },
+        { type: 'image_url', image_url: { url: imageUrl } },
+      ],
+    } as ChatHistoryItem
+
+    expect(getUserMessageDisplayText(message)).toBe('看看这张图')
+    expect(getUserMessageImageUrls(message)).toEqual([imageUrl])
+    expect(getChatHistoryItemCopyText(message)).toBe('看看这张图')
+  })
+})
 
 describe('getChatHistoryItemKey', () => {
   it('prefers stable message ids when available', () => {

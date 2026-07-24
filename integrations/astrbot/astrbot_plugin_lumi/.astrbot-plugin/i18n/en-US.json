@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "connection-test": {
+      "title": "Connection Test",
+      "description": "Check Lumi runtime, vision, and hearing readiness"
+    }
+  }
+}

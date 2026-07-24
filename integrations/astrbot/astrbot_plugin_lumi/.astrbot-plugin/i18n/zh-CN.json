@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "connection-test": {
+      "title": "连接测试",
+      "description": "检查 Lumi 运行时、视觉和听觉是否就绪"
+    }
+  }
+}

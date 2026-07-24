@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
-import { filterTranscriptionByConfidence } from './hearing'
+import { filterTranscriptionByConfidence, resolveTranscriptionModel } from './hearing'
+
+describe('resolveTranscriptionModel', () => {
+  it('uses the provider-configured model when the hearing selection is empty', () => {
+    expect(resolveTranscriptionModel('', 'whisper-1', 'openai-compatible-audio-transcription')).toBe('whisper-1')
+  })
+
+  it('prefers the explicit hearing model over the provider fallback', () => {
+    expect(resolveTranscriptionModel('gpt-4o-transcribe', 'whisper-1', 'openai-compatible-audio-transcription')).toBe('gpt-4o-transcribe')
+  })
+})
 
 describe('filterTranscriptionByConfidence', () => {
   const segments = [

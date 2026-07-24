@@ -9,8 +9,8 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
 import { errorMessageFrom } from '@moeru/std'
 import { LumiServerDatabase, LumiServerMcpRegistry, restoreLumiServerBackup, writeLumiServerBackup } from '@proj-airi/lumi-server-runtime'
-import { initializeLumiServerConfig, loadLumiServerConfig } from '@proj-airi/lumi-server/config'
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { initializeLumiServerConfig, loadLumiServerConfig, upgradeLumiServerConfig } from '@proj-airi/lumi-server/config'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 
 import icon from '../../../resources/icon.png?asset'
 
@@ -48,6 +48,15 @@ export interface LumiServerManagerState {
     mcp: Record<string, unknown>
     plugins: { directory?: string, enabled: string[], settings: Record<string, Record<string, unknown>> }
     background: Record<string, unknown>
+    astrbot: {
+      enabled: boolean
+      tokenConfigured: boolean
+      identityBindings: Array<{
+        platformInstanceId: string
+        externalUserId: string
+        personId: string
+      }>
+    }
   }
 }
 
@@ -56,6 +65,7 @@ export async function setupLumiServerManager() {
   const configPath = join(app.getPath('userData'), 'lumi-server.json')
   if (!existsSync(configPath))
     await initializeLumiServerConfig(configPath)
+  await upgradeLumiServerConfig(configPath)
   await importLegacyMcpConfig(configPath)
   await normalizeLegacyMcpRuntimePaths(configPath)
   await ensureServerPluginDefaults(configPath)
@@ -121,6 +131,11 @@ export async function setupLumiServerManager() {
         mcp: config.mcp,
         plugins: { ...config.plugins, settings: config.plugins.settings ?? {} },
         background: config.background,
+        astrbot: {
+          enabled: config.astrbot?.enabled ?? false,
+          tokenConfigured: Boolean(config.astrbot?.apiToken),
+          identityBindings: config.astrbot?.identityBindings ?? [],
+        },
       },
     }
   }
@@ -359,6 +374,13 @@ export async function setupLumiServerManager() {
     assertSender(event.sender.id)
     return cloneIpcValue(await applyConfigPatch(cloneIpcRecord(patch)))
   })
+  ipcMain.handle('lumi-server-manager:astrbot-token:copy', async (event) => {
+    assertSender(event.sender.id)
+    const config = await loadLumiServerConfig(configPath)
+    if (!config.astrbot?.apiToken)
+      throw new Error('AstrBot integration token is unavailable')
+    clipboard.writeText(config.astrbot.apiToken)
+  })
 
   async function applyConfigPatch(patch: Record<string, unknown>) {
     const raw = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, any>
@@ -404,6 +426,22 @@ export async function setupLumiServerManager() {
       background: {
         ...raw.background,
         ...(patch.background && typeof patch.background === 'object' && !Array.isArray(patch.background) ? patch.background : {}),
+      },
+      astrbot: {
+        ...raw.astrbot,
+        ...(typeof patch.astrbotEnabled === 'boolean' ? { enabled: patch.astrbotEnabled } : {}),
+        ...(Array.isArray(patch.astrbotIdentityBindings)
+          ? {
+              identityBindings: patch.astrbotIdentityBindings.filter(binding =>
+                binding
+                && typeof binding === 'object'
+                && !Array.isArray(binding)
+                && typeof binding.platformInstanceId === 'string'
+                && typeof binding.externalUserId === 'string'
+                && typeof binding.personId === 'string',
+              ),
+            }
+          : {}),
       },
       tls: patch.tlsEnabled === false
         ? undefined
@@ -495,8 +533,8 @@ async function importLegacyMcpConfig(configPath: string) {
   const current = raw.mcp?.mcpServers && typeof raw.mcp.mcpServers === 'object'
     ? raw.mcp.mcpServers as Record<string, unknown>
     : {}
-  raw.mcp = { ...(raw.mcp ?? {}), mcpServers: { ...imported, ...current } }
-  raw._managerMigrations = { ...(raw._managerMigrations ?? {}), legacyMcpImported: true }
+  raw.mcp = { ...raw.mcp, mcpServers: { ...imported, ...current } }
+  raw._managerMigrations = { ...raw._managerMigrations, legacyMcpImported: true }
   await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8')
 }
 
@@ -513,7 +551,7 @@ async function normalizeLegacyMcpRuntimePaths(configPath: string) {
 
   for (const server of Object.values(servers)) {
     if (typeof server.command === 'string' && ['node', 'node.exe'].includes(server.command.trim().toLowerCase())) {
-      server.command = '${LUMI_EXEC_PATH}'
+      server.command = '$' + '{LUMI_EXEC_PATH}'
       server.env = {
         ...(server.env && typeof server.env === 'object' && !Array.isArray(server.env) ? server.env : {}),
         ELECTRON_RUN_AS_NODE: '1',
@@ -552,7 +590,7 @@ async function ensureServerPluginDefaults(configPath: string) {
     return
   const pluginsRoot = resolveDefaultPluginsRoot()
   raw.plugins = {
-    ...(raw.plugins ?? {}),
+    ...raw.plugins,
     directory: pluginsRoot,
     enabled: Array.isArray(raw.plugins?.enabled) ? raw.plugins.enabled : ['lumi-diary'],
     settings: raw.plugins?.settings && typeof raw.plugins.settings === 'object' ? raw.plugins.settings : {},

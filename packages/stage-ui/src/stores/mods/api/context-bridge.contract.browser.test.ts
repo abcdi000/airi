@@ -22,14 +22,24 @@ const onReconnectedMock = vi.fn(() => () => {})
 const onContextUpdateMock = vi.fn((callback: HookCallback) => registerHook(contextUpdateHooks, callback))
 const onEventMock = vi.fn((eventName: string, callback: HookCallback) => registerServerEventHook(eventName, callback))
 const getProviderInstanceMock = vi.fn()
+const getProviderConfigMock = vi.fn(() => ({}))
 const recordLifecycleMock = vi.fn()
 const ensureSessionForActorMock = vi.fn()
 const getInteractionContextForActorMock = vi.fn()
 const resolveExternalIdentityMock = vi.fn()
 const transcribeForRecordingMock = vi.fn()
+const analyzeAttachmentsForChatMock = vi.fn()
 
 const activeProviderRef = ref<string | null>(null)
 const activeModelRef = ref<string | null>(null)
+const hearingConfiguredRef = ref(false)
+const visionConfiguredRef = ref(false)
+const activeSpeechProviderRef = ref('speech-noop')
+const activeSpeechModelRef = ref('')
+const activeSpeechVoiceRef = ref<{ id: string } | undefined>(undefined)
+const activeSpeechVoiceIdRef = ref('')
+const ssmlEnabledRef = ref(false)
+const synthesizeSpeechMock = vi.fn()
 
 const beforeComposeHooks: HookCallback[] = []
 const afterComposeHooks: HookCallback[] = []
@@ -253,8 +263,36 @@ vi.mock('../../modules/consciousness', () => ({
 }))
 
 vi.mock('../../modules/hearing', () => ({
+  useHearingStore: () => ({
+    configured: hearingConfiguredRef,
+  }),
   useHearingSpeechInputPipeline: () => ({
     transcribeForRecording: transcribeForRecordingMock,
+  }),
+}))
+
+vi.mock('../../modules/speech', () => ({
+  useSpeechStore: () => ({
+    activeSpeechProvider: activeSpeechProviderRef,
+    activeSpeechModel: activeSpeechModelRef,
+    activeSpeechVoice: activeSpeechVoiceRef,
+    activeSpeechVoiceId: activeSpeechVoiceIdRef,
+    ssmlEnabled: ssmlEnabledRef,
+    generateSSML: vi.fn((text: string) => text),
+    speech: synthesizeSpeechMock,
+    usesProviderConfiguredVoice: vi.fn(() => false),
+  }),
+}))
+
+vi.mock('../../modules/vision', () => ({
+  useVisionStore: () => ({
+    configured: visionConfiguredRef,
+  }),
+}))
+
+vi.mock('../../lumi-eyes', () => ({
+  useLumiEyesStore: () => ({
+    analyzeAttachmentsForChat: analyzeAttachmentsForChatMock,
   }),
 }))
 
@@ -267,7 +305,7 @@ vi.mock('../../lumi-identity', () => ({
 vi.mock('../../providers', () => ({
   useProvidersStore: () => ({
     configuredSpeechProvidersMetadata: [],
-    getProviderConfig: vi.fn(() => ({})),
+    getProviderConfig: getProviderConfigMock,
     getProviderInstance: getProviderInstanceMock,
     getProviderMetadata: vi.fn(() => ({
       capabilities: {},
@@ -303,15 +341,26 @@ describe('context bridge contract', () => {
     onContextUpdateMock.mockClear()
     onEventMock.mockClear()
     getProviderInstanceMock.mockReset()
+    getProviderConfigMock.mockReset()
+    getProviderConfigMock.mockReturnValue({})
     recordLifecycleMock.mockReset()
     ensureSessionForActorMock.mockReset()
     getInteractionContextForActorMock.mockReset()
     resolveExternalIdentityMock.mockReset()
     transcribeForRecordingMock.mockReset()
+    analyzeAttachmentsForChatMock.mockReset()
     chatOrchestratorMock.ingest.mockReset()
 
     activeProviderRef.value = null
     activeModelRef.value = null
+    hearingConfiguredRef.value = false
+    visionConfiguredRef.value = false
+    activeSpeechProviderRef.value = 'speech-noop'
+    activeSpeechModelRef.value = ''
+    activeSpeechVoiceRef.value = undefined
+    activeSpeechVoiceIdRef.value = ''
+    ssmlEnabledRef.value = false
+    synthesizeSpeechMock.mockReset()
     activeSessionIdRef.value = 'session-1'
     currentGeneration = 7
     chatOrchestratorMock.sending = false
@@ -332,6 +381,117 @@ describe('context bridge contract', () => {
 
   afterEach(() => {
     closeTestChannels()
+  })
+
+  /**
+   * @example
+   * The local integration receives renderer-owned readiness rather than a port-only health result.
+   */
+  it('reports local Lumi runtime readiness to the requesting integration', async () => {
+    activeProviderRef.value = 'mock-provider'
+    activeModelRef.value = 'mock-model'
+    hearingConfiguredRef.value = true
+    visionConfiguredRef.value = true
+    const store = useContextBridgeStore()
+    await store.initialize()
+
+    await emitServerEvent('lumi:external:runtime:status:request', {
+      type: 'lumi:external:runtime:status:request',
+      source: 'plugin-module-host',
+      metadata: createMetadata('astrbot', 'local-gateway'),
+      data: {
+        requestId: 'runtime-status-1',
+      },
+    })
+
+    expect(serverSendMock).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'lumi:external:runtime:status',
+      data: {
+        requestId: 'runtime-status-1',
+        available: true,
+        consciousness: true,
+        vision: true,
+        hearing: true,
+      },
+      route: expect.any(Object),
+    }))
+
+    await store.dispose()
+  })
+
+  /**
+   * @example
+   * The local integration gets an actionable not-ready reason before submitting a turn.
+   */
+  it('reports an unavailable local consciousness before its provider is restored', async () => {
+    const store = useContextBridgeStore()
+    await store.initialize()
+
+    await emitServerEvent('lumi:external:runtime:status:request', {
+      type: 'lumi:external:runtime:status:request',
+      source: 'plugin-module-host',
+      metadata: createMetadata('astrbot', 'local-gateway'),
+      data: {
+        requestId: 'runtime-status-2',
+      },
+    })
+
+    expect(serverSendMock).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'lumi:external:runtime:status',
+      data: expect.objectContaining({
+        requestId: 'runtime-status-2',
+        available: false,
+        consciousness: false,
+        detail: expect.stringContaining('not ready'),
+      }),
+    }))
+
+    await store.dispose()
+  })
+
+  /**
+   * @example
+   * AstrBot receives one complete audio payload synthesized with the desktop speech selection.
+   */
+  it('synthesizes a complete external reply with the configured speech module', async () => {
+    activeSpeechProviderRef.value = 'mock-speech'
+    activeSpeechModelRef.value = 'mock-tts'
+    activeSpeechVoiceRef.value = { id: 'lumi-voice' }
+    activeSpeechVoiceIdRef.value = 'lumi-voice'
+    getProviderInstanceMock.mockResolvedValue({})
+    synthesizeSpeechMock.mockResolvedValue(
+      new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0, 87, 65, 86, 69]).buffer,
+    )
+    const store = useContextBridgeStore()
+    await store.initialize()
+
+    await emitServerEvent('lumi:external:speech:request', {
+      type: 'lumi:external:speech:request',
+      source: 'plugin-module-host',
+      metadata: createMetadata('astrbot', 'local-gateway'),
+      data: {
+        requestId: 'speech-1',
+        text: '完整的一条回复',
+      },
+    })
+
+    expect(synthesizeSpeechMock).toHaveBeenCalledWith(
+      {},
+      'mock-tts',
+      '完整的一条回复',
+      'lumi-voice',
+      {},
+    )
+    expect(serverSendMock).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'lumi:external:speech:result',
+      data: expect.objectContaining({
+        requestId: 'speech-1',
+        ok: true,
+        mimeType: 'audio/wav',
+      }),
+    }))
+
+    await store.dispose()
   })
 
   /**
@@ -458,6 +618,186 @@ describe('context bridge contract', () => {
         text: 'input weather',
       }),
     ])
+
+    await store.dispose()
+  })
+
+  /**
+   * @example
+   * AstrBot text, image, and audio segments remain ordered while using local Lumi senses.
+   */
+  it('processes external perception through local vision and hearing before one consciousness turn', async () => {
+    // ROOT CAUSE:
+    //
+    // The server-only bridge could accept media, but the desktop runtime had no path that reused
+    // the renderer-owned Lumi Eyes and hearing modules. Sending media directly to consciousness
+    // would either lose it or create a second, inconsistent perception implementation.
+    //
+    // We fixed this by carrying an ordered perception event over Server Channel and resolving each
+    // media segment with the existing local senses before making exactly one orchestrator call.
+    activeProviderRef.value = 'mock-provider'
+    activeModelRef.value = 'mock-model'
+    getProviderInstanceMock.mockResolvedValue({})
+    resolveExternalIdentityMock.mockReturnValue({ id: 'doggy', displayName: 'Doggy' })
+    ensureSessionForActorMock.mockResolvedValue('lumi-direct:doggy')
+    getInteractionContextForActorMock.mockReturnValue({
+      actorId: 'doggy',
+      actorDisplayName: 'Doggy',
+      conversationId: 'lumi-direct:doggy',
+    })
+    analyzeAttachmentsForChatMock.mockResolvedValue({
+      results: ['画面里是一张游戏截图。'],
+      errors: [],
+    })
+    transcribeForRecordingMock.mockResolvedValue('语音里说：一起玩吧。')
+    const store = useContextBridgeStore()
+    await store.initialize()
+
+    await emitServerEvent('input:text', {
+      type: 'input:text',
+      source: 'plugin-module-host',
+      metadata: createMetadata('astrbot', 'local-gateway'),
+      data: {
+        text: '看看这个',
+        actor: {
+          provider: 'astrbot',
+          providerInstanceId: 'qq-main',
+          externalUserId: '1770249418',
+        },
+        perception: {
+          eventId: 'astrbot:event-1',
+          platform: 'aiocqhttp',
+          conversationId: 'qq:private:1770249418',
+          senderId: '1770249418',
+          senderName: 'Doggy',
+          isPrivate: true,
+          isGroup: false,
+          segments: [
+            { type: 'text', text: '先看图片' },
+            {
+              type: 'image',
+              dataBase64: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+              sizeBytes: 8,
+            },
+            { type: 'text', text: '再听语音' },
+            {
+              type: 'audio',
+              dataBase64: 'UklGRg==',
+              mimeType: 'audio/wav',
+              sizeBytes: 4,
+              durationMs: 1_200,
+            },
+          ],
+        },
+      },
+    })
+
+    expect(analyzeAttachmentsForChatMock).toHaveBeenCalledWith(expect.objectContaining({
+      attachments: [{
+        type: 'image',
+        data: 'iVBORw0KGgo=',
+        mimeType: 'image/png',
+      }],
+      userMessage: '看看这个',
+      publishContext: false,
+    }))
+    expect(transcribeForRecordingMock).toHaveBeenCalledTimes(1)
+    expect(transcribeForRecordingMock).toHaveBeenCalledWith(
+      expect.any(Blob),
+      { throwOnError: true },
+    )
+    expect(ensureSessionForActorMock).toHaveBeenCalledWith('doggy', undefined)
+    expect(chatOrchestratorMock.ingest).toHaveBeenCalledTimes(1)
+    const submittedText = chatOrchestratorMock.ingest.mock.calls[0]?.[0] as string
+    const submittedOptions = chatOrchestratorMock.ingest.mock.calls[0]?.[1]
+    const providerContext = submittedOptions?.providerUserContext as string
+    expect(submittedText).toBe('先看图片\n再听语音\n语音里说：一起玩吧。')
+    expect(providerContext.indexOf('"type":"text","text":"先看图片"')).toBeLessThan(
+      providerContext.indexOf('"type":"visual_perception"'),
+    )
+    expect(providerContext.indexOf('"type":"visual_perception"')).toBeLessThan(
+      providerContext.indexOf('"type":"text","text":"再听语音"'),
+    )
+    expect(providerContext.indexOf('"type":"text","text":"再听语音"')).toBeLessThan(
+      providerContext.indexOf('"type":"auditory_perception"'),
+    )
+    expect(chatOrchestratorMock.ingest).toHaveBeenCalledWith(
+      submittedText,
+      expect.objectContaining({
+        attachments: [{
+          type: 'image',
+          data: 'iVBORw0KGgo=',
+          mimeType: 'image/png',
+        }],
+        interaction: expect.objectContaining({ actorId: 'doggy' }),
+        providerUserContext: providerContext,
+        sendAttachmentsToProvider: false,
+      }),
+      'lumi-direct:doggy',
+    )
+
+    await store.dispose()
+  })
+
+  /**
+   * @example
+   * A provider error without hearing-related words is still reported as a hearing failure.
+   */
+  it('classifies external audio provider failures by processing stage instead of error text', async () => {
+    // ROOT CAUSE:
+    //
+    // The bridge previously inferred the modality from words in the provider error. Errors such as
+    // "model is unavailable" therefore became invalid_event even though audio decoding and routing
+    // had succeeded, hiding the actionable provider detail from the AstrBot plugin.
+    //
+    // We fixed this by assigning a typed failure at the hearing boundary and preserving its cause.
+    activeProviderRef.value = 'mock-provider'
+    activeModelRef.value = 'mock-model'
+    getProviderInstanceMock.mockResolvedValue({})
+    transcribeForRecordingMock.mockRejectedValue(new Error('Model whisper-1 is unavailable for this account'))
+    const store = useContextBridgeStore()
+    await store.initialize()
+
+    await emitServerEvent('input:text', {
+      type: 'input:text',
+      source: 'plugin-module-host',
+      metadata: createMetadata('astrbot', 'local-gateway'),
+      data: {
+        text: '',
+        perception: {
+          eventId: 'astrbot:hearing-provider-error',
+          platform: 'aiocqhttp',
+          conversationId: 'qq:private:1770249418',
+          senderId: '1770249418',
+          senderName: 'Doggy',
+          isPrivate: true,
+          isGroup: false,
+          segments: [{
+            type: 'audio',
+            dataBase64: 'UklGRg==',
+            mimeType: 'audio/wav',
+            sizeBytes: 4,
+          }],
+        },
+      },
+    })
+
+    expect(serverSendMock).toHaveBeenCalledWith({
+      type: 'lumi:external:perception:failed',
+      data: {
+        eventId: 'astrbot:hearing-provider-error',
+        code: 'hearing_unavailable',
+        message: 'Model whisper-1 is unavailable for this account',
+      },
+      route: {
+        destinations: [{
+          type: 'instance',
+          instances: ['local-gateway'],
+        }],
+      },
+    })
+    expect(chatOrchestratorMock.ingest).not.toHaveBeenCalled()
 
     await store.dispose()
   })

@@ -287,6 +287,86 @@ export class LumiServerDatabase {
     `).run(normalizedAuthUserId, normalizedPersonId, Date.now())
   }
 
+  /** Binds a platform identity to an existing server-owned Lumi person. */
+  bindExternalIdentity(input: {
+    provider: string
+    providerInstanceId: string
+    externalUserId: string
+    personId: string
+  }) {
+    const provider = requiredText(input.provider, 'external identity provider', 80)
+    const providerInstanceId = requiredText(input.providerInstanceId, 'provider instance id', 160)
+    const externalUserId = requiredText(input.externalUserId, 'external user id', 240)
+    const personId = requiredText(input.personId, 'person id', 160)
+    this.assertPerson(personId)
+    const existing = this.row(`
+      SELECT person_id FROM lumi_external_identities
+      WHERE provider = ? AND provider_instance_id = ? AND external_user_id = ?
+    `, provider, providerInstanceId, externalUserId)
+    if (existing && existing.person_id !== personId)
+      throw new Error('External identity is already bound to another Lumi person')
+    const now = Date.now()
+    this.database.prepare(`
+      INSERT OR IGNORE INTO lumi_external_identities (
+        id, person_id, provider, provider_instance_id, external_user_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      `lumi-external:${digest(`${provider}:${providerInstanceId}:${externalUserId}`)}`,
+      personId,
+      provider,
+      providerInstanceId,
+      externalUserId,
+      now,
+    )
+    return this.personForExternalIdentity({ provider, providerInstanceId, externalUserId })!
+  }
+
+  /** Resolves an untrusted platform identity through the authoritative binding table. */
+  personForExternalIdentity(input: {
+    provider: string
+    providerInstanceId: string
+    externalUserId: string
+  }): LumiOnlinePerson | undefined {
+    const row = this.row(`
+      SELECT p.id, p.display_name, p.role
+      FROM lumi_external_identities e
+      JOIN lumi_people p ON p.id = e.person_id
+      WHERE e.provider = ? AND e.provider_instance_id = ?
+        AND e.external_user_id = ? AND p.status = 'active'
+    `, requiredText(input.provider, 'external identity provider', 80), requiredText(input.providerInstanceId, 'provider instance id', 160), requiredText(input.externalUserId, 'external user id', 240))
+    return row ? personFromRow(row) : undefined
+  }
+
+  /**
+   * Resolves the canonical timeline for one authenticated external event.
+   *
+   * Direct messages reuse the person's existing direct Lumi timeline across
+   * platforms. Group timelines are isolated by platform instance and group id.
+   */
+  ensureExternalConversation(input: {
+    personId: string
+    provider: string
+    providerInstanceId: string
+    externalConversationId: string
+    groupId?: string
+  }): LumiOnlineConversation {
+    const personId = requiredText(input.personId, 'person id', 160)
+    this.assertPerson(personId)
+    const now = Date.now()
+    if (!input.groupId) {
+      const conversationId = `lumi-direct:${personId}`
+      this.ensureConversation(conversationId, 'direct', `${personId} and Lumi`, [personId], now)
+      return this.listConversations(personId).find(item => item.id === conversationId)!
+    }
+    const provider = requiredText(input.provider, 'external identity provider', 80)
+    const providerInstanceId = requiredText(input.providerInstanceId, 'provider instance id', 160)
+    const groupId = requiredText(input.groupId, 'external group id', 240)
+    requiredText(input.externalConversationId, 'external conversation id', 500)
+    const conversationId = `lumi-group:external:${digest(`${provider}:${providerInstanceId}:${groupId}`)}`
+    this.ensureConversation(conversationId, 'group', `AstrBot ${provider} group ${groupId}`, [personId], now)
+    return this.listConversations(personId).find(item => item.id === conversationId)!
+  }
+
   listPeople(): LumiOnlinePerson[] {
     return this.rows(`
       SELECT id, display_name, role

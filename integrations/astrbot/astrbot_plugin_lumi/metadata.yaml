@@ -1,0 +1,27 @@
+name: astrbot_plugin_lumi
+display_name: Lumi
+desc: Bridges AstrBot platform events to Lumi as the single consciousness and reply author.
+short_desc: Connect QQ, KOOK, and other AstrBot platforms to Lumi.
+author: Lumi contributors
+version: 0.1.13
+astrbot_version: '>=4.26,<5'
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - qq_official_webhook
+  - kook
+  - telegram
+  - discord
+  - slack
+  - vocechat
+  - lark
+  - dingtalk
+  - wecom
+  - wecom_ai_bot
+  - weixin_official_account
+  - weixin_oc
+  - satori
+  - misskey
+  - line
+  - matrix
+  - mattermost

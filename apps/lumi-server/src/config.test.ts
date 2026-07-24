@@ -1,10 +1,10 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { initializeLumiServerConfig, loadLumiServerConfig } from './config'
+import { initializeLumiServerConfig, loadLumiServerConfig, upgradeLumiServerConfig } from './config'
 
 describe('lumi Server process configuration', () => {
   it('creates one private config and resolves its data directory', async () => {
@@ -17,6 +17,43 @@ describe('lumi Server process configuration', () => {
       expect(config.dataDirectory).toBe(join(directory, 'config', 'data'))
       expect(JSON.parse(await readFile(path, 'utf8'))).not.toHaveProperty('airiAccount')
       await expect(initializeLumiServerConfig(path)).rejects.toMatchObject({ code: 'EEXIST' })
+    }
+    finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('adds an AstrBot token to a config created before the integration existed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lumi-server-config-upgrade-'))
+    const path = join(directory, 'server.json')
+    try {
+      await initializeLumiServerConfig(path)
+      const legacy = JSON.parse(await readFile(path, 'utf8'))
+      delete legacy.astrbot
+      await writeFile(path, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8')
+
+      await expect(upgradeLumiServerConfig(path)).resolves.toBe(true)
+      await expect(upgradeLumiServerConfig(path)).resolves.toBe(false)
+
+      const upgraded = JSON.parse(await readFile(path, 'utf8'))
+      expect(upgraded.astrbot.enabled).toBe(false)
+      expect(upgraded.astrbot.apiToken.length).toBeGreaterThanOrEqual(32)
+      expect(upgraded.astrbot.identityBindings).toHaveLength(6)
+      expect(upgraded.astrbot.identityBindings).toEqual(expect.arrayContaining([
+        {
+          platformInstanceId: 'default',
+          externalUserId: '1770249418',
+          personId: 'lumi-user-00000000-0000-4000-8000-000000000001',
+        },
+        {
+          platformInstanceId: 'default',
+          externalUserId: '1428755063',
+          personId: 'lumi-user-00000000-0000-4000-8000-000000000002',
+        },
+      ]))
+      await expect(loadLumiServerConfig(path)).resolves.toMatchObject({
+        astrbot: { enabled: false },
+      })
     }
     finally {
       await rm(directory, { recursive: true, force: true })

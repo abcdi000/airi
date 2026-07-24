@@ -78,6 +78,31 @@ export const electronLumiOnlineGenerationPushed = defineEventa<LumiGenerationPus
 export const electronLumiOnlinePresencePushed = defineEventa<LumiPresencePushed>('eventa:event:electron:lumi-online:presence')
 export const electronLumiOnlineAccessRevoked = defineEventa<LumiAccessRevokedPushed>('eventa:event:electron:lumi-online:access-revoked')
 
+export interface ElectronLumiAstrBotIdentityBinding {
+  platformInstanceId: string
+  externalUserId: string
+  personId: string
+}
+
+export interface ElectronLumiAstrBotGatewayConfig {
+  enabled: boolean
+  port: number
+  apiToken: string
+  identityBindings: ElectronLumiAstrBotIdentityBinding[]
+}
+
+export interface ElectronLumiAstrBotGatewayState {
+  config: ElectronLumiAstrBotGatewayConfig
+  running: boolean
+  endpoint: string
+  runtimeMode: 'offline-client' | 'online-client'
+  lastError?: string
+}
+
+export const electronLumiAstrBotGatewayGetState = defineInvokeEventa<ElectronLumiAstrBotGatewayState>('eventa:invoke:electron:lumi-astrbot-gateway:state')
+export const electronLumiAstrBotGatewayUpdateConfig = defineInvokeEventa<ElectronLumiAstrBotGatewayState, ElectronLumiAstrBotGatewayConfig>('eventa:invoke:electron:lumi-astrbot-gateway:config:update')
+export const electronLumiAstrBotGatewayRotateToken = defineInvokeEventa<ElectronLumiAstrBotGatewayState>('eventa:invoke:electron:lumi-astrbot-gateway:token:rotate')
+
 export interface ElectronWindowBounds {
   x: number
   y: number

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lumi 连接测试</title>
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div>
+          <p class="eyebrow">ASTRBOT × LUMI</p>
+          <h1>连接测试</h1>
+          <p class="summary">检查当前插件配置能否连接 Lumi，并确认本地意识与感官是否就绪。</p>
+        </div>
+        <span id="status-lamp" class="status-lamp" aria-label="尚未测试"></span>
+      </header>
+
+      <section class="status-panel" aria-live="polite">
+        <div class="status-copy">
+          <strong id="status-title">尚未测试</strong>
+          <span id="status-detail">点击下方按钮检查连接。</span>
+        </div>
+        <button id="test-button" type="button">
+          <span class="button-icon" aria-hidden="true">↻</span>
+          测试连接
+        </button>
+      </section>
+
+      <dl class="details">
+        <div>
+          <dt>运行目标</dt>
+          <dd id="target">-</dd>
+        </div>
+        <div>
+          <dt>接入地址</dt>
+          <dd id="endpoint">-</dd>
+        </div>
+        <div>
+          <dt>集成令牌</dt>
+          <dd id="token">-</dd>
+        </div>
+        <div>
+          <dt>运行版本</dt>
+          <dd id="version">-</dd>
+        </div>
+        <div>
+          <dt>视觉</dt>
+          <dd id="vision">-</dd>
+        </div>
+        <div>
+          <dt>听觉</dt>
+          <dd id="hearing">-</dd>
+        </div>
+      </dl>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

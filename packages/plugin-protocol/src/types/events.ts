@@ -531,6 +531,77 @@ export interface InputActorIdentity {
   externalUserId: string
 }
 
+/** One platform-independent segment supplied by a trusted local integration. */
+export type LumiExternalPerceptionSegment
+  = | {
+    type: 'text'
+    text: string
+    metadata?: Record<string, unknown>
+  }
+  | {
+    type: 'image'
+    dataBase64: string
+    mimeType: string
+    sizeBytes: number
+    metadata?: Record<string, unknown>
+  }
+  | {
+    type: 'audio'
+    dataBase64: string
+    mimeType: string
+    sizeBytes: number
+    durationMs?: number
+    metadata?: Record<string, unknown>
+  }
+
+/**
+ * Ordered multimodal input that Lumi's own local senses must interpret.
+ *
+ * The transport is trusted to resolve media bytes, but must not describe images
+ * or transcribe audio before handing the event to Lumi.
+ */
+export interface LumiExternalPerception {
+  eventId: string
+  segments: LumiExternalPerceptionSegment[]
+}
+
+/** Correlated failure returned when the local Lumi senses reject an external event. */
+export interface LumiExternalPerceptionFailedEvent {
+  eventId: string
+  code: 'invalid_event' | 'vision_unavailable' | 'hearing_unavailable' | 'generation_failed'
+  message: string
+}
+
+/** Correlated request for the renderer-owned local Lumi runtime readiness. */
+export interface LumiExternalRuntimeStatusRequestEvent {
+  requestId: string
+}
+
+/** Renderer-owned readiness returned to a trusted local integration. */
+export interface LumiExternalRuntimeStatusEvent {
+  requestId: string
+  available: boolean
+  consciousness: boolean
+  vision: boolean
+  hearing: boolean
+  detail?: string
+}
+
+/** Requests one complete utterance from the renderer-owned speech module. */
+export interface LumiExternalSpeechRequestEvent {
+  requestId: string
+  text: string
+}
+
+/** Correlated complete audio returned to a trusted local integration. */
+export interface LumiExternalSpeechResultEvent {
+  requestId: string
+  ok: boolean
+  dataBase64?: string
+  mimeType?: string
+  message?: string
+}
+
 /** Server-authenticated connection identity that clients cannot self-assert in event metadata. */
 export interface ConnectionAuthIdentity {
   /** Stable server-owned credential subject, such as a device identifier. */
@@ -612,6 +683,8 @@ export interface WebSocketEventInputTextBase {
   textRaw?: string
   overrides?: InputMessageOverrides
   contextUpdates?: InputContextUpdate[]
+  /** Optional ordered media processed by the host's configured vision and hearing modules. */
+  perception?: LumiExternalPerception
   /** Optional remote actor claim. The host must reject unknown mappings. */
   actor?: InputActorIdentity
   /** Optional reliable room delivery metadata. Requires an external actor claim. */
@@ -1259,6 +1332,27 @@ export const lumiRoomVoiceCancel = defineProtocolEventa<LumiRoomVoiceCancelEvent
 export const lumiRoomAck = defineProtocolEventa<LumiRoomAckEvent>('lumi:room:ack')
 export const lumiRoomSync = defineProtocolEventa<LumiRoomSyncEvent>('lumi:room:sync')
 export const lumiRoomAccessRevoked = defineProtocolEventa<LumiRoomAccessRevokedEvent>('lumi:room:access-revoked')
+export const lumiExternalPerceptionFailed = defineProtocolEventa<LumiExternalPerceptionFailedEvent>('lumi:external:perception:failed')
+export const lumiExternalRuntimeStatusRequest = defineProtocolEventa<LumiExternalRuntimeStatusRequestEvent>('lumi:external:runtime:status:request', {
+  metadata: {
+    delivery: {
+      mode: 'consumer-group',
+      group: 'chat-ingestion',
+      selection: 'first',
+    },
+  },
+})
+export const lumiExternalRuntimeStatus = defineProtocolEventa<LumiExternalRuntimeStatusEvent>('lumi:external:runtime:status')
+export const lumiExternalSpeechRequest = defineProtocolEventa<LumiExternalSpeechRequestEvent>('lumi:external:speech:request', {
+  metadata: {
+    delivery: {
+      mode: 'consumer-group',
+      group: 'chat-ingestion',
+      selection: 'first',
+    },
+  },
+})
+export const lumiExternalSpeechResult = defineProtocolEventa<LumiExternalSpeechResultEvent>('lumi:external:speech:result')
 
 export const outputGenAiChatToolCall = defineProtocolEventa<OutputGenAiChatToolCallEvent>('output:gen-ai:chat:tool-call')
 export const outputGenAiChatMessage = defineProtocolEventa<OutputGenAiChatMessageEvent>('output:gen-ai:chat:message')
@@ -1277,6 +1371,8 @@ export const protocolEventMetadataByType = {
   [inputVoice.id]: inputVoice.metadata,
   [lumiRoomSyncRequest.id]: lumiRoomSyncRequest.metadata,
   [lumiRoomVoiceCancel.id]: lumiRoomVoiceCancel.metadata,
+  [lumiExternalRuntimeStatusRequest.id]: lumiExternalRuntimeStatusRequest.metadata,
+  [lumiExternalSpeechRequest.id]: lumiExternalSpeechRequest.metadata,
 } satisfies Partial<Record<keyof ProtocolEvents, ProtocolEventaMetadata | undefined>>
 
 export function getProtocolEventMetadata(eventType: keyof ProtocolEvents | string) {
@@ -1437,6 +1533,11 @@ export interface ProtocolEvents<C = undefined> {
   'lumi:room:ack': LumiRoomAckEvent
   'lumi:room:sync': LumiRoomSyncEvent
   'lumi:room:access-revoked': LumiRoomAccessRevokedEvent
+  'lumi:external:perception:failed': LumiExternalPerceptionFailedEvent
+  'lumi:external:runtime:status:request': LumiExternalRuntimeStatusRequestEvent
+  'lumi:external:runtime:status': LumiExternalRuntimeStatusEvent
+  'lumi:external:speech:request': LumiExternalSpeechRequestEvent
+  'lumi:external:speech:result': LumiExternalSpeechResultEvent
 
   'output:gen-ai:chat:tool-call': OutputGenAiChatToolCallEvent
   'output:gen-ai:chat:message': OutputGenAiChatMessageEvent

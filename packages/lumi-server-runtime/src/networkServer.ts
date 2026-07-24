@@ -1,9 +1,13 @@
 import type { Hooks as CrossWebSocketHooks } from 'crossws'
 import type { WebSocketMessage, WebSocketPeer } from 'h3'
 
+import type { LumiVisionAnalyzer } from './astrbotIntegration'
 import type { LumiManagerApiOptions } from './managerApi'
 import type { LumiReplyContext, LumiReplyGenerator } from './onlineServer'
 import type { LumiVoiceTranscriber } from './transcription'
+
+import { Buffer } from 'node:buffer'
+import { timingSafeEqual } from 'node:crypto'
 
 import { defineInvokeHandler } from '@moeru/eventa'
 import { createPeerContext } from '@moeru/eventa/adapters/websocket/h3'
@@ -20,6 +24,10 @@ import {
 import { plugin as websocketPlugin } from 'crossws/server'
 import { defineWebSocketHandler, H3, serve } from 'h3'
 
+import {
+  LumiAstrBotIntegration,
+  LumiAstrBotIntegrationError,
+} from './astrbotIntegration'
 import { createLumiAuthentication } from './auth'
 import { LumiServerDatabase } from './database'
 import { createLumiManagerApi } from './managerApi'
@@ -48,6 +56,24 @@ export interface LumiNetworkServerOptions {
   voiceTranscriber?: LumiVoiceTranscriber
   /** @default 26214400 */
   maxVoiceBytes?: number
+  /** Optional trusted AstrBot event bridge. */
+  astrbot?: {
+    apiToken: string
+    identityBindings: Array<{
+      platformInstanceId: string
+      externalUserId: string
+      personId: string
+    }>
+    visionAnalyzer?: LumiVisionAnalyzer
+    /** @default 10485760 */
+    maxImageBytes?: number
+    /** @default 26214400 */
+    maxAudioBytes?: number
+    /** @default 120000 */
+    responseTimeoutMs?: number
+    /** Maximum base64 JSON request size. @default 52428800 */
+    maxRequestBytes?: number
+  }
   /** Reports an accepted turn that failed during asynchronous generation. */
   onGenerationError?: (error: Error, context: LumiReplyContext) => void
   /** TLS certificate contents for direct public listening. */
@@ -124,6 +150,18 @@ export async function createLumiNetworkServer(options: LumiNetworkServerOptions)
     maxVoiceBytes: options.maxVoiceBytes,
     onGenerationError: options.onGenerationError,
   })
+  const astrbotIntegration = options.astrbot
+    ? new LumiAstrBotIntegration({
+        database,
+        onlineServer,
+        identityBindings: options.astrbot.identityBindings,
+        visionAnalyzer: options.astrbot.visionAnalyzer,
+        voiceTranscriber: options.voiceTranscriber,
+        maxImageBytes: options.astrbot.maxImageBytes,
+        maxAudioBytes: options.astrbot.maxAudioBytes,
+        responseTimeoutMs: options.astrbot.responseTimeoutMs,
+      })
+    : undefined
   const managerApi = options.manager
     ? createLumiManagerApi({
         database,
@@ -162,6 +200,32 @@ export async function createLumiNetworkServer(options: LumiNetworkServerOptions)
   }
 
   app.get('/health', () => ({ status: 'ok', role: 'server-runtime' }))
+  app.get('/api/lumi/integrations/astrbot/health', (event) => {
+    if (!astrbotIntegration)
+      return Response.json({ error: 'AstrBot integration is disabled' }, { status: 404 })
+    if (!hasIntegrationToken(event.req.headers, options.astrbot!.apiToken))
+      return Response.json({ error: 'Authentication required' }, { status: 401 })
+    return astrbotIntegration.health(options.serverVersion)
+  })
+  app.post('/api/lumi/integrations/astrbot/perceive', async (event) => {
+    if (!astrbotIntegration)
+      return Response.json({ error: 'AstrBot integration is disabled' }, { status: 404 })
+    if (!hasIntegrationToken(event.req.headers, options.astrbot!.apiToken))
+      return Response.json({ error: 'Authentication required' }, { status: 401 })
+    const maximum = options.astrbot!.maxRequestBytes ?? 50 * 1024 * 1024
+    const contentLength = Number(event.req.headers.get('content-length') ?? 0)
+    if (!Number.isFinite(contentLength) || contentLength <= 0 || contentLength > maximum)
+      return Response.json({ error: 'AstrBot perception request size is invalid' }, { status: 413 })
+    try {
+      const body = await event.req.json()
+      return await astrbotIntegration.perceiveAndRespond(body)
+    }
+    catch (error) {
+      if (error instanceof LumiAstrBotIntegrationError)
+        return Response.json({ error: error.message, code: error.code }, { status: integrationErrorStatus(error.code) })
+      return Response.json({ error: 'Lumi failed to process the AstrBot event' }, { status: 500 })
+    }
+  })
   app.get('/api/lumi/devices', async (event) => {
     const session = await authentication.sessionFromHeaders(event.req.headers)
     if (!session)
@@ -473,4 +537,29 @@ function toEventaMessage(message: WebSocketMessage): Parameters<ReturnType<typeo
   // documented in {@link toEventaPeer}. Both values come from the same H3 adapter.
   // Removal condition: Eventa imports CrossWS's public Message type instead of bundling it.
   return message as unknown as Parameters<ReturnType<typeof createPeerContext>['hooks']['message']>[1]
+}
+
+function hasIntegrationToken(headers: Headers, expected: string) {
+  const configured = expected.trim()
+  const authorization = headers.get('authorization') ?? ''
+  const supplied = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : ''
+  if (configured.length < 32 || !supplied)
+    return false
+  const left = Buffer.from(configured)
+  const right = Buffer.from(supplied)
+  return left.length === right.length && timingSafeEqual(left, right)
+}
+
+function integrationErrorStatus(code: LumiAstrBotIntegrationError['code']) {
+  if (code === 'identity_unbound')
+    return 403
+  if (code === 'vision_unavailable' || code === 'hearing_unavailable')
+    return 424
+  if (code === 'media_too_large')
+    return 413
+  if (code === 'generation_timeout')
+    return 504
+  if (code === 'generation_failed')
+    return 502
+  return 400
 }

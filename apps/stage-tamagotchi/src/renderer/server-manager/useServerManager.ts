@@ -153,6 +153,8 @@ function createContext() {
     tlsCertPath: '',
     tlsKeyPath: '',
     tlsPassphrase: '',
+    astrbotEnabled: false,
+    astrbotBindingsText: '',
   })
   let initialized = false
   let pollTimer: ReturnType<typeof setInterval> | undefined
@@ -203,6 +205,10 @@ function createContext() {
         tlsEnabled: next.config.tls.enabled,
         tlsCertPath: next.config.tls.certPath ?? '',
         tlsKeyPath: next.config.tls.keyPath ?? '',
+        astrbotEnabled: next.config.astrbot.enabled,
+        astrbotBindingsText: next.config.astrbot.identityBindings
+          .map(binding => `${binding.platformInstanceId} | ${binding.externalUserId} | ${binding.personId}`)
+          .join('\n'),
       })
       mcpDrafts.value = Object.entries(next.config.mcp.mcpServers ?? {}).map(([name, config]) => createMcpDraft(name, config))
       selectedMcpId.value = mcpDrafts.value[0]?.id ?? ''
@@ -356,6 +362,40 @@ function createContext() {
       transcriptionPrompt: configDraft.transcriptionPrompt,
       transcriptionMaxVoiceBytes: Math.round(configDraft.transcriptionMaxVoiceMB * 1024 * 1024),
     }, '语音识别配置已保存并应用')
+  }
+
+  function saveNetwork() {
+    const astrbotIdentityBindings = lines(configDraft.astrbotBindingsText).map((line) => {
+      const [platformInstanceId, externalUserId, personId, ...extra] = line
+        .split('|')
+        .map(value => value.trim())
+      if (!platformInstanceId || !externalUserId || !personId || extra.length)
+        throw new Error('AstrBot 身份绑定必须使用：平台实例 ID | 平台用户 ID | Lumi 人物 ID')
+      return { platformInstanceId, externalUserId, personId }
+    })
+    return applyConfig({
+      publicBaseURL: configDraft.publicBaseURL,
+      hostname: configDraft.hostname,
+      port: Number(configDraft.port),
+      trustedOrigins: lines(configDraft.trustedOriginsText),
+      tlsEnabled: configDraft.tlsEnabled,
+      tls: configDraft.tlsEnabled
+        ? {
+            certPath: configDraft.tlsCertPath,
+            keyPath: configDraft.tlsKeyPath,
+            ...(configDraft.tlsPassphrase ? { passphrase: configDraft.tlsPassphrase } : {}),
+          }
+        : undefined,
+      astrbotEnabled: configDraft.astrbotEnabled,
+      astrbotIdentityBindings,
+    }, '网络、TLS 与 AstrBot 接入配置已保存并应用')
+  }
+
+  function copyAstrBotToken() {
+    return run(
+      () => invoke('lumi-server-manager:astrbot-token:copy'),
+      'AstrBot 集成令牌已复制到剪贴板',
+    )
   }
 
   function selectTranscriptionProvider(id: string) {
@@ -512,7 +552,7 @@ function createContext() {
         directory: pluginDirectory.value,
         enabled: state.value?.config.plugins.enabled ?? [],
         settings: {
-          ...(state.value?.config.plugins.settings ?? {}),
+          ...state.value?.config.plugins.settings,
           'lumi-diary': { diaryDir: configDraft.diaryDirectory.trim() },
         },
       },
@@ -571,6 +611,8 @@ function createContext() {
     fetchBalance,
     saveConsciousness,
     saveTranscription,
+    saveNetwork,
+    copyAstrBotToken,
     selectTranscriptionProvider,
     testTranscription,
     addMcpPreset,

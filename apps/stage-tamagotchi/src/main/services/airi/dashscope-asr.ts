@@ -1,12 +1,13 @@
 import type { createContext } from '@moeru/eventa/adapters/electron/main'
 import type { DashScopeAsrClientEvent, DashScopeAsrServerEvent, DashScopeAsrStartPayload } from '@proj-airi/stage-shared'
 
-import { defineInvokeHandler } from '@moeru/eventa'
-import { electronDashScopeAsrClientEvent, electronDashScopeAsrServerEvent, electronDashScopeAsrStart } from '@proj-airi/stage-shared'
 import { existsSync, readdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, parse } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { defineInvokeHandler } from '@moeru/eventa'
+import { electronDashScopeAsrClientEvent, electronDashScopeAsrServerEvent, electronDashScopeAsrStart } from '@proj-airi/stage-shared'
 
 interface NodeWebSocket {
   readonly readyState: number
@@ -80,6 +81,8 @@ interface DashScopeAsrSession {
   ws: NodeWebSocket
   started: boolean
   pendingAudio: Uint8Array[]
+  finishRequested: boolean
+  finishSent: boolean
   closed: boolean
 }
 
@@ -88,8 +91,26 @@ type EventaContext = ReturnType<typeof createContext>['context']
 const DEFAULT_BASE_URL = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
 const DEFAULT_SAMPLE_RATE = 16000
 
-export function createDashScopeAsrService(params: { context: EventaContext }) {
+/**
+ * Owns DashScope realtime ASR WebSocket sessions for an Electron window.
+ *
+ * Use when:
+ * - Wiring renderer audio streams to DashScope through Electron main
+ * - Ensuring short file recordings retain their finish request during startup
+ *
+ * Expects:
+ * - One service instance per Eventa context
+ * - Ordered client events for each session ID
+ *
+ * Returns:
+ * - A lifecycle handle that closes every active ASR session
+ */
+export function createDashScopeAsrService(params: {
+  context: EventaContext
+  webSocketImpl?: NodeWebSocketConstructor
+}) {
   const sessions = new Map<string, DashScopeAsrSession>()
+  const WebSocketRuntime = params.webSocketImpl ?? WebSocket
 
   const emit = (event: DashScopeAsrServerEvent) => {
     params.context.emit(electronDashScopeAsrServerEvent, event)
@@ -104,16 +125,18 @@ export function createDashScopeAsrService(params: { context: EventaContext }) {
     sessions.delete(sessionId)
 
     try {
-      if (session.ws.readyState === WebSocket.OPEN || session.ws.readyState === WebSocket.CONNECTING)
+      if (session.ws.readyState === WebSocketRuntime.OPEN || session.ws.readyState === WebSocketRuntime.CONNECTING)
         session.ws.close(1000, reason || 'client closed')
     }
     catch {}
   }
 
   function sendFinish(session: DashScopeAsrSession) {
-    if (session.ws.readyState !== WebSocket.OPEN)
+    session.finishRequested = true
+    if (!session.started || session.ws.readyState !== WebSocketRuntime.OPEN || session.finishSent)
       return
 
+    session.finishSent = true
     session.ws.send(JSON.stringify({
       header: {
         action: 'finish-task',
@@ -127,7 +150,7 @@ export function createDashScopeAsrService(params: { context: EventaContext }) {
   }
 
   function flushPendingAudio(session: DashScopeAsrSession) {
-    if (!session.started || session.ws.readyState !== WebSocket.OPEN)
+    if (!session.started || session.ws.readyState !== WebSocketRuntime.OPEN)
       return
 
     const chunks = session.pendingAudio.splice(0)
@@ -151,9 +174,9 @@ export function createDashScopeAsrService(params: { context: EventaContext }) {
       throw new Error('DashScope ASR API Key is required.')
 
     const baseUrl = payload.baseUrl.trim() || DEFAULT_BASE_URL
-    const ws = new WebSocket(baseUrl, {
+    const ws = new WebSocketRuntime(baseUrl, {
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${apiKey}`,
         'user-agent': 'AIRI-Lumi-DashScope-ASR',
         ...(payload.workspaceId?.trim() ? { 'X-DashScope-WorkSpace': payload.workspaceId.trim() } : {}),
       },
@@ -164,6 +187,8 @@ export function createDashScopeAsrService(params: { context: EventaContext }) {
       ws,
       started: false,
       pendingAudio: [],
+      finishRequested: false,
+      finishSent: false,
       closed: false,
     }
     sessions.set(payload.sessionId, session)
@@ -213,6 +238,11 @@ export function createDashScopeAsrService(params: { context: EventaContext }) {
           session.started = true
           emit({ sessionId: payload.sessionId, type: 'started' })
           flushPendingAudio(session)
+          // A short file can be fully read before DashScope acknowledges run-task.
+          // Preserve that early finish request or the server waits for more audio
+          // and terminates the otherwise valid transcription after 23 seconds.
+          if (session.finishRequested)
+            sendFinish(session)
           break
         case 'result-generated': {
           const sentence = message?.payload?.output?.sentence

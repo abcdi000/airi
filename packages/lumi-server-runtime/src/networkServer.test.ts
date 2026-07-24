@@ -1,9 +1,11 @@
+import { Buffer } from 'node:buffer'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
+import { DOGGY_PERSON_ID } from './database'
 import { createLumiNetworkServer } from './networkServer'
 
 describe('createLumiNetworkServer', () => {
@@ -120,6 +122,76 @@ describe('createLumiNetworkServer', () => {
         body: new Uint8Array(9),
       })
       expect(tooLarge.status).toBe(413)
+    }
+    finally {
+      await server.stop()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('authenticates AstrBot perception and resolves its server-owned identity', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'lumi-network-astrbot-'))
+    const token = 'test-astrbot-token-with-at-least-thirty-two-characters'
+    const server = await createLumiNetworkServer({
+      databasePath: join(directory, 'server.sqlite3'),
+      authSecret: 'test-only-secret-with-at-least-thirty-two-characters',
+      publicBaseURL: 'http://127.0.0.1:6130',
+      serverVersion: 'test',
+      astrbot: {
+        apiToken: token,
+        identityBindings: [{
+          platformInstanceId: 'qq-bot-1',
+          externalUserId: '10001',
+          personId: DOGGY_PERSON_ID,
+        }],
+      },
+      createReplyGenerator: () => ({
+        async generate() {
+          return { content: 'Lumi through AstrBot' }
+        },
+      }),
+    })
+    const body = JSON.stringify({
+      event_id: 'qq-bot-1:message-1',
+      platform: 'aiocqhttp',
+      platform_instance_id: 'qq-bot-1',
+      unified_session_id: 'aiocqhttp:friend:10001',
+      conversation_id: 'aiocqhttp:friend:10001',
+      sender_id: '10001',
+      sender_name: 'Doggy',
+      group_id: null,
+      message_id: 'message-1',
+      timestamp: 1_700_000_000,
+      is_private: true,
+      is_group: false,
+      is_mention: false,
+      segments: [{ type: 'text', text: 'Hello Lumi' }],
+    })
+    try {
+      const unauthorized = await server.app.request('/api/lumi/integrations/astrbot/perceive', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) },
+        body,
+      })
+      expect(unauthorized.status).toBe(401)
+
+      const accepted = await server.app.request('/api/lumi/integrations/astrbot/perceive', {
+        method: 'POST',
+        headers: {
+          'authorization': `Bearer ${token}`,
+          'content-type': 'application/json',
+          'content-length': String(Buffer.byteLength(body)),
+        },
+        body,
+      })
+      expect(accepted.status).toBe(200)
+      expect(await accepted.json()).toMatchObject({
+        text: 'Lumi through AstrBot',
+        metadata: {
+          actor_person_id: DOGGY_PERSON_ID,
+          conversation_id: `lumi-direct:${DOGGY_PERSON_ID}`,
+        },
+      })
     }
     finally {
       await server.stop()

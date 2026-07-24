@@ -13,6 +13,7 @@ import {
   createLumiNodeConsciousness,
   createOpenAICompatibleConsciousnessModel,
   createOpenAICompatibleTranscriber,
+  createOpenAICompatibleVisionAnalyzer,
   LumiBackgroundLife,
   LumiServerJobWorker,
   LumiServerMcpRegistry,
@@ -54,6 +55,19 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
         ? createOpenAICompatibleTranscriber(config.transcription)
         : undefined,
       maxVoiceBytes: config.transcription?.maxVoiceBytes,
+      astrbot: config.astrbot?.enabled
+        ? {
+            apiToken: config.astrbot.apiToken,
+            identityBindings: config.astrbot.identityBindings,
+            visionAnalyzer: config.vision?.enabled
+              ? createOpenAICompatibleVisionAnalyzer(config.vision)
+              : undefined,
+            maxImageBytes: config.astrbot.maxImageBytes,
+            maxAudioBytes: config.astrbot.maxAudioBytes,
+            responseTimeoutMs: config.astrbot.responseTimeoutMs,
+            maxRequestBytes: config.astrbot.maxRequestBytes,
+          }
+        : undefined,
       onGenerationError(error, context) {
         console.error(
           `[generation] conversation=${context.conversation.id} input=${context.input.id}: ${error.stack ?? error.message}`,

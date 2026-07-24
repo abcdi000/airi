@@ -53,6 +53,9 @@ bundle/
 
 # Vite
 dist
+!integrations/astrbot/dist/
+integrations/astrbot/dist/*
+!integrations/astrbot/dist/astrbot_plugin_lumi-0.1.13.zip
 # Nuxt
 .nuxt
 # vite-plugin-inspect

@@ -6,7 +6,7 @@ import { computed } from 'vue'
 
 import { MarkdownRenderer } from '../../../markdown'
 import { ChatActionMenu } from '../components/action-menu'
-import { getChatHistoryItemCopyText } from '../utils'
+import { getChatHistoryItemCopyText, getUserMessageDisplayText, getUserMessageImageUrls } from '../utils'
 
 const props = withDefaults(defineProps<{
   message: Extract<ChatMessage, { role: 'user' }>
@@ -21,35 +21,8 @@ const emit = defineEmits<{
   (e: 'delete'): void
 }>()
 
-const content = computed(() => {
-  const raw = props.message.content
-  if (typeof raw === 'string')
-    return raw
-
-  if (Array.isArray(raw)) {
-    const textPart = raw.find(part => 'type' in part && part.type === 'text') as { text?: string } | undefined
-    if (textPart?.text)
-      return textPart.text
-
-    return raw.map(entry => JSON.stringify(entry)).join('\n')
-  }
-
-  return ''
-})
-
-const imageUrls = computed(() => {
-  const raw = props.message.content
-  if (!Array.isArray(raw))
-    return []
-
-  return raw
-    .filter(part => 'type' in part && part.type === 'image_url')
-    .map((part) => {
-      const imageUrl = (part as { image_url?: { url?: string } }).image_url
-      return imageUrl?.url
-    })
-    .filter((url): url is string => !!url)
-})
+const content = computed(() => getUserMessageDisplayText(props.message as ChatHistoryItem))
+const imageUrls = computed(() => getUserMessageImageUrls(props.message as ChatHistoryItem))
 
 const containerClasses = computed(() => [
   'flex',
@@ -83,7 +56,7 @@ const copyText = computed(() => getChatHistoryItemCopyText(props.message as Chat
           <div>
             <span text-sm text="black/60 dark:white/65" font-normal class="inline <sm:hidden">{{ label }}</span>
           </div>
-          <div v-if="imageUrls.length" class="mb-2 grid max-w-[min(360px,70vw)] gap-2" :class="imageUrls.length === 1 ? 'grid-cols-1' : 'grid-cols-2'">
+          <div v-if="imageUrls.length" class="grid mb-2 max-w-[min(360px,70vw)] gap-2" :class="imageUrls.length === 1 ? 'grid-cols-1' : 'grid-cols-2'">
             <img
               v-for="(url, index) in imageUrls"
               :key="index"
@@ -93,6 +66,7 @@ const copyText = computed(() => getChatHistoryItemCopyText(props.message as Chat
             >
           </div>
           <MarkdownRenderer
+            v-if="content"
             :content="content as string"
             class="break-words"
           />

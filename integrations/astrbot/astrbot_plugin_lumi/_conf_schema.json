@@ -1,0 +1,208 @@
+{
+  "enabled": {
+    "description": "启用 Lumi 事件桥",
+    "type": "bool",
+    "default": true
+  },
+  "lumi_target": {
+    "description": "Lumi 运行目标",
+    "type": "string",
+    "options": [
+      "desktop_local",
+      "server"
+    ],
+    "labels": [
+      "本地桌面 Lumi",
+      "中心 Lumi Server"
+    ],
+    "default": "desktop_local",
+    "hint": "本地桌面模式要求 Lumi 客户端正在运行且处于离线模式；中心服务器模式连接 Lumi Server。"
+  },
+  "lumi_endpoint": {
+    "description": "Lumi 接入地址",
+    "type": "string",
+    "default": "http://127.0.0.1:6132",
+    "hint": "本地桌面默认 http://127.0.0.1:6132；中心服务器默认 http://127.0.0.1:6130。非本机连接必须使用 HTTPS。"
+  },
+  "lumi_api_token": {
+    "description": "Lumi AstrBot 集成令牌",
+    "type": "string",
+    "default": "",
+    "hint": "从桌面 Lumi 的“AstrBot 接入”页面或 Lumi Server Manager 复制。AstrBot 4.26 的插件 Schema 没有密码输入类型，请限制配置文件访问权限。",
+    "obvious_hint": true
+  },
+  "speech_endpoint": {
+    "description": "桌面 Lumi 发声地址",
+    "type": "string",
+    "default": "http://127.0.0.1:6132",
+    "hint": "语音回复始终由桌面客户端的“发声”模块生成。即使意识连接中心 Server，此处仍填写运行桌面 Lumi 的本地网关地址。"
+  },
+  "speech_api_token": {
+    "description": "桌面 Lumi 发声令牌",
+    "type": "string",
+    "default": "",
+    "hint": "从桌面 Lumi 的“AstrBot 接入”页复制。留空时复用主 Lumi 令牌；连接中心 Server 时通常必须单独填写。",
+    "obvious_hint": true
+  },
+  "request_timeout_seconds": {
+    "description": "Lumi 完成一次回复的最长等待时间",
+    "type": "float",
+    "default": 120.0
+  },
+  "connect_timeout_seconds": {
+    "description": "连接 Lumi 运行时的超时时间",
+    "type": "float",
+    "default": 10.0
+  },
+  "trigger_mode": {
+    "description": "消息接管策略",
+    "type": "string",
+    "options": [
+      "private_always",
+      "wake_only",
+      "mention_only",
+      "all_messages",
+      "disabled"
+    ],
+    "default": "private_always"
+  },
+  "handle_private_messages": {
+    "description": "处理私聊",
+    "type": "bool",
+    "default": true
+  },
+  "handle_group_mentions": {
+    "description": "处理群聊（当前版本固定关闭）",
+    "type": "bool",
+    "default": false,
+    "hint": "当前阶段 Lumi 仅接收已确认身份的 QQ 私聊。该选项保留用于未来兼容，但开启也不会接管群聊。"
+  },
+  "wake_words": {
+    "description": "额外唤醒词",
+    "type": "list",
+    "default": [
+      "Lumi",
+      "lumi"
+    ]
+  },
+  "ignore_command_messages": {
+    "description": "让 AstrBot 命令优先",
+    "type": "bool",
+    "default": true
+  },
+  "command_prefixes": {
+    "description": "不会交给 Lumi 的命令前缀",
+    "type": "list",
+    "default": [
+      "/"
+    ]
+  },
+  "max_image_bytes": {
+    "description": "单张图片大小上限",
+    "type": "int",
+    "default": 10485760
+  },
+  "max_audio_bytes": {
+    "description": "单条语音大小上限",
+    "type": "int",
+    "default": 26214400
+  },
+  "max_audio_duration_seconds": {
+    "description": "语音时长上限（平台未提供时长时由 Lumi Server 校验）",
+    "type": "int",
+    "default": 300
+  },
+  "ffmpeg_path": {
+    "description": "FFmpeg 可执行文件路径",
+    "type": "string",
+    "default": "ffmpeg",
+    "hint": "仅在 QQ 等平台传入 AMR/SILK 等 Lumi 听觉不能直接接收的格式时使用。"
+  },
+  "audio_conversion_timeout_seconds": {
+    "description": "音频格式转换超时",
+    "type": "float",
+    "default": 60.0
+  },
+  "media_download_timeout_seconds": {
+    "description": "平台临时媒体下载超时",
+    "type": "float",
+    "default": 30.0
+  },
+  "temp_file_retention": {
+    "description": "请求后临时文件策略",
+    "type": "string",
+    "options": [
+      "delete",
+      "keep_on_error",
+      "keep"
+    ],
+    "default": "delete"
+  },
+  "allow_default_llm_fallback": {
+    "description": "Lumi 失败时允许 AstrBot 默认模型回复",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭，开启会导致失败时出现非 Lumi 人格。"
+  },
+  "enable_vision": {
+    "description": "允许图片进入 Lumi 视觉",
+    "type": "bool",
+    "default": true
+  },
+  "enable_hearing": {
+    "description": "允许原始语音进入 Lumi 听觉",
+    "type": "bool",
+    "default": true
+  },
+  "prefer_qq_native_transcription": {
+    "description": "优先使用 QQ 原生语音转文字",
+    "type": "bool",
+    "default": true,
+    "hint": "需要 NapCat 4.18.2 或更高版本。成功时直接把 QQ 转写作为 Lumi 的听觉文本感知；接口不可用或失败时自动回退到当前运行目标的 Lumi 听觉模块。"
+  },
+  "voice_reply_mode": {
+    "description": "回复形式",
+    "type": "string",
+    "options": [
+      "all_text",
+      "all_voice",
+      "random",
+      "mirror_input_audio"
+    ],
+    "labels": [
+      "全部使用文本",
+      "全部使用语音",
+      "随机使用文本或语音",
+      "用户发语音时使用语音"
+    ],
+    "default": "all_text",
+    "hint": "语音由当前 Lumi 客户端“发声”模块合成；一条 Lumi 回复对应一条完整语音。"
+  },
+  "random_voice_probability": {
+    "description": "随机模式的语音权重",
+    "type": "float",
+    "default": 0.35,
+    "hint": "取值 0 到 1。例如 0.35 表示约 35% 的回复使用语音，仅在随机模式生效。"
+  },
+  "failure_policy": {
+    "description": "失败处理",
+    "type": "string",
+    "options": [
+      "silent",
+      "friendly_error",
+      "allow_default_llm_fallback"
+    ],
+    "default": "friendly_error"
+  },
+  "log_level": {
+    "description": "插件日志级别",
+    "type": "string",
+    "options": [
+      "DEBUG",
+      "INFO",
+      "WARNING",
+      "ERROR"
+    ],
+    "default": "INFO"
+  }
+}

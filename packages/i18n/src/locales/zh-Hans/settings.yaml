@@ -325,7 +325,7 @@ pages:
       description: 描述
       behavior: 行为
       greetings: 问候语（每行一个）
-      settings: 设置
+      settings: 人格核心
       version: 版本
       create: 创建
       defaults:
@@ -350,8 +350,9 @@ pages:
         scenario: 周围环境是怎样的？当前的情境是什么？
         greetings_field: 问候语
         greetings: 您的角色应该如何说“你好”？
-        systemprompt: 在这里向 AI LLM 解释当被提示时应该如何回应。
-        posthistoryinstructions: 在消息历史之后，放入 AI LLM 应该阅读的内容。
+        persona_editor: 这里保存的是 Lumi 最核心的人格与表达边界。修改会直接影响她如何理解自己、与你相处和组织回答；保存前请仔细确认。
+        systemprompt: 描述 Lumi 是谁、她的性格、关系、表达习惯和不可改变的边界。
+        posthistoryinstructions: 填写每次对话末尾都要提醒 Lumi 遵守的简短规则，例如保持记忆一致、回复自然简洁。
         version: >-
           卡片版本，如果您从之前的卡片做了更改，应当增加此版本号。
         consciousness_model: 为这个角色选择 AI 模型。
@@ -372,7 +373,7 @@ pages:
     no_cards: 还没有任何角色卡，点击上方按钮上传一个吧！
     no_results: 没有找到匹配的角色卡
     personality: 性格
-    posthistoryinstructions: 历史提示指令
+    posthistoryinstructions: 对话补充规则
     recent: 最近添加
     scenario: 场景
     search: 搜索角色卡...
@@ -382,7 +383,7 @@ pages:
       provider: 语音 / 提供商
       model: 声音 / 模型
       voice: 声音 / 声线
-    systemprompt: 系统提示词
+    systemprompt: Lumi 人格设定
     title: Lumi 角色卡
     try_different_search: 尝试使用其他关键词搜索
     upload: 上传

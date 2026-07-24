@@ -1,0 +1,235 @@
+:root {
+  color-scheme: light;
+  --bg: #f5f7f8;
+  --panel: #ffffff;
+  --panel-soft: #eef7fa;
+  --text: #172126;
+  --muted: #69777d;
+  --line: #dce5e8;
+  --accent: #1598b6;
+  --accent-dark: #0e7189;
+  --ready: #18a56c;
+  --error: #d64c4c;
+  --checking: #d59422;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101415;
+  --panel: #181e20;
+  --panel-soft: #14262b;
+  --text: #edf4f5;
+  --muted: #9aabad;
+  --line: #2c373a;
+  --accent: #42bed8;
+  --accent-dark: #84d7e8;
+  --ready: #41cb91;
+  --error: #f07474;
+  --checking: #edb855;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.shell {
+  width: min(760px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 36px 0 48px;
+}
+
+header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+h1 {
+  margin: 0;
+  font-size: 30px;
+  letter-spacing: 0;
+}
+
+.summary {
+  max-width: 560px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.status-lamp {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin-top: 12px;
+  border: 3px solid var(--panel);
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.status-lamp[data-state="ready"] {
+  background: var(--ready);
+  box-shadow: 0 0 0 1px var(--ready), 0 0 18px color-mix(in srgb, var(--ready) 45%, transparent);
+}
+
+.status-lamp[data-state="error"] {
+  background: var(--error);
+}
+
+.status-lamp[data-state="checking"] {
+  background: var(--checking);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+.status-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.status-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.status-copy strong {
+  font-size: 18px;
+}
+
+.status-copy span {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+button {
+  min-width: 132px;
+  min-height: 42px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: var(--accent-dark);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.button-icon {
+  display: inline-block;
+  margin-right: 6px;
+}
+
+button:disabled .button-icon {
+  animation: spin 900ms linear infinite;
+}
+
+.details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 18px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.details div {
+  min-width: 0;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.details div:nth-child(odd) {
+  border-right: 1px solid var(--line);
+}
+
+.details div:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+dt {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 620px) {
+  .status-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  button {
+    width: 100%;
+  }
+
+  .details {
+    grid-template-columns: 1fr;
+  }
+
+  .details div,
+  .details div:nth-child(odd),
+  .details div:nth-last-child(-n + 2) {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .details div:last-child {
+    border-bottom: 0;
+  }
+}

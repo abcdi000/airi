@@ -7,7 +7,7 @@ import { useServerManager } from '../useServerManager'
 
 const manager = useServerManager()
 function save() {
-  return manager.applyConfig({ publicBaseURL: manager.configDraft.publicBaseURL, hostname: manager.configDraft.hostname, port: Number(manager.configDraft.port), trustedOrigins: manager.configDraft.trustedOriginsText.split(/\r?\n/).map(item => item.trim()).filter(Boolean), tlsEnabled: manager.configDraft.tlsEnabled, tls: manager.configDraft.tlsEnabled ? { certPath: manager.configDraft.tlsCertPath, keyPath: manager.configDraft.tlsKeyPath, ...(manager.configDraft.tlsPassphrase ? { passphrase: manager.configDraft.tlsPassphrase } : {}) } : undefined }, '网络与安全配置已保存并应用')
+  return manager.saveNetwork()
 }
 </script>
 
@@ -28,6 +28,33 @@ function save() {
       </template><p :class="['text-xs text-neutral-500']">
         非本机客户端必须使用 HTTPS/WSS。也可以由你自己的反向代理或隧道终止 TLS。
       </p>
+      <section :class="['border-t border-neutral-200 pt-6 space-y-4 dark:border-neutral-800']">
+        <div :class="['flex items-start justify-between gap-4']">
+          <div>
+            <h2 :class="['text-lg font-semibold']">
+              AstrBot 接入
+            </h2>
+            <p :class="['mt-1 text-sm text-neutral-500']">
+              允许 QQ、KOOK 等 AstrBot 平台把消息交给同一个 Lumi Server。
+            </p>
+          </div>
+          <Button
+            label="复制集成令牌"
+            icon="i-solar:copy-bold-duotone"
+            :disabled="!manager.state.value?.config.astrbot.tokenConfigured"
+            @click="manager.copyAstrBotToken"
+          />
+        </div>
+        <FieldCheckbox v-model="manager.configDraft.astrbotEnabled" label="启用 AstrBot 感知桥" />
+        <Textarea
+          v-model="manager.configDraft.astrbotBindingsText"
+          label="身份绑定（每行一条）"
+          placeholder="default | 你的 QQ 号 | Lumi 人物 ID"
+        />
+        <p :class="['text-xs text-neutral-500']">
+          格式：平台实例 ID | 平台用户 ID | Lumi 人物 ID。AstrBot 日志中的方括号首项通常就是平台实例 ID，例如 default。
+        </p>
+      </section>
     </div>
   </ManagerPage>
 </template>

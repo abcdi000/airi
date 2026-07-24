@@ -100,6 +100,28 @@ const STREAM_TRANSCRIPTION_EXECUTORS: Record<string, StreamTranscription> = {
   // Web Speech API is handled specially in transcribeForMediaStream since it works directly with MediaStream
 }
 
+/**
+ * Normalizes the model selected for speech transcription.
+ *
+ * Before:
+ * - selectedModel="", providerConfiguredModel="whisper-1"
+ *
+ * After:
+ * - "whisper-1"
+ */
+export function resolveTranscriptionModel(
+  selectedModel: string | undefined,
+  providerConfiguredModel: unknown,
+  providerId: string,
+) {
+  const selected = selectedModel?.trim()
+  if (selected)
+    return selected
+  if (typeof providerConfiguredModel === 'string' && providerConfiguredModel.trim())
+    return providerConfiguredModel.trim()
+  return providerId === 'browser-web-speech-api' ? 'web-speech-api' : ''
+}
+
 export const useHearingStore = defineStore('hearing-store', () => {
   const providersStore = useProvidersStore()
   const { allAudioTranscriptionProvidersMetadata } = storeToRefs(providersStore)
@@ -153,24 +175,20 @@ export const useHearingStore = defineStore('hearing-store', () => {
     return []
   }
 
+  const resolvedTranscriptionModel = computed(() => {
+    const providerConfig = providersStore.getProviderConfig(activeTranscriptionProvider.value)
+    return resolveTranscriptionModel(
+      activeTranscriptionModel.value,
+      providerConfig?.model,
+      activeTranscriptionProvider.value,
+    )
+  })
+
   const configured = computed(() => {
     if (!activeTranscriptionProvider.value)
       return false
 
-    // Web Speech API doesn't strictly need a model selected (it has a default)
-    // but we still check to maintain consistency
-    if (activeTranscriptionProvider.value === 'browser-web-speech-api') {
-      return true // Web Speech API is ready if provider is selected and available
-    }
-
-    // For OpenAI Compatible providers, check provider config as fallback
-    let hasProviderModel = false
-    if (activeTranscriptionProvider.value === 'openai-compatible-audio-transcription') {
-      const providerConfig = providersStore.getProviderConfig(activeTranscriptionProvider.value)
-      hasProviderModel = !!providerConfig?.model
-    }
-
-    return !!activeTranscriptionModel.value || hasProviderModel
+    return Boolean(resolvedTranscriptionModel.value)
   })
 
   function resetState() {
@@ -307,6 +325,7 @@ export const useHearingStore = defineStore('hearing-store', () => {
   return {
     activeTranscriptionProvider,
     activeTranscriptionModel,
+    resolvedTranscriptionModel,
     availableProvidersMetadata,
     activeCustomModelName,
     transcriptionModelSearchQuery,
@@ -332,7 +351,7 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
   const error = ref<string>()
 
   const hearingStore = useHearingStore()
-  const { activeTranscriptionProvider, activeTranscriptionModel } = storeToRefs(hearingStore)
+  const { activeTranscriptionProvider, activeTranscriptionModel, resolvedTranscriptionModel } = storeToRefs(hearingStore)
   const providersStore = useProvidersStore()
   const streamingSession = shallowRef<{
     audioContext: AudioContext | Record<string, never>
@@ -779,7 +798,7 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
 
       bumpIdle()
 
-      const model = activeTranscriptionModel.value
+      const model = resolvedTranscriptionModel.value
       const result = await hearingStore.transcription(
         providerId,
         provider,
@@ -864,7 +883,7 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
 
   async function transcribeForRecording(
     recording: Blob | null | undefined,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal, throwOnError?: boolean },
   ) {
     error.value = undefined
 
@@ -881,7 +900,9 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
         }
 
         // Get model from configuration or use default
-        const model = activeTranscriptionModel.value
+        const model = resolvedTranscriptionModel.value
+        if (!model)
+          throw new Error('Lumi hearing model is not configured')
         const result = await hearingStore.transcription(
           providerId,
           provider,
@@ -895,7 +916,10 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
         const text = result.mode === 'stream' ? await result.text : result.text
         options?.signal?.throwIfAborted()
         if (!text || !text.trim()) {
-          error.value = 'No transcription result returned from provider'
+          const reason = 'No transcription result returned from provider'
+          error.value = reason
+          if (options?.throwOnError)
+            throw new Error(reason)
           return
         }
 
@@ -907,6 +931,8 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
         return
       error.value = errorMessage(err)
       console.error('Error generating transcription:', error.value)
+      if (options?.throwOnError)
+        throw err
     }
   }
 

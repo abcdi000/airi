@@ -339,7 +339,7 @@ pages:
       description: Description
       behavior: Behavior
       greetings: Greetings (one per line)
-      settings: Settings
+      settings: Persona
       version: Version
       create: Create
       defaults:
@@ -368,8 +368,9 @@ pages:
         scenario: What are the surroundings ? What is the current situation ?
         greetings_field: Greetings
         greetings: How your character should say "hello" ?
-        systemprompt: Explain here to the AI LLM how it should answer when prompted.
-        posthistoryinstructions: Place here anything the AI LLM should read after the messages history.
+        persona_editor: This is Lumi's core identity and expression boundary. Changes directly affect how she understands herself, relates to you, and responds.
+        systemprompt: Describe who Lumi is, her personality, relationships, speaking style, and boundaries that must not change.
+        posthistoryinstructions: Add a short reminder applied after each conversation history, such as keeping memories consistent and replies natural.
         version: >-
           Card version, you should increase this if you are making changes from
           a previous card.
@@ -391,7 +392,7 @@ pages:
     no_cards: No cards yet. Click the button above to upload one!
     no_results: No matching cards found
     personality: Personality
-    posthistoryinstructions: Post-History Instructions
+    posthistoryinstructions: Conversation Guidance
     recent: Recently Added
     scenario: Scenario
     search: Search cards...
@@ -401,7 +402,7 @@ pages:
       provider: Speech / Provider
       model: Speech / Model
       voice: Speech / Voice
-    systemprompt: System Prompt
+    systemprompt: Lumi Persona
     title: Lumi Card
     try_different_search: Try a different search term
     upload: Upload

@@ -33,6 +33,15 @@ export interface ManagerState {
       diary?: { enabled?: boolean, dailyTime?: string }
       autonomousLife?: { enabled?: boolean, minimumIntervalMs?: number, maximumIntervalMs?: number }
     }
+    astrbot: {
+      enabled: boolean
+      tokenConfigured: boolean
+      identityBindings: Array<{
+        platformInstanceId: string
+        externalUserId: string
+        personId: string
+      }>
+    }
   }
 }
 

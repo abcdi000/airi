@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 
 import { DOGGY_PERSON_ID } from './database'
 import { createLumiNetworkServer } from './networkServer'
+import { LumiStickerLibrary } from './stickerLibrary'
 
 describe('createLumiNetworkServer', () => {
   it('serves health without exposing management data', async () => {
@@ -191,6 +192,123 @@ describe('createLumiNetworkServer', () => {
           actor_person_id: DOGGY_PERSON_ID,
           conversation_id: `lumi-direct:${DOGGY_PERSON_ID}`,
         },
+      })
+    }
+    finally {
+      await server.stop()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * @example
+   * An authorized read-only group teaches the server a sticker that can later
+   * accompany a private Lumi reply without ever replying to the group.
+   */
+  it('learns group stickers and returns them through the server AstrBot bridge', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'lumi-network-sticker-'))
+    const token = 'test-astrbot-token-with-at-least-thirty-two-characters'
+    const stickerLibrary = new LumiStickerLibrary(() => ({
+      enabled: true,
+      collectFromStudyGroups: true,
+      relativePath: 'stickers',
+      maximumItems: 16,
+      sendProbability: 1,
+      cooldownMessages: 0,
+    }), () => directory, {
+      classify: async () => ({
+        tags: ['觉得好笑'],
+        summary: '意识模型判断为轻松玩笑',
+        confidence: 0.9,
+      }),
+      select: async input => ({
+        stickerId: input.candidates[0]?.id,
+        reason: '意识模型判断适合当前回复',
+      }),
+    })
+    const server = await createLumiNetworkServer({
+      databasePath: join(directory, 'server.sqlite3'),
+      authSecret: 'test-only-secret-with-at-least-thirty-two-characters',
+      publicBaseURL: 'http://127.0.0.1:6130',
+      serverVersion: 'test',
+      astrbot: {
+        apiToken: token,
+        identityBindings: [{
+          platformInstanceId: 'qq-bot-1',
+          externalUserId: '10001',
+          personId: DOGGY_PERSON_ID,
+        }],
+        learningMode: 'observe_only',
+        studyGroups: [{
+          id: 'friends',
+          platformInstanceId: 'qq-bot-1',
+          groupId: '20001',
+          displayName: 'Friends',
+          enabled: true,
+          priority: 'high',
+        }],
+        stickerLibrary,
+      },
+      createReplyGenerator: () => ({
+        async generate() {
+          return { content: '笑死' }
+        },
+      }),
+    })
+    const headers = {
+      'authorization': `Bearer ${token}`,
+      'content-type': 'application/json',
+    }
+    try {
+      const observationBody = JSON.stringify({
+        event_id: 'group-message-1',
+        message_id: 'group-message-1',
+        platform: 'aiocqhttp',
+        platform_instance_id: 'qq-bot-1',
+        group_id: '20001',
+        sender_id: '30001',
+        sender_name: 'Friend',
+        timestamp: 1_700_000_000,
+        segments: [
+          { type: 'text', text: '笑死了' },
+          { type: 'image', mime_type: 'image/png', data_base64: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]).toString('base64') },
+        ],
+      })
+      const observation = await server.app.request('/api/lumi/integrations/astrbot/observe', {
+        method: 'POST',
+        headers,
+        body: observationBody,
+      })
+      expect(observation.status).toBe(202)
+      expect(await stickerLibrary.snapshot()).toMatchObject({ stats: { owned: 1 } })
+
+      const privateBody = JSON.stringify({
+        event_id: 'private-message-1',
+        platform: 'aiocqhttp',
+        platform_instance_id: 'qq-bot-1',
+        unified_session_id: 'aiocqhttp:friend:10001',
+        conversation_id: 'aiocqhttp:friend:10001',
+        sender_id: '10001',
+        sender_name: 'Doggy',
+        group_id: null,
+        message_id: 'private-message-1',
+        timestamp: 1_700_000_001,
+        is_private: true,
+        is_group: false,
+        is_mention: false,
+        segments: [{ type: 'text', text: '笑死了' }],
+      })
+      const response = await server.app.request('/api/lumi/integrations/astrbot/perceive', {
+        method: 'POST',
+        headers: { ...headers, 'content-length': String(Buffer.byteLength(privateBody)) },
+        body: privateBody,
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({
+        segments: [
+          { type: 'text', text: '笑死' },
+          { type: 'image', mime_type: 'image/png' },
+        ],
       })
     }
     finally {

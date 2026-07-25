@@ -1,6 +1,8 @@
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { Message, Tool } from '@xsai/shared-chat'
 
+import type { StreamUsage } from '../types/llm'
+
 import { stepCountAtLeast } from '@xsai/shared-chat'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -107,6 +109,34 @@ describe('streamFrom step budget', () => {
     })
 
     expect(stepCountAtLeast).toHaveBeenCalledWith(200)
+  })
+
+  it('reports cache usage from every completed provider step', async () => {
+    const onUsage = vi.fn()
+    const usage = {
+      completion_tokens: 12,
+      prompt_tokens: 120,
+      total_tokens: 132,
+      prompt_cache_hit_tokens: 80,
+      prompt_cache_miss_tokens: 40,
+    } satisfies StreamUsage
+    streamTextMock.mockReturnValueOnce(createMockStreamResult(Promise.resolve([{
+      finishReason: 'stop',
+      stepType: 'done',
+      toolCalls: [],
+      toolResults: [],
+      usage,
+    }])))
+
+    await streamFrom({
+      model: 'model-a',
+      chatProvider: provider,
+      messages: [{ role: 'user', content: 'measure cache usage' }] as Message[],
+      options: { onUsage },
+    })
+
+    expect(onUsage).toHaveBeenCalledTimes(1)
+    expect(onUsage).toHaveBeenCalledWith(usage)
   })
 })
 

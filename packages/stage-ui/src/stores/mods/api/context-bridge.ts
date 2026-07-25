@@ -113,7 +113,11 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
     'input:voice',
     'lumi:room:sync:request',
     'lumi:room:voice:cancel',
+    'lumi:external:assistant-sticker',
     'lumi:external:runtime:status:request',
+    'lumi:external:group-observation:request',
+    'lumi:external:group-observation:resume',
+    'lumi:external:sticker-intelligence:request',
     'lumi:external:speech:request',
   ] as const
   const mutex = new Mutex()
@@ -958,6 +962,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
           targetSessionId = await chatSession.ensureSessionForActor(actor.id, conversationId)
           interaction = {
             ...chatSession.getInteractionContextForActor(targetSessionId, actor.id),
+            platform: actorClaim.provider,
             toolScopes: toolScopesFor(event),
             remoteDeviceId: event.metadata?.auth?.claims?.externalUserId,
           }
@@ -1254,6 +1259,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
               targetSessionId = await chatSession.ensureSessionForActor(actor.id, targetSessionId)
               interaction = {
                 ...chatSession.getInteractionContextForActor(targetSessionId, actor.id),
+                platform: event.data.perception?.platform ?? event.data.actor.provider,
                 toolScopes: toolScopesFor(event),
                 remoteDeviceId: event.metadata?.auth?.claims?.externalUserId,
               }
@@ -1418,6 +1424,119 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
           },
           route,
         })
+      }))
+
+      disposeHookFns.value.push(serverChannelStore.onEvent('lumi:external:assistant-sticker', (event) => {
+        const data = event.data
+        if (!data.conversationId || !data.dataBase64)
+          return
+        if (!['image/gif', 'image/jpeg', 'image/png', 'image/webp'].includes(data.mimeType))
+          return
+        try {
+          const bytes = atob(data.dataBase64)
+          if (!bytes.length || bytes.length > 10 * 1024 * 1024)
+            return
+        }
+        catch {
+          return
+        }
+        const messages = chatSession.getSessionMessages(data.conversationId)
+        const messageId = `${data.eventId}:sticker:${data.stickerId}`
+        if (messages.some(message => message.id === messageId))
+          return
+        chatSession.appendSessionMessage(data.conversationId, {
+          id: messageId,
+          role: 'assistant',
+          content: '',
+          slices: [{
+            type: 'image',
+            url: `data:${data.mimeType};base64,${data.dataBase64}`,
+            alt: data.tags.length ? `Lumi 表情：${data.tags.join('、')}` : 'Lumi 表情',
+          }],
+          tool_results: [],
+          createdAt: Date.now(),
+        })
+      }))
+
+      disposeHookFns.value.push(serverChannelStore.onEvent('lumi:external:group-observation:request', async (event) => {
+        const route = roomReplyRoute(event.metadata?.source?.id)
+        if (!route)
+          return
+        try {
+          const data = event.data
+          const text = data.text.trim()
+          if (!text || text.length > 4_000)
+            throw new Error('Group observation text is empty or too long')
+          const result = await chatOrchestrator.observeExternalGroupLanguage({
+            eventId: data.eventId,
+            messageId: data.messageId,
+            sourceId: data.sourceId,
+            platform: data.platform,
+            platformInstanceId: data.platformInstanceId,
+            groupId: data.groupId,
+            senderId: data.senderId,
+            senderName: data.senderName,
+            text,
+            timestamp: data.timestamp,
+          }, data.batchSize, data.historyLimit, data.concurrentGroups)
+          serverChannelStore.send({
+            type: 'lumi:external:group-observation:result',
+            data: { requestId: data.requestId, ok: true, ...result },
+            route,
+          })
+        }
+        catch (error) {
+          serverChannelStore.send({
+            type: 'lumi:external:group-observation:result',
+            data: {
+              requestId: event.data.requestId,
+              ok: false,
+              queued: false,
+              batchProcessed: false,
+              message: errorMessageFrom(error) ?? 'Group observation failed',
+            },
+            route,
+          })
+        }
+      }))
+
+      disposeHookFns.value.push(serverChannelStore.onEvent('lumi:external:group-observation:resume', (event) => {
+        chatOrchestrator.resumeExternalGroupLanguageDrain(
+          event.data.batchSize,
+          event.data.concurrentGroups,
+        )
+      }))
+
+      disposeHookFns.value.push(serverChannelStore.onEvent('lumi:external:sticker-intelligence:request', async (event) => {
+        const route = roomReplyRoute(event.metadata?.source?.id)
+        if (!route)
+          return
+        try {
+          const result = await chatOrchestrator.runExternalStickerIntelligence(
+            event.data.operation,
+            event.data.payload,
+          )
+          serverChannelStore.send({
+            type: 'lumi:external:sticker-intelligence:result',
+            data: {
+              requestId: event.data.requestId,
+              ok: true,
+              ...result,
+            },
+            route,
+          })
+        }
+        catch (error) {
+          serverChannelStore.send({
+            type: 'lumi:external:sticker-intelligence:result',
+            data: {
+              requestId: event.data.requestId,
+              ok: false,
+              message: errorMessageFrom(error) ?? 'Sticker consciousness task failed',
+            },
+            route,
+          })
+        }
       }))
 
       disposeHookFns.value.push(serverChannelStore.onEvent('lumi:external:speech:request', async (event) => {
@@ -1585,6 +1704,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
             data: {
               ...context.input?.data,
               'message': chat.output,
+              'outputText': chat.outputText,
               // TODO: tool calls should be captured properly
               'toolCalls': [],
               'stage-web': isStageWeb(),

@@ -1062,6 +1062,8 @@ describe('createChatOrchestratorRuntime', () => {
 
 it('streams confirmed tool progress into the ordinary assistant message', async () => {
   const harness = createHarness()
+  const turnCompleteHook = vi.fn()
+  harness.runtime.hooks.onChatTurnComplete(turnCompleteHook)
   harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
     await options?.onStreamEvent?.({
       type: 'tool-call',
@@ -1074,6 +1076,7 @@ it('streams confirmed tool progress into the ordinary assistant message', async 
       toolCallId: 'computer-use-1',
       result: { status: 'executed' },
     } as StreamEvent)
+    await options?.onStreamEvent?.({ type: 'text-delta', text: 'QQ is focused' })
     await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
   })
 
@@ -1086,10 +1089,49 @@ it('streams confirmed tool progress into the ordinary assistant message', async 
   })
 
   expect(harness.foregroundPatches.some(message => message.content === '已完成：聚焦目标应用。')).toBe(true)
+  expect(turnCompleteHook).toHaveBeenCalledWith(
+    expect.objectContaining({
+      outputText: 'QQ is focused',
+    }),
+    expect.anything(),
+  )
+  expect(harness.assistantTurns[0]).toMatchObject({
+    messageText: 'QQ is focused',
+  })
   expect(harness.sessionMessages['session-1']?.at(-1)).toMatchObject({
     role: 'assistant',
-    content: '已完成：聚焦目标应用。',
+    content: '已完成：聚焦目标应用。\nQQ is focused',
   })
+})
+
+/**
+ * @example
+ * A model-backed history compressor can finish before provider projection.
+ */
+it('awaits an asynchronous provider history projection', async () => {
+  const harness = createHarness()
+  let composedMessages: Message[] = []
+  harness.stream.mockImplementationOnce(async (_model, _chatProvider, messages, options) => {
+    composedMessages = messages
+    await options?.onStreamEvent?.({ type: 'text-delta', text: 'done' })
+    await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
+  })
+
+  await harness.runtime.ingest('hello', {
+    model: 'gpt-test',
+    chatProvider: provider,
+    providerHistoryTransform: async messages => [
+      messages[0]!,
+      {
+        role: 'system',
+        content: 'compressed continuity',
+        id: 'summary',
+      },
+      messages.at(-1)!,
+    ],
+  })
+
+  expect(composedMessages.map(message => message.content)).toContain('compressed continuity')
 })
 
 it('keeps image attachments in chat history while sending text-only provider context', async () => {
@@ -1129,4 +1171,75 @@ it('keeps image attachments in chat history while sending text-only provider con
     },
   ])
   expect(composedMessages[1]?.content).toBe('[本地时间 2026-04-25 18:47:00]\nsee image\n\n[Current-turn image context]\nImage 1: description=a UI screenshot')
+})
+
+/**
+ * @example
+ * Planner protocol text stays buffered until the Replyer transform completes.
+ */
+it('does not render or persist deferred Planner protocol text', async () => {
+  const harness = createHarness()
+  const plannerDocument = '{"replyAct":"refuse","semanticGoal":"do not help"}'
+  harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
+    await options?.onStreamEvent?.({ type: 'text-delta', text: plannerDocument })
+    await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
+  })
+
+  await harness.runtime.ingest('keep helping', {
+    model: 'gpt-test',
+    chatProvider: provider,
+    deferAssistantText: true,
+    assistantResponseTransform: async ({ rawText }) => {
+      expect(rawText).toBe(plannerDocument)
+      return '不改。至少现在不想。'
+    },
+  })
+
+  expect(harness.foregroundPatches.every(message => !String(message.content).includes('replyAct'))).toBe(true)
+  expect(harness.sessionMessages['session-1']?.at(-1)).toMatchObject({
+    role: 'assistant',
+    content: '不改。至少现在不想。',
+  })
+})
+
+/**
+ * @example
+ * Model observability receives lifecycle events without changing visible streaming.
+ */
+it('observes the model request, stream, and completion timing', async () => {
+  const harness = createHarness()
+  const onModelRequestStarted = vi.fn()
+  const onModelStreamEvent = vi.fn()
+  const onModelRequestFinished = vi.fn()
+  harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
+    await options?.onStreamEvent?.({ type: 'text-delta', text: 'hello' })
+    await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
+  })
+
+  await harness.runtime.ingest('hi', {
+    model: 'gpt-test',
+    chatProvider: provider,
+    onModelRequestStarted,
+    onModelStreamEvent,
+    onModelRequestFinished,
+  })
+
+  expect(onModelRequestStarted).toHaveBeenCalledTimes(1)
+  expect(onModelRequestStarted).toHaveBeenCalledWith(expect.objectContaining({
+    model: 'gpt-test',
+    messages: expect.any(Array),
+    startedAt: expect.any(Number),
+  }))
+  expect(onModelStreamEvent).toHaveBeenCalledTimes(2)
+  expect(onModelStreamEvent).toHaveBeenNthCalledWith(1, { type: 'text-delta', text: 'hello' })
+  expect(onModelRequestFinished).toHaveBeenCalledTimes(1)
+  expect(onModelRequestFinished).toHaveBeenCalledWith(expect.objectContaining({
+    model: 'gpt-test',
+    status: 'completed',
+    durationMs: expect.any(Number),
+  }))
+  expect(harness.sessionMessages['session-1']?.at(-1)).toMatchObject({
+    role: 'assistant',
+    content: 'hello',
+  })
 })

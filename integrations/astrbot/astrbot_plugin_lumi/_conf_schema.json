@@ -55,7 +55,7 @@
     "default": 10.0
   },
   "trigger_mode": {
-    "description": "消息接管策略",
+    "description": "私聊接管策略",
     "type": "string",
     "options": [
       "private_always",
@@ -72,10 +72,10 @@
     "default": true
   },
   "handle_group_mentions": {
-    "description": "处理群聊（当前版本固定关闭）",
+    "description": "群聊回复（固定关闭）",
     "type": "bool",
     "default": false,
-    "hint": "当前阶段 Lumi 仅接收已确认身份的 QQ 私聊。该选项保留用于未来兼容，但开启也不会接管群聊。"
+    "hint": "兼容旧配置。开启也不会回复群聊；只读群学习请在 Lumi 桌面的 AstrBot 接入页面配置。"
   },
   "wake_words": {
     "description": "额外唤醒词",

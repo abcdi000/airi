@@ -266,6 +266,30 @@ class MessageParsingTests(unittest.IsolatedAsyncioTestCase):
             ["image", "image", "audio", "audio"],
         )
 
+    async def test_group_sticker_learning_does_not_require_vision_module(self) -> None:
+        root = Path(self._directory.name)
+        media = MediaResolver(self.client, root / "temporary", 1)
+        adapter = AstrBotEventAdapter(
+            PlatformIdentityMapper(),
+            ImageResolver(media, 1024),
+            AudioResolver(media, 1024, 5000, root / "temporary", "ffmpeg", 1),
+            ("Lumi",),
+            False,
+            True,
+            True,
+        )
+        event = FakeEvent(
+            [Comp.Image.fromFileSystem(str(self.image))],
+            group_id="100",
+        )
+
+        facts = adapter.routing_facts(event)
+        observation, temporary = await adapter.convert_group_observation(event)
+
+        self.assertTrue(facts.has_supported_content)
+        self.assertEqual([item.type for item in observation.segments], ["image"])
+        self.assertEqual(temporary, [])
+
     async def test_empty_qq_record_is_resolved_through_onebot_get_record(self) -> None:
         event = FakeEvent([Comp.Record()])
         event.message_obj.raw_message = {

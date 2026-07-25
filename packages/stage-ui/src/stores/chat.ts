@@ -2,6 +2,13 @@ import type { ChatOrchestratorRuntimeState, ChatOrchestratorSendOptions, StreamE
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { Message } from '@xsai/shared-chat'
 
+import type {
+  LumiConversationContextMessage,
+  LumiLanguageModelMessage,
+  LumiReplyCharacterState,
+  SocialLanguageEvidence,
+  SocialLanguageGroupObservation,
+} from '../../../lumi-runtime/src'
 import type { ChatHistoryItem, ChatInteractionContext } from '../types/chat'
 import type { LumiUserProfileEntry, LumiUserProfilePendingUpdate, LumiUserProfileSourceKind } from './lumi-user-profile'
 
@@ -20,12 +27,30 @@ import {
   buildLumiMemoryCuratorUserPayload,
   buildLumiMemoryTopicAnalyzerPrompt,
   buildLumiMemoryTopicAnalyzerUserPayload,
+  buildLumiPlannerSystemPrompt,
+  buildLumiPlannerTurnContext,
   buildLumiRelationshipAssessmentPrompt,
+  buildLumiStickerClassificationMessages,
+  buildLumiStickerSelectionMessages,
+  buildObservedGroupLearningMessages,
+  buildSocialLanguageFeedbackMessages,
+  buildSocialLanguageLearningMessages,
+  compressLumiConversationContext,
+  createDefaultLumiPersonaAnchor,
+  estimateLumiConversationTokens,
+  estimateLumiLanguageTokens,
+  flattenLumiVisibleReply,
   isContextDependentMemoryText,
   isLumiQuestionLikeMemorySource,
   mergeLumiRelationshipAssessmentWithSafetyFloor,
   parseLumiMemoryTopicAnalysis,
   parseLumiRelationshipAssessment,
+  parseLumiStickerClassification,
+  parseLumiStickerSelection,
+  parseSocialLanguageFeedbackOutput,
+  runLumiSocialLanguagePipeline,
+  selectLumiAdaptiveContextBudget,
+  selectPlannerSocialBehaviors,
 } from '../../../lumi-runtime/src'
 import { useAnalytics } from '../composables'
 import { startSpan } from '../composables/use-io-tracer'
@@ -39,6 +64,7 @@ import { useChatStreamStore } from './chat/stream-store'
 import { useContextObservabilityStore } from './devtools/context-observability'
 import { useLLM } from './llm'
 import { useLlmToolsetPromptsStore } from './llm-toolset-prompts'
+import { useLumiConsciousnessObservabilityStore } from './lumi-consciousness-observability'
 import {
   buildLumiCurrentStateUpdatePrompt,
   buildLumiCurrentStateUpdateUserPayload,
@@ -51,6 +77,7 @@ import { useLumiMainTimelineStore } from './lumi-main-timeline'
 import { useLumiMemoryStore } from './lumi-memory'
 import { bindLumiMemoryToolsForTurn, clearLumiMemoryTools, registerLumiMemoryTools } from './lumi-memory-tools'
 import { useLumiOnlineStore } from './lumi-online'
+import { useLumiSocialLanguageStore } from './lumi-social-language'
 import { bindLumiToolMeshToolsForTurn } from './lumi-tool-mesh'
 import {
   buildLumiUserProfileCuratorPrompt,
@@ -95,8 +122,10 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   const lumiEmotionStore = useLumiEmotionStore()
   const lumiIdentityStore = useLumiIdentityStore()
   const lumiCurrentStateStore = useLumiCurrentStateStore()
+  const lumiConsciousnessObservabilityStore = useLumiConsciousnessObservabilityStore()
   const lumiMemoryStore = useLumiMemoryStore()
   const lumiOnlineStore = useLumiOnlineStore()
+  const lumiSocialLanguageStore = useLumiSocialLanguageStore()
   const lumiUserProfileStore = useLumiUserProfileStore()
   const lumiMainTimelineStore = useLumiMainTimelineStore()
   const { activeProvider, activeModel } = storeToRefs(consciousnessStore)
@@ -120,6 +149,8 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   const sending = ref(false)
   const pendingQueuedSendCount = ref(0)
   let lumiMemoryToolsRegistered = false
+  let activeGroupObservationWorkers = 0
+  let groupObservationCommitQueue = Promise.resolve()
 
   function syncLumiMemoryToolRegistration() {
     const shouldRegister = cardStore.activeCardId === LUMI_AIRI_CARD_ID
@@ -262,7 +293,40 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     },
     onUserTurnReady: async (event) => {
       const { messageText, sessionMessages, hasAttachments, interaction } = event
-      await prepareLumiRelationshipAssessment(messageText, sessionMessages, interaction)
+      const feedbackDecision = lumiSocialLanguageStore.pendingFeedbackDecision(
+        event.sessionId,
+        interaction?.actorId,
+      )
+      const languageFeedbackTask = (async () => {
+        if (!feedbackDecision || !activeProvider.value || !activeModel.value)
+          return undefined
+        try {
+          const chatProvider = await providersStore.getProviderInstance<ChatProvider>(activeProvider.value)
+          const modelOutput = await generateSocialLanguageTextWithProvider({
+            model: activeModel.value,
+            chatProvider,
+            messages: buildSocialLanguageFeedbackMessages({
+              userText: messageText,
+              decision: feedbackDecision,
+            }),
+            purpose: 'feedback',
+          })
+          return parseSocialLanguageFeedbackOutput(modelOutput)
+        }
+        catch (error) {
+          console.warn('[lumi-social-language] feedback curator failed; feedback remains pending', error)
+          return undefined
+        }
+      })()
+      const [languageFeedback] = await Promise.all([
+        languageFeedbackTask,
+        prepareLumiRelationshipAssessment(messageText, sessionMessages, interaction),
+      ])
+      await lumiSocialLanguageStore.applyFeedbackFromUser({
+        conversationId: event.sessionId,
+        personId: interaction?.actorId,
+        feedback: languageFeedback,
+      })
       if (hasAttachments)
         return
       const autonomousTarget = cardStore.activeCard?.extensions?.airi?.modules?.artistry?.autonomousTarget || 'user'
@@ -286,6 +350,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         void artistryAutonomousStore.runArtistTask(messageText, toProviderHistory(sessionMessages))
       runLumiEmotionAfterTurn(messageText, sessionMessages, interaction)
       void runLumiAutoMemoryAfterTurn(messageText, sessionMessages, sessionId, interaction)
+      void runLumiSocialLanguageLearningAfterTurn(messageText, sessionMessages, sessionId, interaction)
     },
   })
 
@@ -310,8 +375,9 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         lumiOnlineStore.runtimeMode !== 'online-client'
         || !delivery
         || delivery.deliveryId === previous?.deliveryId
-      )
+      ) {
         return
+      }
       chatSession.appendSessionMessage(delivery.payload.conversationId, {
         role: 'error',
         content: delivery.payload.error || 'Lumi Server 生成回复失败，请查看 Server Manager 日志。',
@@ -346,6 +412,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         lumiUserProfileStore.ensureUserProfileLoaded(interaction.actorId),
         lumiCurrentStateStore.ensureUserStateLoaded(interaction.actorId),
         lumiMemoryStore.ensureUserMemoryLoaded(interaction.actorId),
+        lumiSocialLanguageStore.initialize(),
       ])
     }
     const scopedOptions: ChatOrchestratorSendOptions = {
@@ -386,11 +453,627 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         return remoteTransform ? remoteTransform(interactionBound) : interactionBound
       }
     }
+    const correctedOptions = withLumiCorrectionProviderTransform(sendingMessage, scopedOptions, sessionId)
     return runtime.ingest(
       sendingMessage,
-      withLumiCorrectionProviderTransform(sendingMessage, scopedOptions),
+      withLumiSocialLanguagePipeline(sendingMessage, correctedOptions, sessionId, interaction),
       sessionId,
     )
+  }
+
+  function withLumiSocialLanguagePipeline(
+    sendingMessage: string,
+    options: ChatOrchestratorSendOptions,
+    sessionId: string,
+    interaction?: ChatInteractionContext,
+  ): ChatOrchestratorSendOptions {
+    // Settings and chat are separate Electron renderer windows. Read the
+    // shared value at turn start so prompt logging changes apply immediately.
+    lumiSocialLanguageStore.refreshConfigFromStorage()
+    if (
+      cardStore.activeCardId !== LUMI_AIRI_CARD_ID
+      || !lumiSocialLanguageStore.config.enabled
+      || options.hiddenUserMessage
+    ) {
+      return options
+    }
+
+    const replyState = buildDesktopReplyCharacterState(sendingMessage, interaction)
+    const character = replyState.character
+    const plannerBehaviors = lumiSocialLanguageStore.config.behaviorLearningEnabled
+      ? selectPlannerSocialBehaviors(lumiSocialLanguageStore.snapshot.behaviors, {
+          personId: interaction?.actorId,
+          conversationId: sessionId,
+          platform: interaction?.platform ?? (interaction?.remoteDeviceId ? 'remote' : 'desktop'),
+          conversationType: interaction?.conversationType ?? 'direct',
+          currentUserText: sendingMessage,
+        })
+      : []
+    const existingProviderTransform = options.providerMessageTransform
+    const existingModelRequestStarted = options.onModelRequestStarted
+    const existingModelStreamEvent = options.onModelStreamEvent
+    const existingModelUsage = options.onModelUsage
+    const existingModelRequestFinished = options.onModelRequestFinished
+    let plannerTraceId: string | undefined
+    return {
+      ...options,
+      deferAssistantText: true,
+      providerMessageTransform(messages) {
+        const transformed = existingProviderTransform ? existingProviderTransform(messages) : messages
+        return appendPlannerContract(
+          transformed,
+          buildLumiPlannerSystemPrompt(),
+          buildLumiPlannerTurnContext({
+            character,
+            conversationType: interaction?.conversationType ?? 'direct',
+            selectedBehaviors: plannerBehaviors.map(candidate => candidate.behavior),
+          }),
+        )
+      },
+      onModelRequestStarted(input) {
+        existingModelRequestStarted?.(input)
+        if (!lumiSocialLanguageStore.config.promptLoggingEnabled)
+          return
+        plannerTraceId = nanoid()
+        lumiConsciousnessObservabilityStore.begin({
+          id: plannerTraceId,
+          purpose: 'planner',
+          model: input.model,
+          provider: activeProvider.value,
+          conversationId: sessionId,
+          messages: input.messages,
+          startedAt: input.startedAt,
+        })
+      },
+      onModelStreamEvent(event) {
+        existingModelStreamEvent?.(event)
+        if (plannerTraceId && isTextDelta(event))
+          lumiConsciousnessObservabilityStore.appendDelta(plannerTraceId, event.text)
+      },
+      onModelUsage(usage) {
+        existingModelUsage?.(usage)
+        if (plannerTraceId)
+          lumiConsciousnessObservabilityStore.recordUsage(plannerTraceId, usage)
+      },
+      onModelRequestFinished(input) {
+        existingModelRequestFinished?.(input)
+        if (!plannerTraceId)
+          return
+        if (input.status === 'completed') {
+          lumiConsciousnessObservabilityStore.complete(plannerTraceId, input)
+        }
+        else {
+          lumiConsciousnessObservabilityStore.fail(
+            plannerTraceId,
+            input.error ?? 'Planner request failed',
+            input,
+          )
+        }
+      },
+      async assistantResponseTransform({ rawText, providerMessages }) {
+        try {
+          const state = interaction?.conversationType === 'group' || !interaction?.actorId
+            ? undefined
+            : lumiEmotionStore.getStateForUser(interaction.actorId) ?? undefined
+          const history = toLumiLanguageHistoryFromProvider(providerMessages)
+          const configuredWindow = Number(options.providerConfig?.maxContextTokens)
+          const providerMaxContextTokens = Number.isFinite(configuredWindow) && configuredWindow > 0
+            ? Math.min(configuredWindow, lumiMainTimelineStore.normalizedMaxContextTokens)
+            : lumiMainTimelineStore.normalizedMaxContextTokens
+          const contextBudget = selectLumiAdaptiveContextBudget({
+            providerMaxContextTokens,
+            estimatedHistoryTokens: estimateLumiLanguageTokens(history),
+            outputReserveTokens: lumiMainTimelineStore.normalizedOutputReserveTokens,
+            promptReserveTokens: lumiMainTimelineStore.normalizedPromptReserveTokens,
+            toolCount: Array.isArray(options.tools) ? options.tools.length : 0,
+          })
+          const result = await runLumiSocialLanguagePipeline({
+            plannerOutput: rawText,
+            legacyDraft: rawText,
+            history,
+            character,
+            context: {
+              now: Date.now(),
+              personId: interaction?.actorId,
+              conversationId: sessionId,
+              platform: interaction?.platform ?? (interaction?.remoteDeviceId ? 'remote' : 'desktop'),
+              conversationType: interaction?.conversationType ?? 'direct',
+              currentUserText: sendingMessage,
+              emotionTag: state?.dominantEmotion,
+              emotionIntensity: state ? Math.max(state.mood.defensiveness, state.mood.sadness, state.mood.warmth) : 0.35,
+              relationshipCloseness: state?.relationship.familiarity,
+              defenseActive: Boolean(
+                state?.relationship.repairRequired
+                || state?.relationship.unresolvedConflict
+                || (state?.mood.defensiveness && state.mood.defensiveness >= 0.55),
+              ),
+              refusalRequired: replyState.refusalRequired,
+              recentAssistantTexts: history
+                .filter(message => message.role === 'assistant')
+                .slice(-24)
+                .map(message => message.content),
+            },
+            expressions: lumiSocialLanguageStore.snapshot.expressions,
+            jargon: lumiSocialLanguageStore.snapshot.jargon,
+            behaviors: lumiSocialLanguageStore.snapshot.behaviors,
+            config: lumiSocialLanguageStore.config,
+            model: {
+              generate: (messages, purpose) => generateSocialLanguageText(options, messages, purpose, sessionId),
+            },
+            createId: nanoid,
+            replyerHistoryTokens: contextBudget.replyerHistoryTokens,
+          })
+          await lumiSocialLanguageStore.recordDecision(result.decision)
+          if (lumiSocialLanguageStore.config.promptLoggingEnabled) {
+            console.info('[lumi-social-language] decision', {
+              id: result.decision.id,
+              replyAct: result.intent.replyAct,
+              selectedExpressions: result.selectedExpressionIds.map((id) => {
+                const expression = lumiSocialLanguageStore.snapshot.expressions.find(item => item.id === id)
+                return {
+                  id,
+                  reasons: result.decision.selectedExpressionReasons[id] ?? [],
+                  source: expression?.origin.source,
+                  sourcePersonId: expression?.origin.personId,
+                  ownership: expression?.ownership,
+                  affinity: expression?.affinity,
+                }
+              }),
+              selectedBehaviors: result.selectedBehaviorIds,
+              contextBudget,
+              contextProjection: result.decision.contextProjection,
+              validator: result.decision.validator,
+            })
+          }
+          return flattenLumiVisibleReply(result.reply)
+        }
+        catch (error) {
+          console.warn('[lumi-social-language] pipeline failed; suppressing reply instead of replaying model text', error)
+          return ''
+        }
+      },
+    }
+  }
+
+  function buildDesktopReplyCharacterState(
+    userText: string,
+    interaction?: ChatInteractionContext,
+  ): {
+    character: LumiReplyCharacterState
+    refusalRequired: boolean
+  } {
+    const anchor = createDefaultLumiPersonaAnchor()
+    const state = interaction?.conversationType === 'group' || !interaction?.actorId
+      ? undefined
+      : lumiEmotionStore.getStateForUser(interaction.actorId) ?? undefined
+    const gate = interaction?.conversationType === 'group' || !interaction?.actorId
+      ? undefined
+      : lumiEmotionStore.previewRelationshipGate(userText, interaction.actorId)
+    const personality = cardStore.activeCard?.personality?.trim()
+    const corePersonality = personality || [
+      anchor.identity,
+      `Core traits: ${anchor.coreTraits.join('; ')}`,
+      `Boundaries: ${anchor.boundaries.join('; ')}`,
+    ].join('\n')
+    const baseReplyStyle = [
+      anchor.speechStyle.tone,
+      anchor.speechStyle.sentenceLength,
+      `Avoid: ${anchor.speechStyle.avoid.join('; ')}`,
+    ].join('\n')
+    const emotionSummary = state
+      ? [
+          state.dominantEmotion,
+          `warmth=${state.mood.warmth.toFixed(2)}`,
+          `sadness=${state.mood.sadness.toFixed(2)}`,
+          `irritation=${state.mood.irritation.toFixed(2)}`,
+          `defensiveness=${state.mood.defensiveness.toFixed(2)}`,
+        ].join(', ')
+      : 'neutral group-room presence; do not inherit a private relationship state'
+    const relationshipSummary = state
+      ? [
+          `familiarity=${state.relationship.familiarity.toFixed(2)}`,
+          `trust=${state.relationship.trust.toFixed(2)}`,
+          `attachment=${state.relationship.attachment.toFixed(2)}`,
+          `unresolvedConflict=${state.relationship.unresolvedConflict}`,
+          `repairRequired=${state.relationship.repairRequired}`,
+        ].join(', ')
+      : interaction?.conversationType === 'group'
+        ? 'shared group relationship; keep participant-specific private impressions out'
+        : 'no persisted direct relationship state'
+    const defenseSummary = gate?.blocked
+      ? `${gate.reason}: ${gate.instruction ?? gate.action}`
+      : state?.mood.defensiveness && state.mood.defensiveness >= 0.55
+        ? `active defensiveness=${state.mood.defensiveness.toFixed(2)}`
+        : 'none'
+
+    return {
+      character: {
+        corePersonality,
+        baseReplyStyle,
+        state,
+        emotionSummary,
+        relationshipSummary,
+        defenseSummary,
+      },
+      refusalRequired: gate?.blocked === true,
+    }
+  }
+
+  function appendPlannerContract(
+    messages: Message[],
+    systemPrompt: string,
+    turnContext: string,
+  ): Message[] {
+    const result = messages.map(message => ({ ...message }))
+    // DeepSeek V4 can persist multiple complete prefix units. Keeping the
+    // canonical system and native dialogue untouched lets Planner and Replyer
+    // reuse the same long prefix; only the stage-specific task tail changes.
+    result.push({
+      role: 'user',
+      content: [
+        '[Lumi trusted Planner task]',
+        systemPrompt,
+        turnContext,
+        '[/Lumi trusted Planner task]',
+      ].join('\n\n'),
+    })
+    return result
+  }
+
+  function toLumiLanguageHistory(messages: ChatHistoryItem[]): LumiLanguageModelMessage[] {
+    const history: LumiLanguageModelMessage[] = []
+    for (const message of messages
+      .filter((message): message is ChatHistoryItem & { role: 'user' | 'assistant' } =>
+        (message.role === 'user' || message.role === 'assistant')
+        && !isLumiMemoryDebugMessage(message),
+      )) {
+      const content = extractMessageText(message).trim()
+      if (content) {
+        history.push({
+          role: message.role,
+          content,
+          name: message.actorDisplayName,
+        })
+      }
+    }
+    return history
+  }
+
+  function toLumiLanguageHistoryFromProvider(messages: Message[]): LumiLanguageModelMessage[] {
+    return messages.flatMap((message) => {
+      if (message.role !== 'system' && message.role !== 'user' && message.role !== 'assistant')
+        return []
+      const content = typeof message.content === 'string'
+        ? message.content.trim()
+        : Array.isArray(message.content)
+          ? message.content
+              .filter((part): part is Extract<typeof part, { type: 'text' }> => part.type === 'text')
+              .map(part => part.text)
+              .join('\n')
+              .trim()
+          : ''
+      if (
+        content.includes('[Lumi trusted Planner task]')
+        || content.includes('[Lumi final-response planning contract]')
+        || content.includes('[Lumi planner turn context]')
+      ) {
+        return []
+      }
+      return content
+        ? [{
+            role: message.role,
+            content,
+            name: 'name' in message && typeof message.name === 'string' ? message.name : undefined,
+          }]
+        : []
+    })
+  }
+
+  async function generateSocialLanguageText(
+    options: ChatOrchestratorSendOptions,
+    messages: LumiLanguageModelMessage[],
+    purpose: 'replyer' | 'replyer_retry' | 'expression_selector' | 'context_summary',
+    conversationId?: string,
+  ) {
+    return generateSocialLanguageTextWithProvider({
+      model: options.model,
+      chatProvider: options.chatProvider,
+      messages,
+      headers: stringRecord(options.providerConfig?.headers),
+      purpose,
+      conversationId,
+    })
+  }
+
+  async function generateSocialLanguageTextWithProvider(input: {
+    model: string
+    chatProvider: ChatProvider
+    messages: LumiLanguageModelMessage[]
+    headers?: Record<string, string>
+    purpose: 'replyer' | 'replyer_retry' | 'expression_selector' | 'learning' | 'feedback' | 'sticker_classifier' | 'sticker_selector' | 'context_summary' | 'relationship_assessment' | 'current_state' | 'profile_curator' | 'profile_review' | 'memory_curator' | 'memory_topic'
+    conversationId?: string
+  }) {
+    const traceId = lumiSocialLanguageStore.config.promptLoggingEnabled ? nanoid() : undefined
+    const startedAt = Date.now()
+    if (traceId) {
+      lumiConsciousnessObservabilityStore.begin({
+        id: traceId,
+        purpose: input.purpose,
+        model: input.model,
+        provider: activeProvider.value,
+        conversationId: input.conversationId,
+        messages: input.messages,
+        startedAt,
+      })
+    }
+    let buffer = ''
+    try {
+      await llmStore.stream(input.model, input.chatProvider, input.messages as Message[], {
+        headers: input.headers,
+        supportsTools: false,
+        waitForTools: false,
+        maxSteps: 1,
+        tools: [],
+        onUsage: (usage) => {
+          if (traceId)
+            lumiConsciousnessObservabilityStore.recordUsage(traceId, usage)
+        },
+        onStreamEvent: (event) => {
+          if (!isTextDelta(event))
+            return
+          buffer += event.text
+          if (traceId)
+            lumiConsciousnessObservabilityStore.appendDelta(traceId, event.text)
+        },
+      })
+      if (!buffer.trim())
+        throw new Error(`Lumi ${input.purpose} model returned an empty response`)
+      if (traceId)
+        lumiConsciousnessObservabilityStore.complete(traceId)
+    }
+    catch (error) {
+      if (traceId)
+        lumiConsciousnessObservabilityStore.fail(traceId, errorMessageFrom(error) ?? String(error))
+      throw error
+    }
+    return buffer
+  }
+
+  async function runLumiSocialLanguageLearningAfterTurn(
+    assistantText: string,
+    sessionMessages: ChatHistoryItem[],
+    sessionId: string,
+    interaction?: ChatInteractionContext,
+  ) {
+    if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID || !lumiSocialLanguageStore.config.enabled)
+      return
+    const userMessage = findLatestUserMessage(sessionMessages)
+    if (!userMessage?.id)
+      return
+    const userText = extractMessageText(userMessage).trim()
+    if (!userText)
+      return
+
+    const platform = interaction?.platform ?? (interaction?.remoteDeviceId ? 'remote' : 'desktop')
+    const evidence: SocialLanguageEvidence = {
+      messageId: userMessage.id,
+      text: userText,
+      personId: interaction?.actorId ?? userMessage.actorId,
+      conversationId: sessionId,
+      platform,
+      timestamp: userMessage.createdAt ?? Date.now(),
+      source: 'human',
+      sourceKind: interaction?.conversationType === 'group' ? 'group_chat' : 'chat',
+      authorVerified: Boolean(interaction?.actorId ?? userMessage.actorId),
+    }
+    let modelOutput: string | undefined
+    const providerId = activeProvider.value
+    const modelId = activeModel.value
+    if (providerId && modelId) {
+      try {
+        const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
+        modelOutput = await generateSocialLanguageTextWithProvider({
+          model: modelId,
+          chatProvider,
+          messages: buildSocialLanguageLearningMessages({
+            evidence,
+            recentContext: toLumiLanguageHistory(sessionMessages)
+              .filter((message): message is LumiLanguageModelMessage & { role: 'user' | 'assistant' } =>
+                message.role === 'user' || message.role === 'assistant',
+              )
+              .slice(-8)
+              .map(message => ({ role: message.role, content: message.content })),
+          }),
+          purpose: 'learning',
+        })
+      }
+      catch (error) {
+        console.warn('[lumi-social-language] model curator failed; evidence remains pending', error)
+      }
+    }
+    await lumiSocialLanguageStore.observeEvidence(evidence, modelOutput)
+
+    const latestAssistant = [...sessionMessages].reverse().find(message =>
+      message.role === 'assistant' && extractMessageText(message).trim() === assistantText.trim(),
+    )
+    if (assistantText.trim() && latestAssistant?.id) {
+      await lumiSocialLanguageStore.observeEvidence({
+        messageId: latestAssistant.id,
+        text: assistantText.trim(),
+        personId: interaction?.actorId,
+        conversationId: sessionId,
+        platform,
+        timestamp: latestAssistant.createdAt ?? Date.now(),
+        source: 'lumi',
+        sourceKind: interaction?.conversationType === 'group' ? 'group_chat' : 'chat',
+        authorVerified: true,
+      })
+    }
+  }
+
+  async function observeExternalGroupLanguage(
+    observation: SocialLanguageGroupObservation,
+    batchSize: number,
+    historyLimit = 5_000,
+    concurrentGroups = 3,
+  ) {
+    await lumiSocialLanguageStore.enqueueObservation(observation, batchSize, {
+      claimBatch: false,
+      maximumHistory: historyLimit,
+    })
+    scheduleExternalGroupLanguageDrain(batchSize, concurrentGroups)
+    return { queued: true, batchProcessed: false }
+  }
+
+  /**
+   * Starts available background curator workers for complete group batches.
+   *
+   * Incoming AstrBot requests return after persistence instead of waiting for
+   * every model call in the backlog. Each source is claimed at most once, so
+   * different groups can run concurrently while one group's order stays stable.
+   */
+  function scheduleExternalGroupLanguageDrain(batchSize: number, concurrentGroups: number) {
+    const maximumWorkers = Math.max(1, Math.min(8, Math.floor(concurrentGroups)))
+    while (activeGroupObservationWorkers < maximumWorkers) {
+      const batch = lumiSocialLanguageStore.takeNextObservationBatch(batchSize)
+      if (!batch.length)
+        return
+
+      activeGroupObservationWorkers += 1
+      void curateExternalGroupLanguageBatch(batch)
+        .catch((error) => {
+          lumiSocialLanguageStore.releaseObservationBatch(batch[0]?.sourceId ?? 'unknown')
+          console.warn('[lumi-social-language] background group curator stopped after an unexpected failure', error)
+        })
+        .finally(() => {
+          activeGroupObservationWorkers -= 1
+          scheduleExternalGroupLanguageDrain(batchSize, maximumWorkers)
+        })
+    }
+  }
+
+  /** Resumes persisted complete batches without requiring a new group message. */
+  function resumeExternalGroupLanguageDrain(batchSize: number, concurrentGroups = 3) {
+    scheduleExternalGroupLanguageDrain(batchSize, concurrentGroups)
+  }
+
+  async function curateExternalGroupLanguageBatch(
+    batch: SocialLanguageGroupObservation[],
+    recoveryBatchIds?: string[],
+  ) {
+    let modelOutput: string | undefined
+    let curatorWarning: string | undefined
+    const providerId = activeProvider.value
+    const modelId = activeModel.value
+    if (providerId && modelId) {
+      try {
+        const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
+        modelOutput = await generateSocialLanguageTextWithProvider({
+          model: modelId,
+          chatProvider,
+          messages: buildObservedGroupLearningMessages({
+            observations: batch,
+            recentContext: lumiSocialLanguageStore.recentObservationContext(
+              batch[0]?.sourceId ?? '',
+              batch.map(item => item.messageId),
+            ),
+          }),
+          purpose: 'learning',
+        })
+      }
+      catch (error) {
+        curatorWarning = errorMessageFrom(error) ?? '模型归纳失败，证据保留待后续处理'
+        console.warn('[lumi-social-language] group batch curator failed; evidence remains pending', error)
+      }
+    }
+    const commit = groupObservationCommitQueue.then(() =>
+      lumiSocialLanguageStore.completeObservationBatch({
+        observations: batch,
+        modelOutput,
+        curatorWarning,
+        consume: !recoveryBatchIds,
+        recoveryBatchIds,
+      }),
+    )
+    groupObservationCommitQueue = commit.then(() => undefined, () => undefined)
+    return await commit
+  }
+
+  /**
+   * Replays retained observations from batches that previously produced no
+   * usable model-curated knowledge.
+   */
+  async function reprocessMissedExternalGroupLanguage() {
+    const groups = lumiSocialLanguageStore.recoverableObservationGroups()
+    let recoveredMessageCount = 0
+    let changedKnowledgeCount = 0
+    for (const group of groups) {
+      const result = await curateExternalGroupLanguageBatch(group.observations, group.batchIds)
+      if (!result.successful)
+        continue
+      recoveredMessageCount += group.observations.length
+      changedKnowledgeCount += result.changeCount
+    }
+
+    let pendingBatch = lumiSocialLanguageStore.takeNextObservationBatch(10)
+    while (pendingBatch.length) {
+      const result = await curateExternalGroupLanguageBatch(pendingBatch)
+      changedKnowledgeCount += result.changeCount
+      pendingBatch = lumiSocialLanguageStore.takeNextObservationBatch(10)
+    }
+    return {
+      groupCount: groups.length,
+      recoveredMessageCount,
+      changedKnowledgeCount,
+    }
+  }
+
+  async function runExternalStickerIntelligence(
+    operation: 'classify' | 'select',
+    payload: {
+      senderName?: string
+      contextText?: string
+      previousTags?: string[]
+      inputText?: string
+      replyText?: string
+      candidates?: Array<{ id: string, tags: string[], observedCount: number, sentCount: number }>
+    },
+  ) {
+    const providerId = activeProvider.value
+    const modelId = activeModel.value
+    if (!providerId || !modelId)
+      throw new Error('Lumi consciousness model is not configured')
+    const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
+    if (operation === 'classify') {
+      const raw = await generateSocialLanguageTextWithProvider({
+        model: modelId,
+        chatProvider,
+        messages: buildLumiStickerClassificationMessages({
+          senderName: payload.senderName?.trim() || 'unknown',
+          contextText: payload.contextText?.trim() || '',
+          previousTags: payload.previousTags ?? [],
+        }),
+        purpose: 'sticker_classifier',
+      })
+      const classification = parseLumiStickerClassification(raw)
+      if (!classification)
+        throw new Error('Lumi consciousness returned an invalid sticker classification')
+      return { classification }
+    }
+    const raw = await generateSocialLanguageTextWithProvider({
+      model: modelId,
+      chatProvider,
+      messages: buildLumiStickerSelectionMessages({
+        inputText: payload.inputText?.trim() || '',
+        replyText: payload.replyText?.trim() || '',
+        candidates: payload.candidates ?? [],
+      }),
+      purpose: 'sticker_selector',
+    })
+    const selection = parseLumiStickerSelection(raw)
+    if (!selection)
+      throw new Error('Lumi consciousness returned an invalid sticker selection')
+    return { selection }
   }
 
   async function ingestOnFork(
@@ -414,6 +1097,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   function withLumiCorrectionProviderTransform(
     sendingMessage: string,
     options: ChatOrchestratorSendOptions,
+    sessionId: string,
   ): ChatOrchestratorSendOptions {
     if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
       return options
@@ -421,8 +1105,82 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     const baseOptions: ChatOrchestratorSendOptions = {
       ...options,
       providerConfig: {
-        ...(options.providerConfig ?? {}),
-        maxContextMessages: lumiMainTimelineStore.normalizedMaxRecentChatMessagesForPrompt,
+        ...options.providerConfig,
+        // Lumi uses a token-aware rolling summary. A message-count limit would
+        // discard older turns before the compressor can preserve them.
+        maxContextMessages: 0,
+      },
+      async providerHistoryTransform(messages) {
+        const transformed = options.providerHistoryTransform
+          ? await options.providerHistoryTransform(messages)
+          : messages
+        const contextMessages = toConversationContextMessages(transformed)
+        if (!contextMessages.length)
+          return transformed
+
+        const configuredWindow = Number(options.providerConfig?.maxContextTokens)
+        const maxContextTokens = Number.isFinite(configuredWindow) && configuredWindow > 0
+          ? Math.min(configuredWindow, lumiMainTimelineStore.normalizedMaxContextTokens)
+          : lumiMainTimelineStore.normalizedMaxContextTokens
+        const contextBudget = selectLumiAdaptiveContextBudget({
+          providerMaxContextTokens: maxContextTokens,
+          estimatedHistoryTokens: estimateLumiConversationTokens(contextMessages),
+          outputReserveTokens: lumiMainTimelineStore.normalizedOutputReserveTokens,
+          promptReserveTokens: lumiMainTimelineStore.normalizedPromptReserveTokens,
+          toolCount: Array.isArray(options.tools) ? options.tools.length : 0,
+        })
+        const projection = await compressLumiConversationContext({
+          conversationId: sessionId,
+          messages: contextMessages,
+          previousSummary: lumiMainTimelineStore.summaryFor(sessionId),
+          policy: {
+            maxContextTokens: contextBudget.plannerContextWindowTokens,
+            outputReserveTokens: lumiMainTimelineStore.normalizedOutputReserveTokens,
+            promptReserveTokens: lumiMainTimelineStore.normalizedPromptReserveTokens,
+            compressionTriggerRatio: 0.82,
+            compressionTargetRatio: 0.68,
+            preserveRecentMessages: 48,
+            summaryChunkTokens: 120_000,
+          },
+          generateSummary: messages => generateSocialLanguageText(
+            options,
+            messages.map(message => ({
+              role: message.role,
+              content: message.content,
+              name: message.name,
+            })),
+            'context_summary',
+            sessionId,
+          ),
+        })
+        if (projection.summary)
+          lumiMainTimelineStore.saveSummary(projection.summary)
+        if (lumiSocialLanguageStore.config.promptLoggingEnabled) {
+          console.info('[lumi-context] planner projection', {
+            sessionId,
+            providerMaxContextTokens: maxContextTokens,
+            contextBudget,
+            compressed: projection.compressed,
+            estimatedInputTokens: projection.estimatedInputTokens,
+            summarizedMessageCount: projection.summarizedMessageCount,
+            continuitySummaryIncluded: Boolean(projection.summary),
+          })
+        }
+        return projection.messages.map((message): ChatHistoryItem => message.role === 'assistant'
+          ? {
+              id: message.id,
+              role: 'assistant',
+              content: message.content,
+              slices: [{ type: 'text', text: message.content, source: 'assistant' }],
+              tool_results: [],
+              actorDisplayName: message.name,
+            }
+          : {
+              id: message.id,
+              role: message.role,
+              content: message.content,
+              actorDisplayName: message.name,
+            })
       },
     }
 
@@ -513,24 +1271,23 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         return
       }
 
-      let buffer = ''
-      await llmStore.stream(modelId, chatProvider, [
-        {
-          role: 'system',
-          content: buildLumiRelationshipAssessmentPrompt({
-            state,
-            recentMessages: toRecentRelationshipCuratorMessages(sessionMessages),
-          }),
-        },
-        {
-          role: 'user',
-          content: userText,
-        },
-      ], {
-        onStreamEvent: (event) => {
-          if (isTextDelta(event))
-            buffer += event.text
-        },
+      const buffer = await generateSocialLanguageTextWithProvider({
+        model: modelId,
+        chatProvider,
+        purpose: 'relationship_assessment',
+        messages: [
+          {
+            role: 'system',
+            content: buildLumiRelationshipAssessmentPrompt({
+              state,
+              recentMessages: toRecentRelationshipCuratorMessages(sessionMessages),
+            }),
+          },
+          {
+            role: 'user',
+            content: userText,
+          },
+        ],
       })
 
       const parsed = parseLumiRelationshipAssessment(buffer)
@@ -665,14 +1422,13 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       return
     }
 
-    const deterministic = lumiUserProfileStore.extractDeterministicCandidates(userText)
     const curated = await curateLumiUserProfileWithLlm({
       userText,
       assistantText,
       sessionMessages,
       sourceKind,
     })
-    const candidates = dedupeProfileCandidates([...deterministic, ...curated])
+    const candidates = dedupeProfileCandidates(curated)
     if (!candidates.length) {
       await runLumiUserProfileBacklogReviewNotice(sessionMessages, userId)
       return
@@ -744,27 +1500,26 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     try {
       const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
-      let buffer = ''
-      await llmStore.stream(modelId, chatProvider, [
-        {
-          role: 'system',
-          content: buildLumiCurrentStateUpdatePrompt(),
-        },
-        {
-          role: 'user',
-          content: buildLumiCurrentStateUpdateUserPayload({
-            previousState,
-            profileContext,
-            recentMessages: sessionMessages,
-            userDisplayName: interaction?.actorDisplayName
-              ?? lumiIdentityStore.users.find(user => user.id === interaction?.actorId)?.displayName,
-          }),
-        },
-      ], {
-        onStreamEvent: (event) => {
-          if (isTextDelta(event))
-            buffer += event.text
-        },
+      const buffer = await generateSocialLanguageTextWithProvider({
+        model: modelId,
+        chatProvider,
+        purpose: 'current_state',
+        messages: [
+          {
+            role: 'system',
+            content: buildLumiCurrentStateUpdatePrompt(),
+          },
+          {
+            role: 'user',
+            content: buildLumiCurrentStateUpdateUserPayload({
+              previousState,
+              profileContext,
+              recentMessages: sessionMessages,
+              userDisplayName: interaction?.actorDisplayName
+                ?? lumiIdentityStore.users.find(user => user.id === interaction?.actorId)?.displayName,
+            }),
+          },
+        ],
       })
 
       const nextState = parseLumiCurrentStateUpdateOutput(buffer, previousState, sourceMessageIds)
@@ -908,25 +1663,24 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     try {
       const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
-      let buffer = ''
-      await llmStore.stream(modelId, chatProvider, [
-        {
-          role: 'system',
-          content: buildLumiUserProfilePendingAutoReviewPrompt(),
-        },
-        {
-          role: 'user',
-          content: buildLumiUserProfilePendingAutoReviewUserPayload({
-            pending: input.pending,
-            currentEntry: input.currentEntry,
-            recentMessages: toRecentMemoryCuratorMessages(input.sessionMessages),
-          }),
-        },
-      ], {
-        onStreamEvent: (event) => {
-          if (isTextDelta(event))
-            buffer += event.text
-        },
+      const buffer = await generateSocialLanguageTextWithProvider({
+        model: modelId,
+        chatProvider,
+        purpose: 'profile_review',
+        messages: [
+          {
+            role: 'system',
+            content: buildLumiUserProfilePendingAutoReviewPrompt(),
+          },
+          {
+            role: 'user',
+            content: buildLumiUserProfilePendingAutoReviewUserPayload({
+              pending: input.pending,
+              currentEntry: input.currentEntry,
+              recentMessages: toRecentMemoryCuratorMessages(input.sessionMessages),
+            }),
+          },
+        ],
       })
 
       return parseLumiUserProfilePendingAutoReviewOutput(buffer)
@@ -950,26 +1704,25 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     try {
       const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
-      let buffer = ''
-      await llmStore.stream(modelId, chatProvider, [
-        {
-          role: 'system',
-          content: buildLumiUserProfileCuratorPrompt(),
-        },
-        {
-          role: 'user',
-          content: buildLumiUserProfileCuratorUserPayload({
-            userMessage: input.userText,
-            assistantResponse: input.assistantText,
-            recentMessages: toRecentMemoryCuratorMessages(input.sessionMessages),
-            sourceKind: input.sourceKind,
-          }),
-        },
-      ], {
-        onStreamEvent: (event) => {
-          if (isTextDelta(event))
-            buffer += event.text
-        },
+      const buffer = await generateSocialLanguageTextWithProvider({
+        model: modelId,
+        chatProvider,
+        purpose: 'profile_curator',
+        messages: [
+          {
+            role: 'system',
+            content: buildLumiUserProfileCuratorPrompt(),
+          },
+          {
+            role: 'user',
+            content: buildLumiUserProfileCuratorUserPayload({
+              userMessage: input.userText,
+              assistantResponse: input.assistantText,
+              recentMessages: toRecentMemoryCuratorMessages(input.sessionMessages),
+              sourceKind: input.sourceKind,
+            }),
+          },
+        ],
       })
 
       return lumiUserProfileStore.parseCuratorOutput(buffer)
@@ -1041,32 +1794,31 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     try {
       const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
-      let buffer = ''
-      await llmStore.stream(modelId, chatProvider, [
-        {
-          role: 'system',
-          content: buildLumiMemoryCuratorPrompt(),
-        },
-        {
-          role: 'user',
-          content: buildLumiMemoryCuratorUserPayload({
-            userMessage: input.userText,
-            assistantResponse: input.assistantText,
-            recentMessages: toRecentMemoryCuratorMessages(input.sessionMessages, input.retrievedMemories),
-            topicWindow: input.topicWindow,
-            sourceSignals: input.sourceSignals,
-            actorId: input.interaction.actorId,
-            actorDisplayName: input.interaction.actorDisplayName,
-            conversationId: input.interaction.conversationId,
-            conversationType: input.interaction.conversationType,
-            participantUserIds: input.interaction.participantIds,
-          }),
-        },
-      ], {
-        onStreamEvent: (event) => {
-          if (isTextDelta(event))
-            buffer += event.text
-        },
+      const buffer = await generateSocialLanguageTextWithProvider({
+        model: modelId,
+        chatProvider,
+        purpose: 'memory_curator',
+        messages: [
+          {
+            role: 'system',
+            content: buildLumiMemoryCuratorPrompt(),
+          },
+          {
+            role: 'user',
+            content: buildLumiMemoryCuratorUserPayload({
+              userMessage: input.userText,
+              assistantResponse: input.assistantText,
+              recentMessages: toRecentMemoryCuratorMessages(input.sessionMessages, input.retrievedMemories),
+              topicWindow: input.topicWindow,
+              sourceSignals: input.sourceSignals,
+              actorId: input.interaction.actorId,
+              actorDisplayName: input.interaction.actorDisplayName,
+              conversationId: input.interaction.conversationId,
+              conversationType: input.interaction.conversationType,
+              participantUserIds: input.interaction.participantIds,
+            }),
+          },
+        ],
       })
 
       return lumiMemoryStore.parseCuratedCandidates(buffer, input.sourceMessageId)
@@ -1090,24 +1842,23 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     try {
       const recentMessages = toRecentMemoryContextMessages(input.sessionMessages)
       const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
-      let buffer = ''
-      await llmStore.stream(modelId, chatProvider, [
-        {
-          role: 'system',
-          content: buildLumiMemoryTopicAnalyzerPrompt(),
-        },
-        {
-          role: 'user',
-          content: buildLumiMemoryTopicAnalyzerUserPayload({
-            currentMessage: input.userText,
-            recentMessages,
-          }),
-        },
-      ], {
-        onStreamEvent: (event) => {
-          if (isTextDelta(event))
-            buffer += event.text
-        },
+      const buffer = await generateSocialLanguageTextWithProvider({
+        model: modelId,
+        chatProvider,
+        purpose: 'memory_topic',
+        messages: [
+          {
+            role: 'system',
+            content: buildLumiMemoryTopicAnalyzerPrompt(),
+          },
+          {
+            role: 'user',
+            content: buildLumiMemoryTopicAnalyzerUserPayload({
+              currentMessage: input.userText,
+              recentMessages,
+            }),
+          },
+        ],
       })
 
       const analysis = parseLumiMemoryTopicAnalysis(buffer)
@@ -1141,6 +1892,10 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     ingest,
     ingestOnFork,
     reviewAndApproveLumiUserProfilePending,
+    observeExternalGroupLanguage,
+    resumeExternalGroupLanguageDrain,
+    reprocessMissedExternalGroupLanguage,
+    runExternalStickerIntelligence,
     refreshLumiCurrentStateNow: () => runLumiCurrentStateAfterTurn(chatSession.messages, true),
     cancelPendingSends,
     getPendingQueuedSendSnapshot,
@@ -1178,6 +1933,30 @@ function findLatestUserMessage(messages: ChatHistoryItem[]) {
       return message
   }
   return undefined
+}
+
+function toConversationContextMessages(messages: ChatHistoryItem[]): LumiConversationContextMessage[] {
+  return messages.flatMap((message, index) => {
+    if (message.role !== 'system' && message.role !== 'user' && message.role !== 'assistant')
+      return []
+    const content = extractMessageText(message).trim()
+    if (!content || isLumiMemoryDebugMessage(message))
+      return []
+    return [{
+      id: message.id ?? `history:${index}`,
+      role: message.role,
+      content,
+      name: message.actorDisplayName,
+    }]
+  })
+}
+
+/** Returns string-only provider headers without trusting arbitrary config values. */
+function stringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return undefined
+  const entries = Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+  return entries.length ? Object.fromEntries(entries) : undefined
 }
 
 function isLumiMemoryDebugMessage(message: ChatHistoryItem) {

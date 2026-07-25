@@ -1,5 +1,13 @@
 import type { ChatProvider } from '@xsai-ext/providers/utils'
-import type { CommonContentPart, CompletionToolCall, CompletionToolResult, Message, Tool } from '@xsai/shared-chat'
+import type { CommonContentPart, CompletionToolCall, CompletionToolResult, Message, Tool, Usage } from '@xsai/shared-chat'
+
+/** Provider usage returned for one completed model step. */
+export interface StreamUsage extends Usage {
+  /** DeepSeek input tokens served from context cache. */
+  prompt_cache_hit_tokens?: number
+  /** DeepSeek input tokens computed without context cache. */
+  prompt_cache_miss_tokens?: number
+}
 
 export type StreamEvent
   = | { type: 'text-delta', text: string }
@@ -14,6 +22,8 @@ export interface StreamOptions {
   abortSignal?: AbortSignal
   headers?: Record<string, string>
   onStreamEvent?: (event: StreamEvent) => void | Promise<void>
+  /** Observes provider-reported usage for every completed model/tool step. */
+  onUsage?: (usage: StreamUsage) => void | Promise<void>
   toolsCompatibility?: Map<string, boolean>
   supportsTools?: boolean
   waitForTools?: boolean

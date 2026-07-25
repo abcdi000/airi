@@ -5,6 +5,7 @@ export type {
   ChatInteractionContext,
   ChatMessage,
   ChatSlices,
+  ChatSlicesImage,
   ChatSlicesText,
   ChatSlicesToolCall,
   ChatSlicesToolCallResult,

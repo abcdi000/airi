@@ -4,7 +4,7 @@ import type { LumiServerJobHandler } from './jobs'
 
 export interface LumiBackgroundLifeOptions {
   database: LumiServerDatabase
-  model: LumiConsciousnessModel
+  model: Pick<LumiConsciousnessModel, 'generate'>
   personaPrompt: string
   diary: {
     enabled: boolean

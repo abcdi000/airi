@@ -42,7 +42,11 @@ export const useLlmToolsetPromptsStore = defineStore('llm-toolset-prompts', () =
     promptsByProvider.value = remaining
   }
 
-  const activeToolsetPrompt = computed(() => renderToolsetPrompts(Object.values(promptsByProvider.value).flat()))
+  const activeToolsetPrompt = computed(() => renderToolsetPrompts(
+    Object.entries(promptsByProvider.value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .flatMap(([, prompts]) => prompts),
+  ))
 
   return {
     activeToolsetPrompt,

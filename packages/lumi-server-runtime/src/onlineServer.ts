@@ -165,7 +165,21 @@ export class LumiOnlineServer {
       this.deliverGeneration(conversation, input, { state: 'started' })
       let context: LumiReplyContext = { conversation, history: [], input }
       try {
-        const history = this.options.database.replay(conversation.id, conversation.participantPersonIds[0], 0, 500).messages
+        const history: LumiOnlineMessage[] = []
+        let afterSequence = 0
+        while (true) {
+          const page = this.options.database.replay(
+            conversation.id,
+            conversation.participantPersonIds[0],
+            afterSequence,
+            1_000,
+          )
+          history.push(...page.messages)
+          const lastSequence = page.messages.at(-1)?.sequence
+          if (lastSequence === undefined || lastSequence >= page.latestSequence)
+            break
+          afterSequence = lastSequence
+        }
         context = { conversation, history, input }
         const reply = await this.options.replyGenerator.generate(
           context,

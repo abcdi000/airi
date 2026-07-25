@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -50,7 +52,9 @@ filter_api = SimpleNamespace(
     event_message_type=decorator,
     permission_type=decorator,
     command=decorator,
-    EventMessageType=SimpleNamespace(ALL="all", PRIVATE_MESSAGE="private"),
+    EventMessageType=SimpleNamespace(
+        ALL="all", PRIVATE_MESSAGE="private", GROUP_MESSAGE="group"
+    ),
     PermissionType=SimpleNamespace(ADMIN="admin"),
 )
 components = ModuleType("astrbot.api.message_components")
@@ -71,6 +75,7 @@ api.AstrBotConfig = dict
 api.message_components = components
 astrbot = ModuleType("astrbot")
 astrbot.logger = SimpleNamespace(
+    debug=lambda *_args, **_kwargs: None,
     info=lambda *_args, **_kwargs: None,
     warning=lambda *_args, **_kwargs: None,
     exception=lambda *_args, **_kwargs: None,
@@ -95,9 +100,12 @@ from astrbot_plugin_lumi.lumi_bridge.exceptions import (  # noqa: E402
 )
 from astrbot_plugin_lumi.lumi_bridge.models import (  # noqa: E402
     LumiHealth,
+    LumiLearningPolicy,
+    LumiOutputSegment,
     LumiPerceptionEvent,
     LumiResponse,
     LumiSpeech,
+    LumiStudyGroup,
     LumiTextSegment,
 )
 from astrbot_plugin_lumi.lumi_bridge.routing import RoutingFacts  # noqa: E402
@@ -131,6 +139,9 @@ class FakeEvent:
     def get_platform_id(self) -> str:
         return "qq-bot-1"
 
+    def get_group_id(self) -> str:
+        return "100"
+
 
 class FakeAdapter:
     def __init__(self, facts: RoutingFacts | None = None) -> None:
@@ -153,6 +164,15 @@ class FakeAdapter:
 
     async def convert(self, _event: FakeEvent):
         return perception(), []
+
+    async def convert_group_observation(
+        self, _event: FakeEvent
+    ) -> tuple[LumiPerceptionEvent, list[str]]:
+        event = perception()
+        event.is_private = False
+        event.is_group = True
+        event.group_id = "100"
+        return event, []
 
 
 class FakeSessions:
@@ -188,6 +208,12 @@ class FakeClient:
     async def synthesize_speech(self, text: str) -> LumiSpeech:
         self.speech_calls.append(text)
         return LumiSpeech(b"RIFF0000WAVEaudio", "audio/wav")
+
+    async def learning_policy(self) -> LumiLearningPolicy:
+        return LumiLearningPolicy(mode="normal", groups=())
+
+    async def observe_group(self, _event: LumiPerceptionEvent) -> None:
+        self.calls += 1
 
 
 class FakeService:
@@ -270,6 +296,33 @@ class PluginHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(event.stopped)
 
+    async def test_sticker_output_is_sent_as_an_image_component(self) -> None:
+        plugin = Main.__new__(Main)
+        plugin._service = FakeService(
+            response=LumiResponse(
+                "reply-1",
+                "确实",
+                segments=[
+                    LumiOutputSegment(type="text", text="确实"),
+                    LumiOutputSegment(
+                        type="image",
+                        mime_type="image/png",
+                        data_base64=base64.b64encode(b"\x89PNG\r\n\x1a\n").decode(
+                            "ascii"
+                        ),
+                    ),
+                ],
+            )
+        )
+        event = FakeEvent()
+
+        await plugin.bridge_message(event)
+
+        self.assertEqual(len(event.sent), 2)
+        self.assertEqual(event.sent[0][0].text, "确实")
+        self.assertEqual(event.sent[1][0].type, "image")
+        self.assertTrue(Path(event.sent[1][0].path).name.startswith("lumi-sticker-"))
+
     async def test_voice_mode_synthesizes_each_bubble_as_a_complete_record(
         self,
     ) -> None:
@@ -327,6 +380,44 @@ class PluginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.sent, [])
         self.assertEqual(event.call_llm_values, [])
         self.assertFalse(event.stopped)
+
+    async def test_learning_group_is_observed_without_any_reply(self) -> None:
+        plugin = Main.__new__(Main)
+        plugin._service = FakeService(
+            routing_facts=RoutingFacts(
+                platform_instance_id="qq-bot-1",
+                sender_id="300",
+                is_platform_message=True,
+                is_private=False,
+                is_group=True,
+                is_mention=False,
+                is_wake=False,
+                is_self_message=False,
+                is_stopped=False,
+                has_supported_content=True,
+                text="这也太炸了",
+            )
+        )
+        plugin._learning_policy = LumiLearningPolicy(
+            mode="observe_only",
+            groups=(
+                LumiStudyGroup(
+                    source_id="qq-bot-1:100",
+                    platform_instance_id="qq-bot-1",
+                    group_id="100",
+                    priority="high",
+                ),
+            ),
+        )
+        plugin._learning_policy_expires_at = time.monotonic() + 60
+        event = FakeEvent()
+
+        await plugin.observe_group_message(event)
+
+        self.assertEqual(plugin._service.client.calls, 1)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(event.call_llm_values, [True])
+        self.assertTrue(event.stopped)
 
     async def test_empty_private_notification_is_not_claimed_or_replied_to(
         self,

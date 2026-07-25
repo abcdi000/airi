@@ -7,6 +7,13 @@ export interface ChatSlicesText {
   source?: 'assistant' | 'tool-progress'
 }
 
+/** Image authored by the assistant and rendered as part of chat history. */
+export interface ChatSlicesImage {
+  type: 'image'
+  url: string
+  alt?: string
+}
+
 export interface ChatSlicesToolCall {
   type: 'tool-call'
   toolCall: CompletionToolCall
@@ -19,7 +26,7 @@ export interface ChatSlicesToolCallResult {
   result?: string | CommonContentPart[]
 }
 
-export type ChatSlices = ChatSlicesText | ChatSlicesToolCall | ChatSlicesToolCallResult
+export type ChatSlices = ChatSlicesText | ChatSlicesImage | ChatSlicesToolCall | ChatSlicesToolCallResult
 
 export interface ChatAssistantMessage extends AssistantMessage {
   slices: ChatSlices[]
@@ -60,6 +67,13 @@ export interface ChatActorMetadata {
 export interface ChatInteractionContext {
   /** Stable conversation ID. */
   conversationId: string
+  /**
+   * Transport or social platform that originated the turn.
+   *
+   * This is a language-affinity and observability hint only. It must never be
+   * used as an authentication or memory-authorization claim.
+   */
+  platform?: string
   /** Direct conversations have one human participant; group conversations have multiple. */
   conversationType: 'direct' | 'group'
   /** Actor sending the current user turn. */

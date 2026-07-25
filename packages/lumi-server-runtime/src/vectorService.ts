@@ -277,6 +277,20 @@ export class LumiServerVectorService {
     }
   }
 
+  /**
+   * Embeds language-retrieval text with the singleton semantic-memory worker.
+   *
+   * Use when:
+   * - Reply expression candidates need semantic vectors
+   * - A second model process and model cache must be avoided
+   *
+   * Returns:
+   * - One normalized model vector per input text
+   */
+  async embedSocialLanguage(texts: string[]) {
+    return await this.worker.embed(texts)
+  }
+
   async backfill(limit = 2_000): Promise<LumiMemoryVectorStatus & LumiVectorWorkerStatus> {
     const model = this.worker.status().model
     const memories = this.database.listMemoryVectorCandidates(model, limit)

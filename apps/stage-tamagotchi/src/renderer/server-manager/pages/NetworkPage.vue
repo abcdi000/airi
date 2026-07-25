@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Button, FieldCheckbox, FieldInput, Textarea } from '@proj-airi/ui'
+import { Button, FieldCheckbox, FieldInput, FieldSelect, Textarea } from '@proj-airi/ui'
 
 import ManagerPage from '../components/ManagerPage.vue'
 
@@ -54,6 +54,36 @@ function save() {
         <p :class="['text-xs text-neutral-500']">
           格式：平台实例 ID | 平台用户 ID | Lumi 人物 ID。AstrBot 日志中的方括号首项通常就是平台实例 ID，例如 default。
         </p>
+        <div :class="['border-t border-neutral-200 pt-5 space-y-4 dark:border-neutral-800']">
+          <h3 :class="['text-base font-semibold']">
+            群聊学习与表情包
+          </h3>
+          <FieldSelect
+            v-model="manager.configDraft.astrbotLearningMode"
+            label="运行模式"
+            :options="[
+              { label: '正常私聊', value: 'normal' },
+              { label: '只读学习', value: 'observe_only' },
+            ]"
+          />
+          <Textarea
+            v-model="manager.configDraft.astrbotStudyGroupsText"
+            label="允许观察的群（每行一条）"
+            placeholder="default | 群号 | 群名称 | high"
+          />
+          <FieldInput v-model="manager.configDraft.astrbotObservationBatchSize" type="number" label="语言归纳批次" />
+          <FieldCheckbox v-model="manager.configDraft.astrbotStickerEnabled" label="启用 Lumi 表情包库" />
+          <FieldCheckbox v-model="manager.configDraft.astrbotStickerCollect" label="从指定学习群收藏表情包" />
+          <FieldInput v-model="manager.configDraft.astrbotStickerRelativePath" label="表情包库相对路径" />
+          <div :class="['grid grid-cols-3 gap-4']">
+            <FieldInput v-model="manager.configDraft.astrbotStickerMaximumItems" type="number" label="库存上限" />
+            <FieldInput v-model="manager.configDraft.astrbotStickerSendProbability" type="number" label="发送概率（0-1）" />
+            <FieldInput v-model="manager.configDraft.astrbotStickerCooldownMessages" type="number" label="发送冷却（消息数）" />
+          </div>
+          <p :class="['text-xs text-neutral-500']">
+            只读学习时 Server 只接收指定群的文字和图片，严格不向群聊发送消息。表情文件位于 Server 数据目录下的相对路径中。
+          </p>
+        </div>
       </section>
     </div>
   </ManagerPage>

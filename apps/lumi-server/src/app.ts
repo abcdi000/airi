@@ -1,4 +1,4 @@
-import type { LumiServerDatabase } from '@proj-airi/lumi-server-runtime'
+import type { LumiConsciousnessModel, LumiServerDatabase } from '@proj-airi/lumi-server-runtime'
 
 import type { LumiServerProcessConfig } from './config'
 
@@ -9,6 +9,8 @@ import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import {
+  buildLumiStickerClassificationMessages,
+  buildLumiStickerSelectionMessages,
   createLumiNetworkServer,
   createLumiNodeConsciousness,
   createOpenAICompatibleConsciousnessModel,
@@ -20,7 +22,10 @@ import {
   LumiServerMigrationService,
   LumiServerPluginRegistry,
   LumiServerVectorService,
+  LumiStickerLibrary,
   LumiVectorWorker,
+  parseLumiStickerClassification,
+  parseLumiStickerSelection,
   writeLumiServerBackup,
 } from '@proj-airi/lumi-server-runtime'
 
@@ -30,6 +35,39 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
   await mcp.apply(config.mcp)
   const plugins = new LumiServerPluginRegistry()
   await plugins.apply(config.plugins)
+  let stickerIntelligenceModel: LumiConsciousnessModel | undefined
+  const stickerLibrary = config.astrbot?.stickerLibrary
+    ? new LumiStickerLibrary(
+        () => config.astrbot!.stickerLibrary!,
+        () => config.dataDirectory,
+        {
+          async classify(input) {
+            if (!stickerIntelligenceModel)
+              throw new Error('Lumi consciousness model is not ready for sticker learning')
+            const raw = await stickerIntelligenceModel.generateLanguageText(
+              buildLumiStickerClassificationMessages(input),
+              'sticker_classifier',
+            )
+            const parsed = parseLumiStickerClassification(raw)
+            if (!parsed)
+              throw new Error('Lumi consciousness returned an invalid sticker classification')
+            return parsed
+          },
+          async select(input) {
+            if (!stickerIntelligenceModel)
+              throw new Error('Lumi consciousness model is not ready for sticker selection')
+            const raw = await stickerIntelligenceModel.generateLanguageText(
+              buildLumiStickerSelectionMessages(input),
+              'sticker_selector',
+            )
+            const parsed = parseLumiStickerSelection(raw)
+            if (!parsed)
+              throw new Error('Lumi consciousness returned an invalid sticker selection')
+            return parsed
+          },
+        },
+      )
+    : undefined
   const tls = config.tls
     ? {
         cert: await readFile(config.tls.certPath, 'utf8'),
@@ -66,6 +104,10 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
             maxAudioBytes: config.astrbot.maxAudioBytes,
             responseTimeoutMs: config.astrbot.responseTimeoutMs,
             maxRequestBytes: config.astrbot.maxRequestBytes,
+            learningMode: config.astrbot.learningMode,
+            studyGroups: config.astrbot.studyGroups,
+            observationBatchSize: config.astrbot.observationBatchSize,
+            stickerLibrary,
           }
         : undefined,
       onGenerationError(error, context) {
@@ -107,6 +149,7 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
             ],
           },
         })
+        stickerIntelligenceModel = model
         const backgroundLife = new LumiBackgroundLife({
           database,
           model,
@@ -134,8 +177,15 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
         return createLumiNodeConsciousness({
           database,
           personaPrompt: config.personaPrompt,
+          maxContextTokens: config.model.maxContextTokens,
+          outputReserveTokens: config.model.outputReserveTokens,
+          promptReserveTokens: config.model.promptReserveTokens,
+          languageLearningConfig: config.languageLearning,
           semanticMemorySearch: vectorService
             ? (request, limit) => vectorService!.search(request, limit)
+            : undefined,
+          socialLanguageEmbedding: vectorService
+            ? texts => vectorService!.embedSocialLanguage(texts)
             : undefined,
           model,
         })

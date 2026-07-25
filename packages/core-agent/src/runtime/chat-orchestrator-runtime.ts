@@ -4,8 +4,9 @@ import type { CommonContentPart, Message, ToolMessage } from '@xsai/shared-chat'
 import type { AgentContextPort } from '../contracts/context-port'
 import type { AgentForegroundStreamPort } from '../contracts/stream-port'
 import type { ChatAssistantMessage, ChatHistoryItem, ChatInteractionContext, ChatSlices, ChatStreamEventContext, ContextMessage, StreamingAssistantMessage } from '../types/chat'
-import type { StreamEvent, StreamOptions } from '../types/llm'
+import type { StreamEvent, StreamOptions, StreamUsage } from '../types/llm'
 
+import { errorMessageFrom } from '@moeru/std'
 import { createQueue } from '@proj-airi/stream-kit'
 
 import { formatContextPromptText } from '../messages/context-prompt'
@@ -18,6 +19,15 @@ import { categorizeResponse, createStreamingCategorizer } from './response-categ
 const STREAMING_UI_FLUSH_CHUNK_SIZE = 24
 
 type Awaitable<T> = T | Promise<T>
+
+function notifyModelObserver<T>(observer: ((input: T) => void) | undefined, input: T) {
+  try {
+    observer?.(input)
+  }
+  catch (error) {
+    console.warn('[chat-orchestrator] model observer failed', error)
+  }
+}
 
 function prependTextToContent<T extends { content?: unknown }>(msg: T, text: string): T {
   const content = msg.content
@@ -110,6 +120,25 @@ function getAssistantMessageText(message: StreamingAssistantMessage): string {
     .join('')
 }
 
+/**
+ * Returns only text authored as Lumi's visible reply.
+ *
+ * Tool progress remains part of the persisted assistant message so the local
+ * debug UI can render it, but it must not enter external replies, room ledgers,
+ * TTS, or other consumers of a completed turn.
+ */
+function getAssistantVisibleText(message: StreamingAssistantMessage): string {
+  if (message.slices.length > 0) {
+    return message.slices
+      .filter((slice): slice is Extract<ChatSlices, { type: 'text' }> =>
+        slice.type === 'text' && slice.source !== 'tool-progress')
+      .map(slice => slice.text)
+      .join('')
+  }
+
+  return typeof message.content === 'string' ? message.content : ''
+}
+
 function readProviderNumber(config: Record<string, unknown> | undefined, key: string, fallback = 0) {
   const value = config?.[key]
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN
@@ -165,8 +194,8 @@ export interface ChatOrchestratorSendOptions {
   assistantActorId?: string
   /** Assistant display name persisted on the response. */
   assistantActorDisplayName?: string
-  /** Optional per-send history boundary applied before provider message projection. */
-  providerHistoryTransform?: (messages: ChatHistoryItem[]) => ChatHistoryItem[]
+  /** Optional per-send history projection applied before provider messages are built. */
+  providerHistoryTransform?: (messages: ChatHistoryItem[]) => ChatHistoryItem[] | Promise<ChatHistoryItem[]>
   /** Image attachments appended to the user message content parts. */
   attachments?: { type: 'image', data: string, mimeType: string }[]
   /** Extra text appended to the provider-facing user message without changing chat history. */
@@ -175,8 +204,52 @@ export interface ChatOrchestratorSendOptions {
   sendAttachmentsToProvider?: boolean
   /** Optional final provider-message projection hook. Does not mutate persisted chat history. */
   providerMessageTransform?: (messages: Message[]) => Message[]
+  /** Observes the exact tool-capable model request immediately before streaming starts. */
+  onModelRequestStarted?: (input: {
+    model: string
+    messages: Message[]
+    startedAt: number
+  }) => void
+  /**
+   * Observes raw stream events without changing parsing or visible output.
+   *
+   * Keep this callback synchronous and lightweight. It runs on the provider's
+   * streaming path and must not delay user-visible generation.
+   */
+  onModelStreamEvent?: (event: StreamEvent) => void
+  /** Observes provider usage for each completed Planner/tool step. */
+  onModelUsage?: (usage: StreamUsage) => void
+  /** Observes completion timing for the tool-capable model request. */
+  onModelRequestFinished?: (input: {
+    model: string
+    startedAt: number
+    completedAt: number
+    firstTokenLatencyMs?: number
+    durationMs: number
+    status: 'completed' | 'error'
+    error?: string
+  }) => void
   /** Optional final assistant speech cleanup hook. Does not affect provider reasoning content. */
   assistantSpeechTransform?: (speech: string) => string
+  /**
+   * Optional asynchronous boundary between the tool-capable model and visible speech.
+   *
+   * Use for Planner/Replyer architectures after the provider has completed all
+   * tool steps. The returned text is parsed, persisted, and emitted as the
+   * assistant response. The raw provider text remains internal.
+   */
+  assistantResponseTransform?: (input: {
+    rawText: string
+    providerMessages: Message[]
+    interaction?: ChatInteractionContext
+    sessionId: string
+  }) => Awaitable<string>
+  /**
+   * Buffers provider text until {@link assistantResponseTransform} completes.
+   *
+   * @default false
+   */
+  deferAssistantText?: boolean
   /** Optional final assistant message projection hook. Can split or rewrite the persisted message. */
   assistantMessageTransform?: (message: StreamingAssistantMessage, messageText: string) => StreamingAssistantMessage[]
   /** Converts confirmed tool outcomes into visible in-message progress text. */
@@ -798,7 +871,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
 
       const limitedProviderHistory = limitProviderHistoryMessages(sessionMessagesForSend, options.providerConfig)
       const providerHistoryMessages = options.providerHistoryTransform
-        ? options.providerHistoryTransform(limitedProviderHistory)
+        ? await options.providerHistoryTransform(limitedProviderHistory)
         : limitedProviderHistory
       const newMessages = buildProviderMessages(providerHistoryMessages, options.interaction)
       const systemPromptSupplement = deps.getSystemPromptSupplement?.()?.trim()
@@ -883,84 +956,132 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         return
 
       const llmRequestStartedAt = monotonicNow()
+      const llmRequestStartedWallTime = Date.now()
       let llmFirstTokenEmitted = false
+      let llmFirstTokenLatencyMs: number | undefined
       deps.onLlmRequestStarted?.({
         model: options.model,
         provider: deps.getActiveProvider() || 'unknown',
         hasVoice: !!options.input,
       })
-
-      await deps.llm.stream(options.model, options.chatProvider, providerMessages as Message[], {
-        headers,
-        tools: options.tools,
-        waitForTools: true,
-        maxSteps: resolveProviderMaxStreamSteps(options.providerConfig),
-        captureToolErrors: true,
-        onStreamEvent: async (event: StreamEvent) => {
-          switch (event.type) {
-            case 'tool-call':
-              toolNamesByCallId.set(event.toolCallId, event.toolName)
-              toolCallQueue.enqueue({
-                type: 'tool-call',
-                toolCall: event,
-              })
-
-              break
-            case 'tool-result':
-              toolCallQueue.enqueue({
-                type: 'tool-call-result',
-                id: event.toolCallId,
-                result: event.result,
-              })
-              await appendToolProgress(event.toolCallId, event.result, false)
-
-              break
-            case 'tool-error':
-              toolCallQueue.enqueue({
-                type: 'tool-call-result',
-                id: event.toolCallId,
-                isError: true,
-                result: event.result,
-              })
-              await appendToolProgress(event.toolCallId, event.result, true)
-
-              break
-            case 'text-delta':
-              if (!llmFirstTokenEmitted) {
-                llmFirstTokenEmitted = true
-                deps.onLlmFirstToken?.({
-                  model: options.model,
-                  ttfbMs: Math.round(monotonicNow() - llmRequestStartedAt),
-                })
-              }
-              fullText += event.text
-              await parser.consume(event.text)
-              break
-            case 'reasoning-delta': {
-              if (shouldAbort())
-                return
-
-              const { reasoning = '' } = buildingMessage.categorization ?? {}
-              const nextReasoning = reasoning + event.text
-              buildingMessage.categorization = {
-                speech: typeof buildingMessage.content === 'string' ? buildingMessage.content : '',
-                reasoning: nextReasoning,
-              }
-              const crossesBoundary
-                = Math.floor(nextReasoning.length / STREAMING_UI_FLUSH_CHUNK_SIZE)
-                  > Math.floor(reasoning.length / STREAMING_UI_FLUSH_CHUNK_SIZE)
-              if (!reasoning || crossesBoundary)
-                patchForegroundStream(sessionId, buildingMessage)
-              break
-            }
-            case 'finish':
-              break
-            case 'error':
-              throw event.error ?? new Error('Stream error')
-          }
-        },
+      notifyModelObserver(options.onModelRequestStarted, {
+        model: options.model,
+        messages: providerMessages as Message[],
+        startedAt: llmRequestStartedWallTime,
       })
 
+      try {
+        await deps.llm.stream(options.model, options.chatProvider, providerMessages as Message[], {
+          headers,
+          tools: options.tools,
+          waitForTools: true,
+          maxSteps: resolveProviderMaxStreamSteps(options.providerConfig),
+          captureToolErrors: true,
+          onUsage: async (usage) => {
+            notifyModelObserver(options.onModelUsage, usage)
+          },
+          onStreamEvent: async (event: StreamEvent) => {
+            switch (event.type) {
+              case 'tool-call':
+                toolNamesByCallId.set(event.toolCallId, event.toolName)
+                toolCallQueue.enqueue({
+                  type: 'tool-call',
+                  toolCall: event,
+                })
+
+                break
+              case 'tool-result':
+                toolCallQueue.enqueue({
+                  type: 'tool-call-result',
+                  id: event.toolCallId,
+                  result: event.result,
+                })
+                await appendToolProgress(event.toolCallId, event.result, false)
+
+                break
+              case 'tool-error':
+                toolCallQueue.enqueue({
+                  type: 'tool-call-result',
+                  id: event.toolCallId,
+                  isError: true,
+                  result: event.result,
+                })
+                await appendToolProgress(event.toolCallId, event.result, true)
+
+                break
+              case 'text-delta':
+                if (!llmFirstTokenEmitted) {
+                  llmFirstTokenEmitted = true
+                  llmFirstTokenLatencyMs = Math.round(monotonicNow() - llmRequestStartedAt)
+                  deps.onLlmFirstToken?.({
+                    model: options.model,
+                    ttfbMs: llmFirstTokenLatencyMs,
+                  })
+                }
+                fullText += event.text
+                if (!options.deferAssistantText)
+                  await parser.consume(event.text)
+                break
+              case 'reasoning-delta': {
+                if (shouldAbort())
+                  return
+
+                const { reasoning = '' } = buildingMessage.categorization ?? {}
+                const nextReasoning = reasoning + event.text
+                buildingMessage.categorization = {
+                  speech: typeof buildingMessage.content === 'string' ? buildingMessage.content : '',
+                  reasoning: nextReasoning,
+                }
+                const crossesBoundary
+                  = Math.floor(nextReasoning.length / STREAMING_UI_FLUSH_CHUNK_SIZE)
+                    > Math.floor(reasoning.length / STREAMING_UI_FLUSH_CHUNK_SIZE)
+                if (!reasoning || crossesBoundary)
+                  patchForegroundStream(sessionId, buildingMessage)
+                break
+              }
+              case 'finish':
+                break
+              case 'error':
+                throw event.error ?? new Error('Stream error')
+            }
+            notifyModelObserver(options.onModelStreamEvent, event)
+          },
+        })
+        const completedAt = Date.now()
+        notifyModelObserver(options.onModelRequestFinished, {
+          model: options.model,
+          startedAt: llmRequestStartedWallTime,
+          completedAt,
+          firstTokenLatencyMs: llmFirstTokenLatencyMs,
+          durationMs: Math.max(0, completedAt - llmRequestStartedWallTime),
+          status: 'completed',
+        })
+      }
+      catch (error) {
+        const completedAt = Date.now()
+        notifyModelObserver(options.onModelRequestFinished, {
+          model: options.model,
+          startedAt: llmRequestStartedWallTime,
+          completedAt,
+          firstTokenLatencyMs: llmFirstTokenLatencyMs,
+          durationMs: Math.max(0, completedAt - llmRequestStartedWallTime),
+          status: 'error',
+          error: errorMessageFrom(error) ?? String(error),
+        })
+        throw error
+      }
+
+      let visibleFullText = fullText
+      if (options.assistantResponseTransform) {
+        visibleFullText = await options.assistantResponseTransform({
+          rawText: fullText,
+          providerMessages: providerMessages as Message[],
+          interaction: options.interaction,
+          sessionId,
+        })
+      }
+      if (options.deferAssistantText)
+        await parser.consume(visibleFullText)
       await parser.end()
       deps.onAssistantResponseRendered?.({
         model: options.model,
@@ -971,15 +1092,15 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         ? buildingMessage.content
         : ''
       const suppressedAssistant = shouldSuppressAssistantText(assistantTextForSuppression, options.suppressAssistantTexts)
-        || shouldSuppressAssistantText(fullText, options.suppressAssistantTexts)
+        || shouldSuppressAssistantText(visibleFullText, options.suppressAssistantTexts)
       if (!isStaleGeneration() && suppressedAssistant) {
-        options.onAssistantSuppressed?.(assistantTextForSuppression || fullText)
+        options.onAssistantSuppressed?.(assistantTextForSuppression || visibleFullText)
       }
 
       const finalAssistantMessages = !isStaleGeneration() && !suppressedAssistant
         ? (
             options.assistantMessageTransform
-              ? options.assistantMessageTransform(cloneStreamingMessage(buildingMessage), fullText)
+              ? options.assistantMessageTransform(cloneStreamingMessage(buildingMessage), visibleFullText)
               : [buildingMessage]
           ).filter(message => message.slices.length > 0 || getAssistantMessageText(message).trim().length > 0)
         : []
@@ -999,7 +1120,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
 
       await hooks.emitStreamEndHooks(streamingMessageContext)
       if (!suppressedAssistant)
-        await hooks.emitAssistantResponseEndHooks(fullText, streamingMessageContext)
+        await hooks.emitAssistantResponseEndHooks(visibleFullText, streamingMessageContext)
 
       await hooks.emitAfterSendHooks(sendingMessage, streamingMessageContext)
       if (!suppressedAssistant) {
@@ -1009,9 +1130,13 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         }
 
         const turnOutput = finalAssistantMessages.at(-1) ?? buildingMessage
+        const outputText = finalAssistantMessages
+          .map(getAssistantVisibleText)
+          .filter(text => text.trim().length > 0)
+          .join('\n\n') || visibleFullText
         await hooks.emitChatTurnCompleteHooks({
           output: { ...turnOutput },
-          outputText: finalAssistantMessages.map(getAssistantMessageText).join('\n\n') || fullText,
+          outputText,
           toolCalls: sessionMessagesForSend.filter(msg => msg.role === 'tool') as ToolMessage[],
         }, streamingMessageContext)
       }
@@ -1019,7 +1144,10 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       if (!suppressedAssistant) {
         deps.onAssistantTurnReady?.({
           sessionId,
-          messageText: finalAssistantMessages.map(getAssistantMessageText).join('\n\n') || fullText,
+          messageText: finalAssistantMessages
+            .map(getAssistantVisibleText)
+            .filter(text => text.trim().length > 0)
+            .join('\n\n') || visibleFullText,
           sessionMessages: sessionMessagesForSend,
           hasAttachments: !!options.attachments?.length,
           hiddenUserMessage: options.hiddenUserMessage,

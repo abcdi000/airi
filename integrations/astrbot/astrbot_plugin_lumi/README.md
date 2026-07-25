@@ -1,5 +1,18 @@
 # astrbot_plugin_lumi
 
+## 群聊只读学习模式
+
+群聊学习由 Lumi 配置，不在插件中维护第二份群白名单：
+
+1. 在桌面 Lumi 的“设置 > AstrBot 接入 > 群聊学习”中添加 AstrBot 实例 ID 和群号。
+2. 将运行模式切换为“只读学习”，保存并应用。
+3. 插件每 5 秒刷新一次 Lumi 策略，只接收已启用群的文字和图片，不调用回复链路。
+4. 文字按 Lumi 配置的批次积累后，由语言整理器归纳表达、黑话和社交行为候选；图片按哈希去重后进入 Lumi 表情包库。
+
+只读学习是一项硬安全约束。该模式下插件不调用回复生成、TTS、MCP 或发送 API；
+私聊也会静默暂停。群原文不会进入聊天记录、人物印象、关系状态、日记或长期事实记忆。
+退出只读学习并恢复“正常私聊”后，群聊仍不会触发回复，私聊反馈则可以继续影响已经学到的表达。
+
 `astrbot_plugin_lumi` 将 AstrBot 平台收到的有序私聊消息链桥接到同一个 Lumi。它既可以连接中心 Lumi Server，也可以连接正在运行的 Windows 桌面 Lumi。
 
 它不是普通聊天模型 Provider。AstrBot 只负责平台适配、事件、媒体获取和发送；Lumi 负责身份、会话、人格、记忆、视觉、听觉、工具与最终回复。
@@ -123,13 +136,15 @@ AstrBot platform event
 
 ## 接管策略
 
-`trigger_mode` 支持：
+`trigger_mode` 只控制普通私聊入口：
 
-- `private_always`：默认；私聊始终处理，群聊仅 @ 或唤醒时处理。
-- `wake_only`：仅 AstrBot 唤醒或配置的唤醒词。
-- `mention_only`：仅 @ 机器人。
-- `all_messages`：私聊和群聊全部处理。
+- `private_always`：默认；处理通过身份校验的私聊。
+- `wake_only`：仅处理满足 AstrBot 唤醒规则或额外唤醒词的私聊。
+- `mention_only`：仅处理明确 @ 机器人的私聊事件。
+- `all_messages`：与 `private_always` 等价；不会扩大到群聊。
 - `disabled`：停止桥接。
+
+群聊不受这些选项控制。只有 Lumi 自己进入“只读学习”模式，且群号存在于 Lumi 的学习来源列表时，插件才会把文字和图片提交给只读观察接口。该路径没有回复生成、TTS、工具调用或消息发送能力。
 
 默认忽略 `/` 等命令前缀，并以较低事件优先级运行，让 AstrBot 管理命令和其他命令插件先处理。已停止事件、机器人自身消息，以及“对方正在输入”等不含文字、图片、语音或引用内容的空通知不会再次处理。
 
@@ -149,8 +164,8 @@ Lumi 接管后，插件按 AstrBot 4.26.7 的真实管线调用 `event.should_ca
 | `connect_timeout_seconds` | `10` | 连接超时 |
 | `trigger_mode` | `private_always` | 接管策略 |
 | `handle_private_messages` | `true` | 是否处理私聊 |
-| `handle_group_mentions` | `true` | 是否处理群聊唤醒 |
-| `wake_words` | `Lumi,lumi` | 额外唤醒词 |
+| `handle_group_mentions` | `false` | 兼容旧配置；当前版本不会启用群聊回复 |
+| `wake_words` | `Lumi,lumi` | 私聊入口的额外唤醒词 |
 | `ignore_command_messages` | `true` | 命令优先交给其他插件 |
 | `command_prefixes` | `/` | 命令前缀 |
 | `max_image_bytes` | `10 MiB` | 单张图片上限 |
@@ -180,6 +195,8 @@ AstrBot 4.26 的 `_conf_schema.json` 没有密码输入类型。Token 使用普�
 - PNG、JPEG、GIF、WebP。
 
 插件异步下载并校验大小、MIME 与文件魔数，然后只把原始图片字节发送给所选 Lumi 运行时。签名 URL、本地路径和二进制不会写入日志。Lumi 的视觉模型必须支持图片输入；未配置时返回 `vision_unavailable`，不会调用 AstrBot 图片描述模型。
+
+学习群中的图片还可进入 Lumi 自己的表情包库。收藏不依赖视觉模块：Lumi 根据图片哈希去重，并用图片附近文字形成轻量语境标签。私聊回复时，本地 Lumi 按发送概率、冷却间隔、观察次数和当前语境选择表情；AstrBot 使用原生 `Image` 消息组件发送给 SnowLuma/NapCat，桌面聊天窗口同步显示同一张图片。表情包库路径、容量和发送概率只在桌面 Lumi 的“AstrBot 接入”页面配置，插件不维护第二份策略。
 
 ## 语音
 
@@ -235,7 +252,7 @@ TTS，不会同时启动一套离线意识。
 ## 常见错误
 
 - `identity_unbound`：在桌面 Lumi 的“AstrBot 接入”或 Server Manager 中绑定平台实例和账号。
-- 群聊不会触发 Lumi；这是当前版本的强制安全策略，不受唤醒词或 @ 影响。
+- 群聊不会触发 Lumi 回复；只读学习模式仅记录 Lumi 明确授权群的文字和图片，并且不受唤醒词或 @ 影响。
 - Lumi 用空行或 `LUMI_NEXT_REPLY` 分隔的多条回复会按顺序分别发送到平台，不会只保留第一条。
 - QQ 文字、图片和语音转写在桌面聊天窗口按用户可读形式显示；模型使用的视觉/听觉结构化感知不会显示成 JSON。
 - `Authentication required`：插件 token 与当前桌面/Server 集成令牌不一致，或 token 少于 32 字符。
@@ -246,13 +263,13 @@ TTS，不会同时启动一套离线意识。
 - `Lumi runtime is unavailable`：检查目标、地址、端口，以及桌面 Lumi 或 Server 是否正在运行。
 - `runtime_mode_conflict`：桌面 Lumi 当前登录了中心 Server；注销并回到离线模式，或把插件目标改为 `server`。
 - `runtime_not_ready`：桌面窗口尚未加载完成，或“机体模块 > 意识”没有保存可用的服务商和模型。
-- 群消息不回复：当前版本强制仅处理私聊。
+- 群消息不回复：这是强制安全策略；学习群也只观察，不发送。
 - 出现双回复：确认 AstrBot 版本处于支持范围，并运行源码契约测试检查 `call_llm` 语义。
 
 ## 当前限制
 
 - 尚未实现 Lumi 主动向 AstrBot 会话推送消息。
-- 已支持用桌面 Lumi 发声模块生成 QQ 语音回复；Lumi 原生图片和文件输出仍未实现。
+- 已支持用桌面 Lumi 发声模块生成 QQ 语音回复，并支持本地 Lumi 表情包作为图片消息输出；通用图片生成和文件输出仍未实现。
 - 尚未实现跨平台账号自助绑定；绑定只能由 Lumi Server 管理员配置。
 - 语音的完整听觉特征仍缺失，目前 Server 只做转写。
 - 未知平台私有媒体对象若既无本地路径、URL、`file` 或 base64，将明确失败；没有调用不稳定的适配器私有方法。

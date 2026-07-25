@@ -18,10 +18,12 @@ from .exceptions import (
 )
 from .models import (
     LumiHealth,
+    LumiLearningPolicy,
     LumiOutputSegment,
     LumiPerceptionEvent,
     LumiResponse,
     LumiSpeech,
+    LumiStudyGroup,
 )
 
 
@@ -31,6 +33,10 @@ class LumiRuntimeClient(Protocol):
     ) -> LumiResponse: ...
 
     async def health_check(self) -> LumiHealth: ...
+
+    async def learning_policy(self) -> LumiLearningPolicy: ...
+
+    async def observe_group(self, event: LumiPerceptionEvent) -> None: ...
 
     async def synthesize_speech(self, text: str) -> LumiSpeech: ...
 
@@ -80,6 +86,7 @@ class HttpLumiRuntimeClient:
                     url=item.get("url"),
                     local_path=item.get("local_path"),
                     mime_type=item.get("mime_type"),
+                    data_base64=item.get("data_base64"),
                     metadata=item.get("metadata") or {},
                 )
                 for item in payload.get("segments", [])
@@ -130,6 +137,52 @@ class HttpLumiRuntimeClient:
             version=_optional_text(payload.get("server_version")),
             detail=_optional_text(payload.get("detail")),
         )
+
+    async def learning_policy(self) -> LumiLearningPolicy:
+        if not self._api_token:
+            raise LumiAuthenticationError("Lumi integration token is not configured")
+        try:
+            response = await self._client.get(
+                f"{self._endpoint}/api/lumi/integrations/astrbot/learning-policy",
+                headers={"Authorization": f"Bearer {self._api_token}"},
+            )
+        except httpx.HTTPError as error:
+            raise LumiUnavailableError("Lumi learning policy is unavailable") from error
+        self._raise_for_response(response)
+        try:
+            payload = response.json()
+            mode = payload["mode"]
+            if mode not in {"normal", "observe_only"}:
+                raise ValueError("invalid mode")
+            groups = tuple(
+                LumiStudyGroup(
+                    source_id=str(item["source_id"]),
+                    platform_instance_id=str(item["platform_instance_id"]),
+                    group_id=str(item["group_id"]),
+                    priority=(
+                        item["priority"] if item.get("priority") in {"normal", "high"} else "normal"
+                    ),
+                )
+                for item in payload.get("groups", [])
+            )
+            return LumiLearningPolicy(mode=mode, groups=groups)
+        except (KeyError, TypeError, ValueError) as error:
+            raise LumiProtocolError("Lumi returned an invalid learning policy") from error
+
+    async def observe_group(self, event: LumiPerceptionEvent) -> None:
+        if not self._api_token:
+            raise LumiAuthenticationError("Lumi integration token is not configured")
+        try:
+            response = await self._client.post(
+                f"{self._endpoint}/api/lumi/integrations/astrbot/observe",
+                json=event.to_wire(),
+                headers={"Authorization": f"Bearer {self._api_token}"},
+            )
+        except httpx.TimeoutException as error:
+            raise LumiTimeoutError("Lumi did not accept the group observation in time") from error
+        except httpx.HTTPError as error:
+            raise LumiUnavailableError("Lumi group observation endpoint is unavailable") from error
+        self._raise_for_response(response)
 
     async def synthesize_speech(self, text: str) -> LumiSpeech:
         if not self._api_token:

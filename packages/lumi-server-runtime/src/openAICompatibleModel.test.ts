@@ -42,4 +42,43 @@ describe('createOpenAICompatibleConsciousnessModel', () => {
     // unhandled steps rejection as an error after this case completes.
     await new Promise<void>(resolve => setTimeout(resolve, 0))
   })
+
+  it('requests DeepSeek V4 streamed cache accounting', async () => {
+    let requestBody: Record<string, unknown> | undefined
+    const model = createOpenAICompatibleConsciousnessModel({
+      baseURL: 'https://api.deepseek.com/v1/',
+      model: 'deepseek-v4-flash',
+      providerId: 'deepseek',
+      curateMemories: false,
+      fetch: async (_input, init) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return new Response([
+          'data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}',
+          '',
+          'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+          '',
+          'data: {"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":1,"total_tokens":21,"prompt_cache_hit_tokens":12,"prompt_cache_miss_tokens":8}}',
+          '',
+          'data: [DONE]',
+          '',
+        ].join('\n'), {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      },
+    })
+
+    const result = await model.generate({
+      conversationId: 'direct-doggy',
+      conversationType: 'direct',
+      actorPersonId: 'doggy',
+      actorDisplayName: 'Doggy',
+      participantPersonIds: ['doggy'],
+      memories: [],
+      personStates: [],
+      messages: [{ role: 'user', content: 'hello' }],
+    }, () => {})
+
+    expect(result.text).toBe('hello')
+    expect(requestBody?.stream_options).toEqual({ include_usage: true })
+  })
 })

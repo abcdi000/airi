@@ -36,6 +36,9 @@ export interface LumiServerManagerState {
       apiKeySet: boolean
       temperature?: number
       maxOutputTokens?: number
+      maxContextTokens: number
+      outputReserveTokens: number
+      promptReserveTokens: number
       maxSteps: number
       thinkingMode: 'auto' | 'enabled' | 'disabled'
       reasoningEffort: 'auto' | 'high' | 'max'
@@ -51,6 +54,24 @@ export interface LumiServerManagerState {
     astrbot: {
       enabled: boolean
       tokenConfigured: boolean
+      learningMode: 'normal' | 'observe_only'
+      studyGroups: Array<{
+        id: string
+        platformInstanceId: string
+        groupId: string
+        displayName: string
+        enabled: boolean
+        priority: 'normal' | 'high'
+      }>
+      observationBatchSize: number
+      stickerLibrary: {
+        enabled: boolean
+        collectFromStudyGroups: boolean
+        relativePath: string
+        maximumItems: number
+        sendProbability: number
+        cooldownMessages: number
+      }
       identityBindings: Array<{
         platformInstanceId: string
         externalUserId: string
@@ -110,6 +131,9 @@ export async function setupLumiServerManager() {
           apiKeySet: Boolean(config.model.apiKey),
           temperature: config.model.temperature,
           maxOutputTokens: config.model.maxOutputTokens,
+          maxContextTokens: config.model.maxContextTokens,
+          outputReserveTokens: config.model.outputReserveTokens,
+          promptReserveTokens: config.model.promptReserveTokens,
           maxSteps: config.model.maxSteps,
           thinkingMode: config.model.thinkingMode,
           reasoningEffort: config.model.reasoningEffort,
@@ -134,6 +158,17 @@ export async function setupLumiServerManager() {
         astrbot: {
           enabled: config.astrbot?.enabled ?? false,
           tokenConfigured: Boolean(config.astrbot?.apiToken),
+          learningMode: config.astrbot?.learningMode ?? 'normal',
+          studyGroups: config.astrbot?.studyGroups ?? [],
+          observationBatchSize: config.astrbot?.observationBatchSize ?? 20,
+          stickerLibrary: config.astrbot?.stickerLibrary ?? {
+            enabled: true,
+            collectFromStudyGroups: true,
+            relativePath: 'lumi-stickers',
+            maximumItems: 256,
+            sendProbability: 0.18,
+            cooldownMessages: 3,
+          },
           identityBindings: config.astrbot?.identityBindings ?? [],
         },
       },
@@ -397,6 +432,9 @@ export async function setupLumiServerManager() {
         ...(typeof patch.modelApiKey === 'string' && patch.modelApiKey ? { apiKey: patch.modelApiKey } : {}),
         ...(typeof patch.modelTemperature === 'number' ? { temperature: patch.modelTemperature } : {}),
         ...(typeof patch.modelMaxOutputTokens === 'number' ? { maxOutputTokens: patch.modelMaxOutputTokens } : {}),
+        ...(typeof patch.modelMaxContextTokens === 'number' ? { maxContextTokens: patch.modelMaxContextTokens } : {}),
+        ...(typeof patch.modelOutputReserveTokens === 'number' ? { outputReserveTokens: patch.modelOutputReserveTokens } : {}),
+        ...(typeof patch.modelPromptReserveTokens === 'number' ? { promptReserveTokens: patch.modelPromptReserveTokens } : {}),
         ...(typeof patch.modelMaxSteps === 'number' ? { maxSteps: patch.modelMaxSteps } : {}),
         ...(typeof patch.modelThinkingMode === 'string' ? { thinkingMode: patch.modelThinkingMode } : {}),
         ...(typeof patch.modelReasoningEffort === 'string' ? { reasoningEffort: patch.modelReasoningEffort } : {}),
@@ -441,6 +479,16 @@ export async function setupLumiServerManager() {
                 && typeof binding.personId === 'string',
               ),
             }
+          : {}),
+        ...(patch.astrbotLearningMode === 'normal' || patch.astrbotLearningMode === 'observe_only'
+          ? { learningMode: patch.astrbotLearningMode }
+          : {}),
+        ...(Array.isArray(patch.astrbotStudyGroups) ? { studyGroups: patch.astrbotStudyGroups } : {}),
+        ...(typeof patch.astrbotObservationBatchSize === 'number'
+          ? { observationBatchSize: patch.astrbotObservationBatchSize }
+          : {}),
+        ...(patch.astrbotStickerLibrary && typeof patch.astrbotStickerLibrary === 'object' && !Array.isArray(patch.astrbotStickerLibrary)
+          ? { stickerLibrary: patch.astrbotStickerLibrary }
           : {}),
       },
       tls: patch.tlsEnabled === false

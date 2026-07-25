@@ -44,6 +44,7 @@
     "lint:swift": "pnpm -rF @proj-airi/stage-pocket run lint:swift",
     "capture:tamagotchi": "pnpm -F @proj-airi/vishot-runner-electron capture -- ./packages/scenarios-stage-tamagotchi-electron/src/scenarios/demo-controls-settings-chat-websocket.ts --output-dir ./packages/scenarios-stage-tamagotchi-browser/artifacts/raw",
     "to-avif": "tsx docs/scripts/avif.ts",
+    "lumi:language-replay": "tsx packages/lumi-runtime/examples/language-replay.ts",
     "sponsors:generate": "sponsorkit --output-dir docs/content/public/assets/sponsors",
     "typecheck": "pnpm -rF=\"./packages/*\" -F=\"./apps/*\" -F=\"./docs\" --parallel typecheck",
     "typecheck:engines": "pnpm -rF=\"./engines/*\" --parallel typecheck",

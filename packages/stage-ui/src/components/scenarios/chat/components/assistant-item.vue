@@ -252,6 +252,12 @@ function parseDebugText(text: string) {
                 <template v-else-if="slice.type === 'text'">
                   <MarkdownRenderer :content="stripVisibleAssistantPreamble(slice.text)" />
                 </template>
+                <img
+                  v-else-if="slice.type === 'image'"
+                  :src="slice.url"
+                  :alt="slice.alt || 'Lumi 表情'"
+                  :class="['max-h-64 max-w-full self-start rounded-md object-contain']"
+                >
               </template>
             </div>
             <div v-else-if="showLoader" i-eos-icons:three-dots-loading />

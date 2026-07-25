@@ -15,6 +15,17 @@ describe('lumi Server process configuration', () => {
       const config = await loadLumiServerConfig(path)
       expect(config.authSecret.length).toBeGreaterThanOrEqual(32)
       expect(config.dataDirectory).toBe(join(directory, 'config', 'data'))
+      expect(config.languageLearning).toMatchObject({
+        enabled: true,
+        maxSelectedExpressions: 3,
+        preciseSelectorEnabled: true,
+        promptLoggingEnabled: false,
+      })
+      expect(config.model).toMatchObject({
+        maxContextTokens: 1_000_000,
+        outputReserveTokens: 64_000,
+        promptReserveTokens: 32_000,
+      })
       expect(JSON.parse(await readFile(path, 'utf8'))).not.toHaveProperty('airiAccount')
       await expect(initializeLumiServerConfig(path)).rejects.toMatchObject({ code: 'EEXIST' })
     }
@@ -30,6 +41,7 @@ describe('lumi Server process configuration', () => {
       await initializeLumiServerConfig(path)
       const legacy = JSON.parse(await readFile(path, 'utf8'))
       delete legacy.astrbot
+      delete legacy.languageLearning
       await writeFile(path, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8')
 
       await expect(upgradeLumiServerConfig(path)).resolves.toBe(true)
@@ -39,6 +51,16 @@ describe('lumi Server process configuration', () => {
       expect(upgraded.astrbot.enabled).toBe(false)
       expect(upgraded.astrbot.apiToken.length).toBeGreaterThanOrEqual(32)
       expect(upgraded.astrbot.identityBindings).toHaveLength(6)
+      expect(upgraded.languageLearning).toMatchObject({
+        enabled: true,
+        multiMessageReplyEnabled: true,
+        preciseSelectorEnabled: true,
+      })
+      expect(upgraded.model).toMatchObject({
+        maxContextTokens: 1_000_000,
+        outputReserveTokens: 64_000,
+        promptReserveTokens: 32_000,
+      })
       expect(upgraded.astrbot.identityBindings).toEqual(expect.arrayContaining([
         {
           platformInstanceId: 'default',

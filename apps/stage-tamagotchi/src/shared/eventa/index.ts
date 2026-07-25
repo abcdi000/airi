@@ -84,11 +84,68 @@ export interface ElectronLumiAstrBotIdentityBinding {
   personId: string
 }
 
+export interface ElectronLumiAstrBotStudyGroup {
+  id: string
+  platformInstanceId: string
+  groupId: string
+  displayName: string
+  enabled: boolean
+  priority: 'normal' | 'high'
+}
+
 export interface ElectronLumiAstrBotGatewayConfig {
   enabled: boolean
   port: number
   apiToken: string
   identityBindings: ElectronLumiAstrBotIdentityBinding[]
+  learningMode: 'normal' | 'observe_only'
+  studyGroups: ElectronLumiAstrBotStudyGroup[]
+  observationBatchSize: number
+  observationHistoryLimit: number
+  observationConcurrentGroups: number
+  stickerLibrary: ElectronLumiStickerLibraryConfig
+}
+
+export interface ElectronLumiStickerLibraryConfig {
+  enabled: boolean
+  collectFromStudyGroups: boolean
+  relativePath: string
+  maximumItems: number
+  sendProbability: number
+  cooldownMessages: number
+}
+
+export interface ElectronLumiStickerLibraryStats {
+  total: number
+  owned: number
+  discarded: number
+  received: number
+  sent: number
+}
+
+export interface ElectronLumiStickerMonitorEvent {
+  id: string
+  kind: 'collected' | 'duplicate' | 'discarded' | 'sent' | 'warning'
+  stickerId?: string
+  sourceId?: string
+  timestamp: number
+  detail: string
+}
+
+export interface ElectronLumiStickerRecord {
+  id: string
+  hash: string
+  relativePath: string
+  mimeType: string
+  status: 'owned' | 'discarded'
+  tags: string[]
+  tagsManuallyEdited?: boolean
+  sourceIds: string[]
+  observedCount: number
+  sentCount: number
+  createdAt: number
+  lastObservedAt: number
+  lastSentAt?: number
 }
 
 export interface ElectronLumiAstrBotGatewayState {
@@ -96,12 +153,22 @@ export interface ElectronLumiAstrBotGatewayState {
   running: boolean
   endpoint: string
   runtimeMode: 'offline-client' | 'online-client'
+  stickerLibrary: {
+    rootPath: string
+    stats: ElectronLumiStickerLibraryStats
+    records: ElectronLumiStickerRecord[]
+    recentEvents: ElectronLumiStickerMonitorEvent[]
+  }
   lastError?: string
 }
 
 export const electronLumiAstrBotGatewayGetState = defineInvokeEventa<ElectronLumiAstrBotGatewayState>('eventa:invoke:electron:lumi-astrbot-gateway:state')
 export const electronLumiAstrBotGatewayUpdateConfig = defineInvokeEventa<ElectronLumiAstrBotGatewayState, ElectronLumiAstrBotGatewayConfig>('eventa:invoke:electron:lumi-astrbot-gateway:config:update')
 export const electronLumiAstrBotGatewayRotateToken = defineInvokeEventa<ElectronLumiAstrBotGatewayState>('eventa:invoke:electron:lumi-astrbot-gateway:token:rotate')
+export const electronLumiAstrBotGatewayResumeLearning = defineInvokeEventa<ElectronLumiAstrBotGatewayState>('eventa:invoke:electron:lumi-astrbot-gateway:learning:resume')
+export const electronLumiStickerGetPreview = defineInvokeEventa<{ id: string, dataBase64: string, mimeType: string } | null, { id: string }>('eventa:invoke:electron:lumi-sticker:preview')
+export const electronLumiStickerUpdate = defineInvokeEventa<ElectronLumiAstrBotGatewayState, { id: string, tags?: string[], status?: 'owned' | 'discarded' }>('eventa:invoke:electron:lumi-sticker:update')
+export const electronLumiStickerDelete = defineInvokeEventa<ElectronLumiAstrBotGatewayState, { id: string }>('eventa:invoke:electron:lumi-sticker:delete')
 
 export interface ElectronWindowBounds {
   x: number
@@ -582,6 +649,22 @@ export const electronLumiMemorySyncVector = defineInvokeEventa<ElectronLumiMemor
 export const electronLumiMemorySaveEvent = defineInvokeEventa<void, { userId: string, event: Record<string, any> }>('eventa:invoke:electron:lumi-memory:save-event')
 export const electronLumiMemorySetSeedId = defineInvokeEventa<void, { userId: string, seedId: string }>('eventa:invoke:electron:lumi-memory:set-seed-id')
 export const electronLumiMemoryClear = defineInvokeEventa<void, { userId: string }>('eventa:invoke:electron:lumi-memory:clear')
+
+export interface ElectronLumiSocialLanguageSnapshot {
+  version: 1 | 2 | 3 | 4
+  expressions: object[]
+  jargon: object[]
+  behaviors: object[]
+  decisions: object[]
+  observationBuffer: object[]
+  observationHistory: object[]
+  observationBatches: object[]
+  updatedAt: number
+  lastMaintenanceAt?: number
+}
+
+export const electronLumiSocialLanguageGetSnapshot = defineInvokeEventa<ElectronLumiSocialLanguageSnapshot>('eventa:invoke:electron:lumi-social-language:get-snapshot')
+export const electronLumiSocialLanguageReplaceSnapshot = defineInvokeEventa<void, ElectronLumiSocialLanguageSnapshot>('eventa:invoke:electron:lumi-social-language:replace-snapshot')
 
 export interface ElectronLumiUserProfileSnapshot {
   entries: Record<string, any>[]

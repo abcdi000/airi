@@ -47,7 +47,11 @@ describe('createLumiNodeConsciousness', () => {
       })
       database.setMemoryStatus(memory.id, 'active')
       const generate = vi.fn(async (_request: LumiConsciousnessRequest) => ({ text: 'Yes.' }))
-      const runtime = createLumiNodeConsciousness({ database, model: { generate }, personaPrompt: 'You are Lumi.' })
+      const runtime = createLumiNodeConsciousness({
+        database,
+        model: { generate, generateLanguageText: async () => visibleReply('Yes.') },
+        personaPrompt: 'You are Lumi.',
+      })
       const userInput = input(`lumi-direct:${DOGGY_PERSON_ID}`, DOGGY_PERSON_ID, 'Doggy')
 
       await runtime.generate({
@@ -61,6 +65,12 @@ describe('createLumiNodeConsciousness', () => {
       expect(request.personStates[0].payload).toEqual({ favorite: 'Minecraft' })
       expect(request.memories.map(item => item.content)).toEqual(['Doggy likes building houses.'])
       expect(request.messages[0].content).not.toContain('privateFavorite')
+      expect(request.messages[0].content).not.toContain('Doggy likes building houses.')
+      expect(request.messages[0].content).not.toContain('Minecraft')
+      const authorizedEvidence = request.messages.find(message => message.content.includes('[Lumi authorized turn evidence]'))
+      expect(authorizedEvidence?.content).toContain('Doggy likes building houses.')
+      expect(authorizedEvidence?.content).toContain('Minecraft')
+      expect(request.messages.at(-1)?.content).toContain('[Lumi planner turn context]')
     }
     finally {
       database.close()
@@ -72,7 +82,11 @@ describe('createLumiNodeConsciousness', () => {
     try {
       database.writePersonState({ personId: DOGGY_PERSON_ID, kind: 'short-term', payload: { privateTopic: 'hidden' } })
       const generate = vi.fn(async (_request: LumiConsciousnessRequest) => ({ text: 'I can hear you both.' }))
-      const runtime = createLumiNodeConsciousness({ database, model: { generate }, personaPrompt: 'You are Lumi.' })
+      const runtime = createLumiNodeConsciousness({
+        database,
+        model: { generate, generateLanguageText: async () => visibleReply('I can hear you both.') },
+        personaPrompt: 'You are Lumi.',
+      })
       const doggyInput = input(DOGGY_MOUSSY_GROUP_ID, DOGGY_PERSON_ID, 'Doggy')
       const moussyInput = input(DOGGY_MOUSSY_GROUP_ID, MOUSSY_PERSON_ID, 'Moussy')
 
@@ -84,12 +98,15 @@ describe('createLumiNodeConsciousness', () => {
 
       const request = generate.mock.calls[0][0]
       expect(request.personStates).toEqual([])
-      expect(request.messages.map(item => item.content)).toEqual(expect.arrayContaining([
-        '[Doggy] Do you remember?',
-        '[Moussy] Do you remember?',
-      ]))
+      expect(request.messages.map(item => item.content)).toContain('[Doggy] Do you remember?')
+      const authorizedEvidence = request.messages.find(message => message.content.includes('[Lumi authorized turn evidence]'))
+      expect(authorizedEvidence?.content).toMatch(/^\[Moussy\] Do you remember\?/)
+      expect(authorizedEvidence?.content).toContain('[Lumi authorized turn evidence]')
+      expect(request.messages.at(-1)?.content).toContain('[Lumi planner turn context]')
       expect(request.messages[0].content).not.toContain('privateTopic')
-      expect(request.messages[0].content).toContain('Current authenticated speaker: Moussy')
+      expect(request.messages[0].content).not.toContain('Current authenticated speaker: Moussy')
+      expect(authorizedEvidence?.name).toBe('Moussy')
+      expect(authorizedEvidence?.content).toContain('[Moussy] Do you remember?')
     }
     finally {
       database.close()
@@ -106,16 +123,23 @@ describe('createLumiNodeConsciousness', () => {
         model: {
           async generate(request) {
             requests.push(request)
+            return { text: plannerReply('answer') }
+          },
+          async generateLanguageText() {
+            return visibleReply(requests.length === 1
+              ? 'I will remember with the correct boundaries.'
+              : 'I remember my own birthday and a shareable experience.')
+          },
+          async curateTurn() {
             return requests.length === 1
               ? {
-                  text: 'I will remember with the correct boundaries.',
                   candidateMemories: [
                     candidate('Lumi\'s birthday is July 21.', 'persona_fact', { scope: 'global', tags: ['lumi_self'] }),
                     candidate('Doggy felt happy after finishing a difficult feature.', 'shared_event', { scope: 'shared' }),
                     candidate('Doggy keeps a private account recovery phrase.', 'user_fact', { scope: 'private', sensitivity: 'private' }),
                   ],
                 }
-              : { text: 'I remember my own birthday and a shareable experience.' }
+              : {}
           },
         },
       })
@@ -157,9 +181,14 @@ describe('createLumiNodeConsciousness', () => {
         database,
         personaPrompt: 'You are Lumi.',
         model: {
-          async generate(request) {
+          async generate(_request) {
+            return { text: plannerReply('acknowledge') }
+          },
+          async generateLanguageText() {
+            return visibleReply('State noted.')
+          },
+          async curateTurn(request) {
             return {
-              text: 'State noted.',
               personStateUpdates: request.conversationType === 'direct'
                 ? {
                     'profile': { impression: 'Doggy is focused on the server refactor.' },
@@ -200,7 +229,143 @@ describe('createLumiNodeConsciousness', () => {
       database.close()
     }
   })
+
+  it('keeps language decisions from different conversations that finish concurrently', async () => {
+    const database = LumiServerDatabase.open(':memory:')
+    try {
+      const runtime = createLumiNodeConsciousness({
+        database,
+        personaPrompt: 'You are Lumi.',
+        model: {
+          async generate(request) {
+            await new Promise(resolve => setTimeout(resolve, request.actorPersonId === DOGGY_PERSON_ID ? 20 : 1))
+            return { text: plannerReply('answer') }
+          },
+          async generateLanguageText() {
+            return visibleReply('收到。')
+          },
+        },
+      })
+      const doggyInput = input(`lumi-direct:${DOGGY_PERSON_ID}`, DOGGY_PERSON_ID, 'Doggy')
+      const moussyInput = input(`lumi-direct:${MOUSSY_PERSON_ID}`, MOUSSY_PERSON_ID, 'Moussy')
+
+      await Promise.all([
+        runtime.generate({
+          conversation: database.listConversations(DOGGY_PERSON_ID).find(item => item.id === doggyInput.conversationId)!,
+          history: [doggyInput],
+          input: doggyInput,
+        }, () => {}),
+        runtime.generate({
+          conversation: database.listConversations(MOUSSY_PERSON_ID).find(item => item.id === moussyInput.conversationId)!,
+          history: [moussyInput],
+          input: moussyInput,
+        }, () => {}),
+      ])
+
+      expect(database.getSocialLanguageSnapshot().decisions).toHaveLength(2)
+      expect(database.getSocialLanguageSnapshot().decisions.map(item => item.personId)).toEqual(
+        expect.arrayContaining([DOGGY_PERSON_ID, MOUSSY_PERSON_ID]),
+      )
+    }
+    finally {
+      database.close()
+    }
+  })
+
+  it('compresses an oversized online timeline with the consciousness model and persists its cursor', async () => {
+    const database = LumiServerDatabase.open(':memory:')
+    const conversationId = `lumi-direct:${DOGGY_PERSON_ID}`
+    try {
+      for (let index = 0; index < 70; index += 1) {
+        database.acceptUserMessage({
+          conversationId,
+          actorPersonId: DOGGY_PERSON_ID,
+          messageId: `context-user-${index}`,
+          idempotencyKey: `context-user-${index}`,
+          content: `第 ${index} 轮用户消息 ${'需要保留的长期上下文'.repeat(80)}`,
+          createdAt: index * 2 + 1,
+        })
+        database.appendAssistantMessage({
+          conversationId,
+          messageId: `context-assistant-${index}`,
+          content: `第 ${index} 轮 Lumi 回复 ${'具体事实与未完成事项'.repeat(80)}`,
+          createdAt: index * 2 + 2,
+        })
+      }
+      const history = database.replay(conversationId, DOGGY_PERSON_ID, 0, 1_000).messages
+      const currentInput = history.findLast(message => message.role === 'user')!
+      const requests: LumiConsciousnessRequest[] = []
+      const purposes: string[] = []
+      const languageRequests: Array<{
+        messages: Array<{ role: 'system' | 'user' | 'assistant', content: string, name?: string }>
+        purpose: string
+      }> = []
+      const runtime = createLumiNodeConsciousness({
+        database,
+        personaPrompt: 'You are Lumi.',
+        maxContextTokens: 32_000,
+        outputReserveTokens: 2_000,
+        promptReserveTokens: 2_000,
+        model: {
+          async generate(request) {
+            requests.push(request)
+            return { text: plannerReply('answer') }
+          },
+          async generateLanguageText(messages, purpose) {
+            purposes.push(purpose)
+            languageRequests.push({ messages, purpose })
+            return purpose === 'context_summary'
+              ? '较早轮次的结构化连续性摘要'
+              : visibleReply('我记得前面的事')
+          },
+        },
+      })
+
+      await runtime.generate({
+        conversation: database.listConversations(DOGGY_PERSON_ID).find(item => item.id === conversationId)!,
+        history,
+        input: currentInput,
+      }, () => {})
+
+      expect(purposes).toContain('context_summary')
+      expect(database.getConversationSummary(conversationId)?.sourceMessageCount).toBeGreaterThan(0)
+      expect(requests[0]?.messages.some(message => message.content.includes('conversation continuity summary'))).toBe(true)
+      expect(requests[0]?.messages.some(message => message.content.includes('第 69 轮用户消息'))).toBe(true)
+      const replyerRequest = languageRequests.find(request => request.purpose === 'replyer')
+      expect(replyerRequest?.messages.some(message => message.content.includes('final-response planning contract'))).toBe(false)
+      expect(replyerRequest?.messages.at(-1)?.content).toContain('较早轮次的结构化连续性摘要')
+    }
+    finally {
+      database.close()
+    }
+  })
 })
+
+function plannerReply(replyAct: string) {
+  return JSON.stringify({
+    shouldReply: true,
+    replyAct,
+    semanticGoal: 'Respond naturally while preserving the tested server policy.',
+    keyPoints: ['Preserve authorized facts and relationship boundaries.'],
+    referenceInfo: [],
+    attitude: { willingnessToHelp: 'normal' },
+    emotion: { primary: 'neutral', intensity: 0.3 },
+    defenseState: { active: false, refusalRequired: false, prohibitedHelpTypes: [] },
+    expressionIntent: {
+      focus: 'the current message',
+      scene: 'direct_chat',
+      tone: 'natural',
+      desiredLength: 'short',
+      preferredActs: [],
+      avoid: [],
+    },
+    immutableConstraints: [],
+  })
+}
+
+function visibleReply(text: string) {
+  return JSON.stringify({ messages: [{ text }] })
+}
 
 function candidate(
   content: string,

@@ -201,7 +201,6 @@ vi.mock('./lumi-user-profile', () => ({
     buildRelevantContext: vi.fn().mockReturnValue(''),
     consolidatePendingUpdates: vi.fn().mockReturnValue({ merged: [] }),
     coreEntries: [],
-    extractDeterministicCandidates: vi.fn().mockReturnValue([]),
     markPendingAutoReview: vi.fn(),
     parseCuratorOutput: vi.fn().mockReturnValue([]),
     pendingActiveUpdates: [],

@@ -18,6 +18,9 @@ export interface ManagerState {
       apiKeySet: boolean
       temperature?: number
       maxOutputTokens?: number
+      maxContextTokens: number
+      outputReserveTokens: number
+      promptReserveTokens: number
       maxSteps: number
       thinkingMode: 'auto' | 'enabled' | 'disabled'
       reasoningEffort: 'auto' | 'high' | 'max'
@@ -36,6 +39,24 @@ export interface ManagerState {
     astrbot: {
       enabled: boolean
       tokenConfigured: boolean
+      learningMode: 'normal' | 'observe_only'
+      studyGroups: Array<{
+        id: string
+        platformInstanceId: string
+        groupId: string
+        displayName: string
+        enabled: boolean
+        priority: 'normal' | 'high'
+      }>
+      observationBatchSize: number
+      stickerLibrary: {
+        enabled: boolean
+        collectFromStudyGroups: boolean
+        relativePath: string
+        maximumItems: number
+        sendProbability: number
+        cooldownMessages: number
+      }
       identityBindings: Array<{
         platformInstanceId: string
         externalUserId: string

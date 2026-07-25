@@ -11,6 +11,9 @@ import {
   electronLumiAstrBotGatewayGetState,
   electronLumiAstrBotGatewayRotateToken,
   electronLumiAstrBotGatewayUpdateConfig,
+  electronLumiStickerDelete,
+  electronLumiStickerGetPreview,
+  electronLumiStickerUpdate,
 } from '../../../../../shared/eventa'
 
 /** Owns the renderer-side settings workflow for the local AstrBot gateway. */
@@ -18,6 +21,9 @@ export function useLocalAstrBotGateway() {
   const getState = useElectronEventaInvoke(electronLumiAstrBotGatewayGetState)
   const updateConfig = useElectronEventaInvoke(electronLumiAstrBotGatewayUpdateConfig)
   const rotateToken = useElectronEventaInvoke(electronLumiAstrBotGatewayRotateToken)
+  const getStickerPreview = useElectronEventaInvoke(electronLumiStickerGetPreview)
+  const updateSticker = useElectronEventaInvoke(electronLumiStickerUpdate)
+  const deleteSticker = useElectronEventaInvoke(electronLumiStickerDelete)
   const state = shallowRef<ElectronLumiAstrBotGatewayState>()
   const busy = shallowRef(false)
   const error = shallowRef('')
@@ -45,5 +51,8 @@ export function useLocalAstrBotGateway() {
     load: () => run(() => getState()),
     save: (config: ElectronLumiAstrBotGatewayConfig) => run(() => updateConfig(config)),
     rotateToken: () => run(() => rotateToken()),
+    getStickerPreview: (id: string) => getStickerPreview({ id }),
+    updateSticker: (payload: { id: string, tags?: string[], status?: 'owned' | 'discarded' }) => run(() => updateSticker(payload)),
+    deleteSticker: (id: string) => run(() => deleteSticker({ id })),
   }
 }

@@ -4,6 +4,7 @@ import type { LumiImageUnderstandingResult } from '@proj-airi/lumi-runtime'
 import type { LumiAuthenticatedSession } from './auth'
 import type { LumiServerDatabase } from './database'
 import type { LumiOnlineServer } from './onlineServer'
+import type { LumiStickerLibrary } from './stickerLibrary'
 import type { LumiVoiceTranscriber } from './transcription'
 
 import { Buffer } from 'node:buffer'
@@ -82,6 +83,7 @@ export interface LumiAstrBotIntegrationOptions {
   maxAudioBytes?: number
   /** @default 120000 */
   responseTimeoutMs?: number
+  stickerLibrary?: LumiStickerLibrary
 }
 
 export class LumiAstrBotIntegrationError extends Error {
@@ -216,10 +218,25 @@ export class LumiAstrBotIntegration {
       content,
       createdAt: normalized.timestamp > 0 ? normalized.timestamp * 1000 : Date.now(),
     })
+    const sticker = await this.options.stickerLibrary?.selectForReply({
+      eventId: normalized.event_id,
+      inputText: text,
+      replyText: response.content,
+    })
     return {
       response_id: response.id,
       text: response.content,
-      segments: [{ type: 'text', text: response.content }],
+      segments: [
+        { type: 'text', text: response.content },
+        ...(sticker
+          ? [{
+              type: 'image',
+              data_base64: sticker.dataBase64,
+              mime_type: sticker.mimeType,
+              metadata: { sticker_id: sticker.id, tags: sticker.tags },
+            }]
+          : []),
+      ],
       metadata: {
         conversation_id: conversation.id,
         actor_person_id: person.id,

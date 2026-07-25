@@ -52,6 +52,7 @@ export type {
   ChatInteractionContext,
   ChatMessage,
   ChatSlices,
+  ChatSlicesImage,
   ChatSlicesText,
   ChatSlicesToolCall,
   ChatSlicesToolCallResult,
@@ -67,4 +68,5 @@ export type {
   StreamEvent,
   StreamFromOptions,
   StreamOptions,
+  StreamUsage,
 } from './types/llm'

@@ -8,6 +8,8 @@ import type {
   LumiMemoryFragment,
   LumiMemorySearchRequest,
   LumiMemoryStatus,
+  LumiConversationSummary,
+  SocialLanguageSnapshot,
 } from '@proj-airi/lumi-runtime'
 
 import { Buffer } from 'node:buffer'
@@ -19,7 +21,9 @@ import { DatabaseSync } from 'node:sqlite'
 import {
   canAccessLumiMemory,
   classifyLumiMemoryCandidate,
+  createEmptySocialLanguageSnapshot,
   decideLumiMemoryStatus,
+  migrateSocialLanguageSnapshot,
   normalizeMemoryScores,
 } from '@proj-airi/lumi-runtime'
 
@@ -59,6 +63,7 @@ export interface LumiServerBackupV1 {
     conversations: SqliteRow[]
     conversationMembers: SqliteRow[]
     messages: SqliteRow[]
+    conversationSummaries?: SqliteRow[]
     deliveryReceipts: SqliteRow[]
     memories: SqliteRow[]
     memoryVectors: SqliteRow[]
@@ -69,6 +74,7 @@ export interface LumiServerBackupV1 {
     toolAudits: SqliteRow[]
     jobs: SqliteRow[]
     serverConfig: SqliteRow[]
+    socialLanguageSnapshots: SqliteRow[]
     devices: SqliteRow[]
     migrationImports: SqliteRow[]
     metadata: SqliteRow[]
@@ -254,6 +260,76 @@ export class LumiServerDatabase {
   close() {
     this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
     this.database.close()
+  }
+
+  /** Returns the server-authoritative social-language state. */
+  getSocialLanguageSnapshot(): SocialLanguageSnapshot {
+    const row = this.row(
+      'SELECT snapshot_json FROM lumi_social_language_snapshot WHERE id = ?',
+      'default',
+    )
+    if (!row)
+      return createEmptySocialLanguageSnapshot()
+    try {
+      return migrateSocialLanguageSnapshot(JSON.parse(String(row.snapshot_json)))
+    }
+    catch {
+      return createEmptySocialLanguageSnapshot()
+    }
+  }
+
+  /** Atomically replaces the complete server-authoritative social-language state. */
+  replaceSocialLanguageSnapshot(input: unknown) {
+    const snapshot = migrateSocialLanguageSnapshot(input)
+    this.database.prepare(`
+      INSERT INTO lumi_social_language_snapshot (id, snapshot_json, updated_at)
+      VALUES ('default', ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        snapshot_json = excluded.snapshot_json,
+        updated_at = excluded.updated_at
+    `).run(JSON.stringify(snapshot), snapshot.updatedAt)
+  }
+
+  /** Returns the rolling context summary isolated to one conversation. */
+  getConversationSummary(conversationId: string): LumiConversationSummary | undefined {
+    const row = this.row(
+      'SELECT * FROM lumi_conversation_summaries WHERE conversation_id = ?',
+      requiredText(conversationId, 'conversationId', 240),
+    )
+    if (!row)
+      return undefined
+    return {
+      version: 1,
+      conversationId: String(row.conversation_id),
+      summary: String(row.summary),
+      throughMessageId: String(row.through_message_id),
+      sourceMessageCount: Number(row.source_message_count),
+      estimatedSourceTokens: Number(row.estimated_source_tokens),
+      updatedAt: Number(row.updated_at),
+    }
+  }
+
+  /** Persists one model-authored rolling summary without deleting source messages. */
+  saveConversationSummary(summary: LumiConversationSummary) {
+    this.database.prepare(`
+      INSERT INTO lumi_conversation_summaries (
+        conversation_id, summary, through_message_id, source_message_count,
+        estimated_source_tokens, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_id) DO UPDATE SET
+        summary = excluded.summary,
+        through_message_id = excluded.through_message_id,
+        source_message_count = excluded.source_message_count,
+        estimated_source_tokens = excluded.estimated_source_tokens,
+        updated_at = excluded.updated_at
+    `).run(
+      requiredText(summary.conversationId, 'conversationId', 240),
+      requiredText(summary.summary, 'summary', 120_000),
+      requiredText(summary.throughMessageId, 'throughMessageId', 240),
+      summary.sourceMessageCount,
+      summary.estimatedSourceTokens,
+      finiteTimestamp(summary.updatedAt),
+    )
   }
 
   /** Returns a client-safe person resolved from a Better Auth user id. */
@@ -1042,6 +1118,7 @@ export class LumiServerDatabase {
         conversations: this.rows('SELECT * FROM lumi_conversations ORDER BY created_at ASC'),
         conversationMembers: this.rows('SELECT * FROM lumi_conversation_members ORDER BY conversation_id, person_id'),
         messages: this.rows('SELECT * FROM lumi_messages ORDER BY conversation_id, sequence'),
+        conversationSummaries: this.rows('SELECT * FROM lumi_conversation_summaries ORDER BY conversation_id'),
         deliveryReceipts: this.rows('SELECT * FROM lumi_delivery_receipts ORDER BY accepted_at ASC'),
         memories: this.rows('SELECT * FROM lumi_memories ORDER BY created_at ASC'),
         memoryVectors: this.rows('SELECT * FROM lumi_memory_vectors ORDER BY memory_id ASC'),
@@ -1052,6 +1129,7 @@ export class LumiServerDatabase {
         toolAudits: this.rows('SELECT * FROM lumi_tool_audit ORDER BY created_at'),
         jobs: this.rows('SELECT * FROM lumi_jobs ORDER BY created_at'),
         serverConfig: this.rows('SELECT * FROM lumi_server_config ORDER BY key'),
+        socialLanguageSnapshots: this.rows('SELECT * FROM lumi_social_language_snapshot ORDER BY id'),
         devices: this.rows('SELECT * FROM lumi_devices ORDER BY created_at'),
         migrationImports: this.rows('SELECT * FROM lumi_migration_imports ORDER BY created_at'),
         metadata: this.rows('SELECT * FROM lumi_server_meta ORDER BY key'),
@@ -1072,6 +1150,7 @@ export class LumiServerDatabase {
           'session',
           'lumi_delivery_receipts',
           'lumi_messages',
+          'lumi_conversation_summaries',
           'lumi_conversation_members',
           'lumi_memory_vectors',
           'lumi_memories',
@@ -1088,6 +1167,7 @@ export class LumiServerDatabase {
           'lumi_conversations',
           'lumi_people',
           'lumi_server_config',
+          'lumi_social_language_snapshot',
           'lumi_migration_imports',
           'lumi_server_meta',
           'lumi_server_audit',
@@ -1109,6 +1189,7 @@ export class LumiServerDatabase {
         this.insertRows('lumi_account_people', sections.accountPeople)
         this.insertRows('lumi_invitations', sections.invitations)
         this.insertRows('lumi_messages', sections.messages)
+        this.insertRows('lumi_conversation_summaries', sections.conversationSummaries ?? [])
         this.insertRows('lumi_delivery_receipts', sections.deliveryReceipts)
         this.insertRows('lumi_memories', sections.memories)
         this.insertRows('lumi_memory_vectors', sections.memoryVectors)
@@ -1119,6 +1200,7 @@ export class LumiServerDatabase {
         this.insertRows('lumi_tool_audit', sections.toolAudits)
         this.insertRows('lumi_jobs', sections.jobs)
         this.insertRows('lumi_server_config', sections.serverConfig)
+        this.insertRows('lumi_social_language_snapshot', sections.socialLanguageSnapshots ?? [])
         this.insertRows('lumi_devices', sections.devices)
         this.insertRows('lumi_migration_imports', sections.migrationImports)
         this.insertRows('lumi_server_meta', sections.metadata)
@@ -1477,6 +1559,23 @@ export class LumiServerDatabase {
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
         secret INTEGER NOT NULL DEFAULT 0 CHECK(secret IN (0, 1)),
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_conversation_summaries (
+        conversation_id TEXT PRIMARY KEY,
+        summary TEXT NOT NULL,
+        through_message_id TEXT NOT NULL,
+        source_message_count INTEGER NOT NULL,
+        estimated_source_tokens INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(conversation_id) REFERENCES lumi_conversations(id) ON DELETE CASCADE,
+        FOREIGN KEY(through_message_id) REFERENCES lumi_messages(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_social_language_snapshot (
+        id TEXT PRIMARY KEY,
+        snapshot_json TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
 

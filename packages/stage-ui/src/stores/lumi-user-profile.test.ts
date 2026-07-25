@@ -25,11 +25,17 @@ describe('lumi-user-profile store', () => {
     setActivePinia(createPinia())
   })
 
-  it('isolates one-off negative emotion into Daily State instead of Core Profile', () => {
+  it('isolates a model-curated one-off negative emotion into Daily State instead of Core Profile', () => {
     const store = useLumiUserProfileStore()
-    const candidates = store.extractDeterministicCandidates('我废了，今天真的有点崩溃。')
 
-    const results = store.applyCandidates(candidates, {
+    const results = store.applyCandidates([{
+      layer: 'daily',
+      key: 'mood',
+      value: '低落或受挫',
+      confidence: 0.72,
+      evidence: '我废了，今天真的有点崩溃。',
+      reason: 'consciousness_model_daily_state',
+    }], {
       sourceKind: 'chat',
       sourceMessageId: 'msg-1',
       now: TEST_NOW,
@@ -806,7 +812,7 @@ function createProfilePersistenceBridge(snapshot: LumiUserProfilePersistenceSnap
     setMeta: vi.fn(async ({ key, value }) => {
       current = {
         ...current,
-        meta: { ...(current.meta ?? {}), [key]: value },
+        meta: { ...current.meta, [key]: value },
         bootstrapVersion: key === 'bootstrap_version' && typeof value === 'string' ? value : current.bootstrapVersion,
         autoUpdateEnabled: key === 'auto_update_enabled' && typeof value === 'boolean' ? value : current.autoUpdateEnabled,
       }

@@ -126,6 +126,9 @@ function createContext() {
     modelApiKey: '',
     modelTemperature: 0.7,
     modelMaxOutputTokens: 8192,
+    modelMaxContextTokens: 1_000_000,
+    modelOutputReserveTokens: 64_000,
+    modelPromptReserveTokens: 32_000,
     modelMaxSteps: 8,
     modelThinkingMode: 'auto' as 'auto' | 'enabled' | 'disabled',
     modelReasoningEffort: 'auto' as 'auto' | 'high' | 'max',
@@ -155,6 +158,15 @@ function createContext() {
     tlsPassphrase: '',
     astrbotEnabled: false,
     astrbotBindingsText: '',
+    astrbotLearningMode: 'normal' as 'normal' | 'observe_only',
+    astrbotStudyGroupsText: '',
+    astrbotObservationBatchSize: 20,
+    astrbotStickerEnabled: true,
+    astrbotStickerCollect: true,
+    astrbotStickerRelativePath: 'lumi-stickers',
+    astrbotStickerMaximumItems: 256,
+    astrbotStickerSendProbability: 0.18,
+    astrbotStickerCooldownMessages: 3,
   })
   let initialized = false
   let pollTimer: ReturnType<typeof setInterval> | undefined
@@ -181,6 +193,9 @@ function createContext() {
         modelName: next.config.model.model,
         modelTemperature: next.config.model.temperature ?? 0.7,
         modelMaxOutputTokens: next.config.model.maxOutputTokens ?? 8192,
+        modelMaxContextTokens: next.config.model.maxContextTokens,
+        modelOutputReserveTokens: next.config.model.outputReserveTokens,
+        modelPromptReserveTokens: next.config.model.promptReserveTokens,
         modelMaxSteps: next.config.model.maxSteps,
         modelThinkingMode: next.config.model.thinkingMode,
         modelReasoningEffort: next.config.model.reasoningEffort,
@@ -209,6 +224,17 @@ function createContext() {
         astrbotBindingsText: next.config.astrbot.identityBindings
           .map(binding => `${binding.platformInstanceId} | ${binding.externalUserId} | ${binding.personId}`)
           .join('\n'),
+        astrbotLearningMode: next.config.astrbot.learningMode,
+        astrbotStudyGroupsText: next.config.astrbot.studyGroups
+          .map(group => `${group.platformInstanceId} | ${group.groupId} | ${group.displayName} | ${group.priority}`)
+          .join('\n'),
+        astrbotObservationBatchSize: next.config.astrbot.observationBatchSize,
+        astrbotStickerEnabled: next.config.astrbot.stickerLibrary.enabled,
+        astrbotStickerCollect: next.config.astrbot.stickerLibrary.collectFromStudyGroups,
+        astrbotStickerRelativePath: next.config.astrbot.stickerLibrary.relativePath,
+        astrbotStickerMaximumItems: next.config.astrbot.stickerLibrary.maximumItems,
+        astrbotStickerSendProbability: next.config.astrbot.stickerLibrary.sendProbability,
+        astrbotStickerCooldownMessages: next.config.astrbot.stickerLibrary.cooldownMessages,
       })
       mcpDrafts.value = Object.entries(next.config.mcp.mcpServers ?? {}).map(([name, config]) => createMcpDraft(name, config))
       selectedMcpId.value = mcpDrafts.value[0]?.id ?? ''
@@ -344,6 +370,9 @@ function createContext() {
       modelApiKey: configDraft.modelApiKey,
       modelTemperature: configDraft.modelTemperature,
       modelMaxOutputTokens: configDraft.modelMaxOutputTokens,
+      modelMaxContextTokens: configDraft.modelMaxContextTokens,
+      modelOutputReserveTokens: configDraft.modelOutputReserveTokens,
+      modelPromptReserveTokens: configDraft.modelPromptReserveTokens,
       modelMaxSteps: configDraft.modelMaxSteps,
       modelThinkingMode: configDraft.modelThinkingMode,
       modelReasoningEffort: configDraft.modelReasoningEffort,
@@ -373,6 +402,21 @@ function createContext() {
         throw new Error('AstrBot 身份绑定必须使用：平台实例 ID | 平台用户 ID | Lumi 人物 ID')
       return { platformInstanceId, externalUserId, personId }
     })
+    const astrbotStudyGroups = lines(configDraft.astrbotStudyGroupsText).map((line, index) => {
+      const [platformInstanceId, groupId, displayName, priority = 'normal', ...extra] = line
+        .split('|')
+        .map(value => value.trim())
+      if (!platformInstanceId || !groupId || !displayName || extra.length || !['normal', 'high'].includes(priority))
+        throw new Error('AstrBot 学习群必须使用：平台实例 ID | 群 ID | 显示名称 | normal/high')
+      return {
+        id: `server-study-${index + 1}-${platformInstanceId}-${groupId}`,
+        platformInstanceId,
+        groupId,
+        displayName,
+        enabled: true,
+        priority: priority as 'normal' | 'high',
+      }
+    })
     return applyConfig({
       publicBaseURL: configDraft.publicBaseURL,
       hostname: configDraft.hostname,
@@ -388,6 +432,17 @@ function createContext() {
         : undefined,
       astrbotEnabled: configDraft.astrbotEnabled,
       astrbotIdentityBindings,
+      astrbotLearningMode: configDraft.astrbotLearningMode,
+      astrbotStudyGroups,
+      astrbotObservationBatchSize: Number(configDraft.astrbotObservationBatchSize),
+      astrbotStickerLibrary: {
+        enabled: configDraft.astrbotStickerEnabled,
+        collectFromStudyGroups: configDraft.astrbotStickerCollect,
+        relativePath: configDraft.astrbotStickerRelativePath,
+        maximumItems: Number(configDraft.astrbotStickerMaximumItems),
+        sendProbability: Number(configDraft.astrbotStickerSendProbability),
+        cooldownMessages: Number(configDraft.astrbotStickerCooldownMessages),
+      },
     }, '网络、TLS 与 AstrBot 接入配置已保存并应用')
   }
 

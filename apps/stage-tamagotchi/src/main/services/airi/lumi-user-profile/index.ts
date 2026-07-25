@@ -24,6 +24,7 @@ import {
 
   electronLumiUserProfileUpdateEntry,
 } from '../../../../shared/eventa'
+import { decodeProfileMeta, normalizeLegacySourceMode } from './profileMeta'
 
 type SqliteValue = string | number | null
 
@@ -73,7 +74,11 @@ async function getDatabase(userId: string): Promise<{ db: SqliteDatabase, path: 
   mkdirSync(dirname(dbPath), { recursive: true })
   const db = new sqlite.DatabaseSync(dbPath)
   migrate(db)
-  const legacySourceMode = getMeta(db, LEGACY_SOURCE_MODE_KEY) ?? (databaseExisted ? 'recover' : 'fresh')
+  repairOversizedLegacySourceMode(db, databaseExisted ? 'recover' : 'fresh')
+  const legacySourceMode = normalizeLegacySourceMode(
+    getMeta(db, LEGACY_SOURCE_MODE_KEY),
+    databaseExisted ? 'recover' : 'fresh',
+  )
   setMetaWithDb(db, LEGACY_SOURCE_MODE_KEY, legacySourceMode)
   if (userId === DOGGY_USER_ID && legacySourceMode === 'recover')
     mergeLegacyProfileSources(sqlite, db, dbPath)
@@ -185,6 +190,22 @@ function migrate(db: SqliteDatabase) {
   addOptionalColumn(db, 'pending_profile_updates', 'auto_review_json', 'TEXT')
 }
 
+function repairOversizedLegacySourceMode(db: SqliteDatabase, fallback: 'fresh' | 'recover') {
+  const row = db.prepare('SELECT length(value_json) AS value_length FROM profile_meta WHERE key = ?').get(LEGACY_SOURCE_MODE_KEY)
+  const valueLength = typeof row?.value_length === 'number' ? row.value_length : 0
+  if (valueLength <= 4096)
+    return
+
+  // NOTICE:
+  // The old startup path read JSON text as a plain string and JSON-encoded it
+  // again. Its size doubled on every launch and eventually exhausted renderer
+  // memory. Repair the known mode inside SQLite before loading the oversized
+  // value into V8. This can be removed after affected Lumi profiles have been
+  // migrated in a future major data-format version.
+  setMetaWithDb(db, LEGACY_SOURCE_MODE_KEY, fallback)
+  console.warn(`[lumi-user-profile] repaired oversized ${LEGACY_SOURCE_MODE_KEY} metadata (${valueLength} bytes)`)
+}
+
 function addOptionalColumn(db: SqliteDatabase, table: string, column: string, type: string) {
   try {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type};`)
@@ -228,7 +249,7 @@ function mergeLegacyProfileSources(sqlite: SqliteModule, target: SqliteDatabase,
     const sourceStat = statSync(sourcePath)
     const fingerprint = `${sourceStat.size}:${sourceStat.mtimeMs}`
     const markerKey = `legacy_profile_source:${sourcePath.toLowerCase()}`
-    if (getMeta(target, markerKey) === JSON.stringify(fingerprint))
+    if (getMeta(target, markerKey) === fingerprint)
       continue
 
     const source = new sqlite.DatabaseSync(sourcePath, { readOnly: true })
@@ -263,7 +284,7 @@ function mergeLegacyProfileSources(sqlite: SqliteModule, target: SqliteDatabase,
 
         for (const row of source.prepare('SELECT key, value_json FROM profile_meta').all()) {
           const key = stringField(row.key)
-          if (key && !getMeta(target, key))
+          if (key && getMeta(target, key) === undefined)
             setMetaWithDb(target, key, parseJson(row.value_json, null))
         }
         setMetaWithDb(target, markerKey, fingerprint)
@@ -305,8 +326,8 @@ export async function loadProfileFromDatabase(userId: string): Promise<ElectronL
       ORDER BY created_at DESC
       LIMIT 200
     `).all().map(rowToEvent),
-    autoUpdateEnabled: parseJson(getMeta(db, 'auto_update_enabled'), true),
-    bootstrapVersion: parseJson(getMeta(db, 'bootstrap_version'), ''),
+    autoUpdateEnabled: getMeta(db, 'auto_update_enabled', true),
+    bootstrapVersion: getMeta(db, 'bootstrap_version', ''),
     dbPath: path,
     meta: loadMeta(db),
     canImportLegacyLocalData: userId === DOGGY_USER_ID,
@@ -791,15 +812,19 @@ function setMetaWithDb(db: SqliteDatabase, key: string, value: unknown) {
   `).run(key, JSON.stringify(value), new Date().toISOString())
 }
 
-function getMeta(db: SqliteDatabase, key: string) {
+function getMeta<T>(db: SqliteDatabase, key: string, fallback: T): T
+function getMeta(db: SqliteDatabase, key: string): unknown | undefined
+function getMeta<T>(db: SqliteDatabase, key: string, fallback?: T): T | unknown | undefined {
   const row = db.prepare('SELECT value_json FROM profile_meta WHERE key = ?').get(key)
-  return typeof row?.value_json === 'string' ? row.value_json : undefined
+  if (typeof row?.value_json !== 'string')
+    return fallback
+  return decodeProfileMeta(row.value_json, fallback)
 }
 
 function loadMeta(db: SqliteDatabase) {
   const meta: Record<string, any> = {}
   for (const row of db.prepare('SELECT key, value_json FROM profile_meta').all())
-    meta[stringField(row.key)] = parseJson(row.value_json, null)
+    meta[stringField(row.key)] = decodeProfileMeta(row.value_json, null)
   return meta
 }
 

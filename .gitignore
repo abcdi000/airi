@@ -116,6 +116,7 @@ docs/lumi/migrated-data/
 scripts/lumi/__pycache__/
 *.pyc
 external-plugins/lumi-diary/config.json
+apps/stage-tamagotchi/data/lumi-stickers/
 
 # Local agent/runtime artifacts
 .codex/

@@ -17,6 +17,7 @@ import { useLumiCurrentStateStore } from '@proj-airi/stage-ui/stores/lumi-curren
 import { useLumiIdentityStore } from '@proj-airi/stage-ui/stores/lumi-identity'
 import { useLumiMemoryStore } from '@proj-airi/stage-ui/stores/lumi-memory'
 import { useLumiOnlineStore } from '@proj-airi/stage-ui/stores/lumi-online'
+import { useLumiSocialLanguageStore } from '@proj-airi/stage-ui/stores/lumi-social-language'
 import { useLumiUserProfileStore } from '@proj-airi/stage-ui/stores/lumi-user-profile'
 import { useModsServerChannelStore } from '@proj-airi/stage-ui/stores/mods/api/channel-server'
 import { useContextBridgeStore } from '@proj-airi/stage-ui/stores/mods/api/context-bridge'
@@ -74,6 +75,8 @@ import {
   electronLumiMemoryUpsertMemory,
   electronLumiMemoryUpsertVector,
   electronLumiMemoryVectorStatus,
+  electronLumiSocialLanguageGetSnapshot,
+  electronLumiSocialLanguageReplaceSnapshot,
   electronLumiUserProfileApprovePendingUpdate,
   electronLumiUserProfileArchiveEntry,
   electronLumiUserProfileClear,
@@ -153,6 +156,7 @@ const lumiChannelDevicesStore = useLumiChannelDevicesStore()
 const lumiIdentityStore = useLumiIdentityStore()
 const lumiCurrentStateStore = useLumiCurrentStateStore()
 const lumiMemoryStore = useLumiMemoryStore()
+const lumiSocialLanguageStore = useLumiSocialLanguageStore()
 const lumiOnlineStore = useLumiOnlineStore()
 const lumiUserProfileStore = useLumiUserProfileStore()
 const miniChatEnabled = useLocalStorage('settings/plugins/lumi-chat-mini/enabled', false)
@@ -212,6 +216,8 @@ const syncLumiMemoryVector = useElectronEventaInvoke(electronLumiMemorySyncVecto
 const saveLumiMemoryEvent = useElectronEventaInvoke(electronLumiMemorySaveEvent)
 const setLumiMemorySeedId = useElectronEventaInvoke(electronLumiMemorySetSeedId)
 const clearLumiMemory = useElectronEventaInvoke(electronLumiMemoryClear)
+const getLumiSocialLanguageSnapshot = useElectronEventaInvoke(electronLumiSocialLanguageGetSnapshot)
+const replaceLumiSocialLanguageSnapshot = useElectronEventaInvoke(electronLumiSocialLanguageReplaceSnapshot)
 const loadLumiCurrentStateFromDatabase = useElectronEventaInvoke(electronLumiCurrentStateGetSnapshot)
 const saveLumiCurrentStateSnapshot = useElectronEventaInvoke(electronLumiCurrentStateSaveSnapshot)
 const clearLumiCurrentStateDatabase = useElectronEventaInvoke(electronLumiCurrentStateClear)
@@ -316,6 +322,12 @@ lumiMemoryStore.setPersistenceBridge({
   setSeedId: payload => setLumiMemorySeedId(payload),
   clear: payload => clearLumiMemory(payload),
 })
+
+lumiSocialLanguageStore.setPersistenceBridge({
+  loadSnapshot: () => getLumiSocialLanguageSnapshot(),
+  replaceSnapshot: snapshot => replaceLumiSocialLanguageSnapshot(toIpcPayload(snapshot)),
+})
+void lumiSocialLanguageStore.initialize()
 
 lumiCurrentStateStore.setPersistenceBridge({
   loadCurrentStateFromDatabase: userId => loadLumiCurrentStateFromDatabase({ userId: userId ?? lumiIdentityStore.activeUserId }) as any,

@@ -24,9 +24,16 @@ const deepSeekConfigSchema = z.object({
     .number()
     .int()
     .min(0)
-    .max(64_000)
+    .max(384_000)
     .optional()
     .default(0),
+  maxContextTokens: z
+    .number()
+    .int()
+    .min(32_000)
+    .max(1_000_000)
+    .optional()
+    .default(1_000_000),
   maxContextMessages: z
     .number()
     .int()
@@ -71,7 +78,18 @@ function withDeepSeekRequestOptions(body: Record<string, unknown>, config: DeepS
     nextBody.reasoning_effort = reasoningEffort
 
   if (Number.isFinite(maxOutputTokens) && maxOutputTokens > 0)
-    nextBody.max_tokens = Math.min(64_000, Math.max(1, Math.round(maxOutputTokens)))
+    nextBody.max_tokens = Math.min(384_000, Math.max(1, Math.round(maxOutputTokens)))
+
+  if (body.stream === true) {
+    nextBody.stream_options = {
+      ...(typeof body.stream_options === 'object' && body.stream_options != null
+        ? body.stream_options as Record<string, unknown>
+        : {}),
+      // DeepSeek only includes prompt cache hit/miss tokens in streamed usage
+      // when this flag is enabled.
+      include_usage: true,
+    }
+  }
 
   return nextBody
 }
@@ -98,6 +116,21 @@ export const providerDeepSeek = defineProvider<DeepSeekConfig>({
       labelLocalized: t('settings.pages.providers.catalog.edit.config.common.fields.field.base-url.label'),
       descriptionLocalized: t('settings.pages.providers.catalog.edit.config.common.fields.field.base-url.description'),
       placeholderLocalized: t('settings.pages.providers.catalog.edit.config.common.fields.field.base-url.placeholder'),
+    }),
+    maxOutputTokens: deepSeekConfigSchema.shape.maxOutputTokens.meta({
+      labelLocalized: '最大输出 Token',
+      descriptionLocalized: 'DeepSeek V4 当前最多支持 384K 输出。设为 0 时由服务端采用默认值。',
+      placeholderLocalized: '0',
+    }),
+    maxContextTokens: deepSeekConfigSchema.shape.maxContextTokens.meta({
+      labelLocalized: '上下文窗口 Token',
+      descriptionLocalized: 'DeepSeek V4 的 1M 上下文窗口。Lumi 会在接近该预算时生成滚动摘要。',
+      placeholderLocalized: '1000000',
+    }),
+    maxContextMessages: deepSeekConfigSchema.shape.maxContextMessages.meta({
+      labelLocalized: '旧版消息条数限制',
+      descriptionLocalized: 'Lumi 对话会忽略此项并使用 Token 预算；其他普通角色仍可按消息条数限制。',
+      placeholderLocalized: '80',
     }),
     maxToolSteps: deepSeekConfigSchema.shape.maxToolSteps.meta({
       labelLocalized: '最大工具步数',

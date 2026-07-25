@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import os
 import random
 import tempfile
+import time
 from pathlib import Path
 
 from astrbot import logger
@@ -21,9 +24,10 @@ from .lumi_bridge.exceptions import (
     LumiAuthenticationError,
     LumiBridgeError,
     LumiIdentityUnboundError,
+    LumiProtocolError,
 )
 from .lumi_bridge.media import cleanup_temporary_files
-from .lumi_bridge.models import LumiResponse
+from .lumi_bridge.models import LumiLearningPolicy, LumiResponse
 from .lumi_bridge.routing import decide_routing
 from .lumi_bridge.service import LumiBridgeService
 
@@ -35,6 +39,8 @@ class Main(Star):
         super().__init__(context, config)
         self._astrbot_config = config
         self._service = self._build_service()
+        self._learning_policy: LumiLearningPolicy | None = None
+        self._learning_policy_expires_at = 0.0
         context.register_web_api(
             "/astrbot_plugin_lumi/connection-test",
             self.connection_test,
@@ -45,6 +51,22 @@ class Main(Star):
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=-100)
     async def bridge_message(self, event: AstrMessageEvent) -> None:
         event_id = _safe_event_id(event)
+        try:
+            policy = await self._get_learning_policy()
+        except LumiBridgeError as error:
+            logger.warning(
+                "Lumi learning policy unavailable; private event rejected "
+                "event_id=%s reason=%s",
+                event_id,
+                str(error),
+            )
+            event.should_call_llm(True)
+            event.stop_event()
+            return
+        if policy.mode == "observe_only":
+            event.should_call_llm(True)
+            event.stop_event()
+            return
         facts = self._service.adapter.routing_facts(event)
         decision = decide_routing(self._service.config, facts)
         if not decision.handle:
@@ -142,6 +164,67 @@ class Main(Star):
             if retention == "delete" or (retention == "keep_on_error" and succeeded):
                 cleanup_temporary_files(temporary_paths)
 
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=-100)
+    async def observe_group_message(self, event: AstrMessageEvent) -> None:
+        """Observes configured groups without creating any reply side effect."""
+        event_id = _safe_event_id(event)
+        facts = self._service.adapter.routing_facts(event)
+        if (
+            facts.is_stopped
+            or facts.is_self_message
+            or not facts.is_platform_message
+            or not facts.has_supported_content
+        ):
+            return
+        if (
+            self._service.config.ignore_command_messages
+            and any(
+                facts.text.lstrip().startswith(prefix)
+                for prefix in self._service.config.command_prefixes
+            )
+        ):
+            return
+        try:
+            policy = await self._get_learning_policy()
+        except LumiBridgeError as error:
+            logger.warning(
+                "Lumi learning policy unavailable; group event ignored "
+                "event_id=%s reason=%s",
+                event_id,
+                str(error),
+            )
+            return
+        group_id = str(event.get_group_id() or "")
+        source = policy.source_for(facts.platform_instance_id, group_id)
+        if policy.mode != "observe_only" or source is None:
+            return
+
+        # NOTICE:
+        # This path intentionally never calls response conversion, event.send,
+        # speech synthesis, Lumi consciousness, MCP, or the private-session
+        # coordinator. The runtime endpoint also validates the allowlist.
+        event.should_call_llm(True)
+        temporary_paths: list[str] = []
+        try:
+            observation, temporary_paths = (
+                await self._service.adapter.convert_group_observation(event)
+            )
+            await self._service.client.observe_group(observation)
+            logger.debug(
+                "Lumi accepted read-only group observation event_id=%s source_id=%s",
+                event_id,
+                source.source_id,
+            )
+        except (LumiBridgeError, ValueError) as error:
+            logger.warning(
+                "Lumi group observation ignored event_id=%s reason=%s",
+                event_id,
+                str(error),
+            )
+        finally:
+            cleanup_temporary_files(temporary_paths)
+            event.stop_event()
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("lumi_status", priority=100)
     async def lumi_status(self, event: AstrMessageEvent):
@@ -211,6 +294,17 @@ class Main(Star):
     async def terminate(self) -> None:
         await self._service.close()
 
+    async def _get_learning_policy(self) -> LumiLearningPolicy:
+        now = time.monotonic()
+        cached = getattr(self, "_learning_policy", None)
+        expires_at = getattr(self, "_learning_policy_expires_at", 0.0)
+        if cached is not None and now < expires_at:
+            return cached
+        policy = await self._service.client.learning_policy()
+        self._learning_policy = policy
+        self._learning_policy_expires_at = now + 5.0
+        return policy
+
     def _build_service(self) -> LumiBridgeService:
         config = LumiPluginConfig.from_mapping(dict(self._astrbot_config))
         return LumiBridgeService(config, plugin_temp_directory(self.name))
@@ -272,7 +366,15 @@ async def _response_messages(
             if segment.type == "text" and segment.text:
                 await append_text(segment.text)
             elif segment.type == "image":
-                if segment.local_path:
+                if segment.data_base64:
+                    path = await _write_image_file(
+                        segment.data_base64,
+                        segment.mime_type or "image/png",
+                        temp_directory,
+                    )
+                    temporary_paths.append(str(path))
+                    messages.append([Comp.Image.fromFileSystem(str(path))])
+                elif segment.local_path:
                     messages.append([Comp.Image.fromFileSystem(segment.local_path)])
                 elif segment.url:
                     messages.append([Comp.Image.fromURL(segment.url)])
@@ -284,6 +386,38 @@ async def _response_messages(
     elif response.text:
         await append_text(response.text)
     return messages, temporary_paths
+
+
+async def _write_image_file(
+    encoded: str, mime_type: str, temp_directory: Path
+) -> Path:
+    suffixes = {
+        "image/gif": ".gif",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }
+    normalized_mime = mime_type.split(";", 1)[0].lower()
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise LumiProtocolError("Lumi returned invalid sticker image data") from error
+    if not data or len(data) > 10 * 1024 * 1024:
+        raise LumiProtocolError("Lumi returned an invalid sticker image size")
+    temp_directory.mkdir(parents=True, exist_ok=True)
+    handle, name = tempfile.mkstemp(
+        prefix="lumi-sticker-",
+        suffix=suffixes.get(normalized_mime, ".png"),
+        dir=temp_directory,
+    )
+    os.close(handle)
+    path = Path(name)
+    try:
+        await asyncio.to_thread(path.write_bytes, data)
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
+    return path
 
 
 async def _write_speech_file(

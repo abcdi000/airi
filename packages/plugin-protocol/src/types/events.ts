@@ -562,6 +562,18 @@ export type LumiExternalPerceptionSegment
  */
 export interface LumiExternalPerception {
   eventId: string
+  /** Source adapter family, such as `aiocqhttp` or `kook`. */
+  platform?: string
+  /** Source conversation ID retained for observability, not authorization. */
+  conversationId?: string
+  /** Source sender ID retained for provenance, not identity binding. */
+  senderId?: string
+  /** Human-readable sender label supplied by the adapter. */
+  senderName?: string
+  /** Whether the source event came from a private conversation. */
+  isPrivate?: boolean
+  /** Whether the source event came from a group conversation. */
+  isGroup?: boolean
   segments: LumiExternalPerceptionSegment[]
 }
 
@@ -570,6 +582,16 @@ export interface LumiExternalPerceptionFailedEvent {
   eventId: string
   code: 'invalid_event' | 'vision_unavailable' | 'hearing_unavailable' | 'generation_failed'
   message: string
+}
+
+/** Sticker selected by the local Lumi runtime for display in its desktop conversation. */
+export interface LumiExternalAssistantStickerEvent {
+  eventId: string
+  conversationId: string
+  stickerId: string
+  dataBase64: string
+  mimeType: 'image/gif' | 'image/jpeg' | 'image/png' | 'image/webp'
+  tags: string[]
 }
 
 /** Correlated request for the renderer-owned local Lumi runtime readiness. */
@@ -585,6 +607,74 @@ export interface LumiExternalRuntimeStatusEvent {
   vision: boolean
   hearing: boolean
   detail?: string
+}
+
+/** Read-only group message accepted only by Lumi's social-language learner. */
+export interface LumiExternalGroupObservationRequestEvent {
+  requestId: string
+  eventId: string
+  messageId: string
+  sourceId: string
+  platform: string
+  platformInstanceId: string
+  groupId: string
+  senderId: string
+  senderName: string
+  text: string
+  timestamp: number
+  batchSize: number
+  historyLimit: number
+  concurrentGroups: number
+}
+
+/** Correlated acknowledgement; it intentionally contains no reply payload. */
+export interface LumiExternalGroupObservationResultEvent {
+  requestId: string
+  ok: boolean
+  queued: boolean
+  batchProcessed: boolean
+  message?: string
+}
+
+/** Requests that the renderer resume complete persisted learning batches. */
+export interface LumiExternalGroupObservationResumeEvent {
+  batchSize: number
+  concurrentGroups: number
+}
+
+/** Requests a tool-free sticker-context judgment from the active Lumi consciousness model. */
+export interface LumiExternalStickerIntelligenceRequestEvent {
+  requestId: string
+  operation: 'classify' | 'select'
+  payload: {
+    senderName?: string
+    contextText?: string
+    previousTags?: string[]
+    inputText?: string
+    replyText?: string
+    candidates?: Array<{
+      id: string
+      tags: string[]
+      observedCount: number
+      sentCount: number
+    }>
+  }
+}
+
+/** Correlated structured result produced by Lumi consciousness without rule fallback. */
+export interface LumiExternalStickerIntelligenceResultEvent {
+  requestId: string
+  ok: boolean
+  classification?: {
+    tags: string[]
+    summary: string
+    confidence: number
+  }
+  selection?: {
+    stickerId?: string
+    reason: string
+  }
+  message?: string
 }
 
 /** Requests one complete utterance from the renderer-owned speech module. */
@@ -1143,6 +1233,8 @@ interface OutputGenAiChatUsage {
 
 type OutputGenAiChatCompleteEvent = {
   message: AssistantMessage
+  /** Final user-visible assistant speech, excluding tool progress and internal status text. */
+  outputText: string
   toolCalls: ToolMessage[]
   usage: OutputGenAiChatUsage
 } & Partial<WithInputSource<'stage-web' | 'stage-tamagotchi' | 'discord'>> & Partial<WithOutputSource<'gen-ai:chat'>>
@@ -1333,6 +1425,15 @@ export const lumiRoomAck = defineProtocolEventa<LumiRoomAckEvent>('lumi:room:ack
 export const lumiRoomSync = defineProtocolEventa<LumiRoomSyncEvent>('lumi:room:sync')
 export const lumiRoomAccessRevoked = defineProtocolEventa<LumiRoomAccessRevokedEvent>('lumi:room:access-revoked')
 export const lumiExternalPerceptionFailed = defineProtocolEventa<LumiExternalPerceptionFailedEvent>('lumi:external:perception:failed')
+export const lumiExternalAssistantSticker = defineProtocolEventa<LumiExternalAssistantStickerEvent>('lumi:external:assistant-sticker', {
+  metadata: {
+    delivery: {
+      mode: 'consumer-group',
+      group: 'chat-ingestion',
+      selection: 'first',
+    },
+  },
+})
 export const lumiExternalRuntimeStatusRequest = defineProtocolEventa<LumiExternalRuntimeStatusRequestEvent>('lumi:external:runtime:status:request', {
   metadata: {
     delivery: {
@@ -1343,6 +1444,35 @@ export const lumiExternalRuntimeStatusRequest = defineProtocolEventa<LumiExterna
   },
 })
 export const lumiExternalRuntimeStatus = defineProtocolEventa<LumiExternalRuntimeStatusEvent>('lumi:external:runtime:status')
+export const lumiExternalGroupObservationRequest = defineProtocolEventa<LumiExternalGroupObservationRequestEvent>('lumi:external:group-observation:request', {
+  metadata: {
+    delivery: {
+      mode: 'consumer-group',
+      group: 'chat-ingestion',
+      selection: 'first',
+    },
+  },
+})
+export const lumiExternalGroupObservationResult = defineProtocolEventa<LumiExternalGroupObservationResultEvent>('lumi:external:group-observation:result')
+export const lumiExternalGroupObservationResume = defineProtocolEventa<LumiExternalGroupObservationResumeEvent>('lumi:external:group-observation:resume', {
+  metadata: {
+    delivery: {
+      mode: 'consumer-group',
+      group: 'chat-ingestion',
+      selection: 'first',
+    },
+  },
+})
+export const lumiExternalStickerIntelligenceRequest = defineProtocolEventa<LumiExternalStickerIntelligenceRequestEvent>('lumi:external:sticker-intelligence:request', {
+  metadata: {
+    delivery: {
+      mode: 'consumer-group',
+      group: 'chat-ingestion',
+      selection: 'first',
+    },
+  },
+})
+export const lumiExternalStickerIntelligenceResult = defineProtocolEventa<LumiExternalStickerIntelligenceResultEvent>('lumi:external:sticker-intelligence:result')
 export const lumiExternalSpeechRequest = defineProtocolEventa<LumiExternalSpeechRequestEvent>('lumi:external:speech:request', {
   metadata: {
     delivery: {
@@ -1372,6 +1502,7 @@ export const protocolEventMetadataByType = {
   [lumiRoomSyncRequest.id]: lumiRoomSyncRequest.metadata,
   [lumiRoomVoiceCancel.id]: lumiRoomVoiceCancel.metadata,
   [lumiExternalRuntimeStatusRequest.id]: lumiExternalRuntimeStatusRequest.metadata,
+  [lumiExternalGroupObservationRequest.id]: lumiExternalGroupObservationRequest.metadata,
   [lumiExternalSpeechRequest.id]: lumiExternalSpeechRequest.metadata,
 } satisfies Partial<Record<keyof ProtocolEvents, ProtocolEventaMetadata | undefined>>
 
@@ -1534,8 +1665,14 @@ export interface ProtocolEvents<C = undefined> {
   'lumi:room:sync': LumiRoomSyncEvent
   'lumi:room:access-revoked': LumiRoomAccessRevokedEvent
   'lumi:external:perception:failed': LumiExternalPerceptionFailedEvent
+  'lumi:external:assistant-sticker': LumiExternalAssistantStickerEvent
   'lumi:external:runtime:status:request': LumiExternalRuntimeStatusRequestEvent
   'lumi:external:runtime:status': LumiExternalRuntimeStatusEvent
+  'lumi:external:group-observation:request': LumiExternalGroupObservationRequestEvent
+  'lumi:external:group-observation:result': LumiExternalGroupObservationResultEvent
+  'lumi:external:group-observation:resume': LumiExternalGroupObservationResumeEvent
+  'lumi:external:sticker-intelligence:request': LumiExternalStickerIntelligenceRequestEvent
+  'lumi:external:sticker-intelligence:result': LumiExternalStickerIntelligenceResultEvent
   'lumi:external:speech:request': LumiExternalSpeechRequestEvent
   'lumi:external:speech:result': LumiExternalSpeechResultEvent
 

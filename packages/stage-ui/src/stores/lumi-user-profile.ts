@@ -1046,38 +1046,6 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
     }
   }
 
-  function extractDeterministicCandidates(text: string): LumiUserProfileCandidate[] {
-    const candidates: LumiUserProfileCandidate[] = []
-    const normalized = text.trim()
-    if (!normalized)
-      return candidates
-
-    const focusMatch = normalized.match(/(?:我现在|最近|这段时间|目前)(?:主要)?(?:[在想做写]|关注|研究|开发)([^。！？\n]{2,40})/)
-    if (focusMatch?.[1]) {
-      candidates.push({
-        layer: 'dynamic',
-        key: 'current_focus',
-        value: normalizeChineseValue(focusMatch[1]),
-        confidence: 0.68,
-        evidence: normalized,
-        reason: 'deterministic_current_focus',
-      })
-    }
-
-    if (/我废了|我不行了|我完了|好崩溃|难受|烦死|压力好大/.test(normalized)) {
-      candidates.push({
-        layer: 'daily',
-        key: 'mood',
-        value: /压力好大/.test(normalized) ? '压力较大' : '低落或受挫',
-        confidence: 0.72,
-        evidence: normalized,
-        reason: 'emotion_isolated_daily_state',
-      })
-    }
-
-    return candidates
-  }
-
   function recordEvent(input: Omit<LumiUserProfileEvent, 'id' | 'createdAt'>) {
     const event: LumiUserProfileEvent = {
       id: createId('profile_event'),
@@ -1315,7 +1283,6 @@ export const useLumiUserProfileStore = defineStore('lumi-user-profile', () => {
     buildRelevantContext,
     isAutoUpdateEnabledForUser,
     parseCuratorOutput,
-    extractDeterministicCandidates,
     resetState,
   }
 })

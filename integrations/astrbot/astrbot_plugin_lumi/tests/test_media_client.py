@@ -282,6 +282,54 @@ class HttpLumiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed["authorization"], "Bearer secret-token")
         self.assertEqual(observed["payload"]["segments"][0]["type"], "text")  # type: ignore[index]
 
+    async def test_learning_policy_and_observation_use_lumi_owned_allowlist(
+        self,
+    ) -> None:
+        observed_paths: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            observed_paths.append(request.url.path)
+            if request.url.path.endswith("/learning-policy"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "mode": "observe_only",
+                        "groups": [
+                            {
+                                "source_id": "default:100",
+                                "platform_instance_id": "default",
+                                "group_id": "100",
+                                "priority": "high",
+                            }
+                        ],
+                    },
+                )
+            return httpx.Response(
+                202, json={"accepted": True, "reply_suppressed": True}
+            )
+
+        client = HttpLumiRuntimeClient(
+            "http://127.0.0.1:6132",
+            "secret-token",
+            1,
+            1,
+            httpx.MockTransport(handler),
+        )
+        try:
+            policy = await client.learning_policy()
+            await client.observe_group(perception())
+        finally:
+            await client.close()
+        self.assertEqual(policy.mode, "observe_only")
+        self.assertIsNotNone(policy.source_for("default", "100"))
+        self.assertEqual(
+            observed_paths,
+            [
+                "/api/lumi/integrations/astrbot/learning-policy",
+                "/api/lumi/integrations/astrbot/observe",
+            ],
+        )
+
     async def test_authentication_failure_is_classified(self) -> None:
         async def handler(_: httpx.Request) -> httpx.Response:
             return httpx.Response(401, json={"error": "no"})

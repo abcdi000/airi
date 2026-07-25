@@ -127,6 +127,11 @@ function selectProvider(id: string) {
           <div :class="['grid grid-cols-3 gap-4']">
             <FieldInput v-model="manager.configDraft.modelTemperature" type="number" label="Temperature" /><FieldInput v-model="manager.configDraft.modelMaxOutputTokens" type="number" label="最大输出 Tokens" /><FieldInput v-model="manager.configDraft.modelMaxSteps" type="number" label="最大工具步数" />
           </div>
+          <div :class="['grid grid-cols-3 gap-4']">
+            <FieldInput v-model="manager.configDraft.modelMaxContextTokens" type="number" label="上下文窗口 Tokens" description="DeepSeek V4 支持 1,000,000 Token。" />
+            <FieldInput v-model="manager.configDraft.modelOutputReserveTokens" type="number" label="输出与推理预留" description="为推理和最终回复保留。" />
+            <FieldInput v-model="manager.configDraft.modelPromptReserveTokens" type="number" label="人格与工具预留" description="为系统提示、记忆和工具保留。" />
+          </div>
           <template v-if="manager.configDraft.modelProviderId === 'deepseek'">
             <label :class="['block text-sm']"><span :class="['mb-1.5 block']">思考模式</span><select v-model="manager.configDraft.modelThinkingMode" :class="['h-10 w-full rounded-md border border-neutral-200 bg-transparent px-3 dark:border-neutral-800']"><option value="auto">跟随模型默认</option><option value="enabled">启用</option><option value="disabled">禁用</option></select></label>
             <label :class="['block text-sm']"><span :class="['mb-1.5 block']">推理强度</span><select v-model="manager.configDraft.modelReasoningEffort" :class="['h-10 w-full rounded-md border border-neutral-200 bg-transparent px-3 dark:border-neutral-800']"><option value="auto">自动</option><option value="high">High</option><option value="max">Max</option></select></label>

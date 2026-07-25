@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 
 import type { createContext } from '@moeru/eventa/adapters/electron/main'
 
-import type { ElectronLumiMemorySnapshot, ElectronLumiMemoryVectorRecord, ElectronLumiMemoryVectorSearchResult, ElectronLumiMemoryVectorStatus } from '../../../../shared/eventa'
+import type { ElectronLumiMemorySnapshot, ElectronLumiMemoryVectorRecord, ElectronLumiMemoryVectorSearchResult, ElectronLumiMemoryVectorStatus, ElectronLumiSocialLanguageSnapshot } from '../../../../shared/eventa'
 
 import process from 'node:process'
 
@@ -33,6 +33,8 @@ import {
   electronLumiMemoryUpsertVector,
 
   electronLumiMemoryVectorStatus,
+  electronLumiSocialLanguageGetSnapshot,
+  electronLumiSocialLanguageReplaceSnapshot,
 
 } from '../../../../shared/eventa'
 
@@ -310,6 +312,12 @@ function migrate(db: SqliteDatabase) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_lumi_memory_events_created_at ON lumi_memory_events(created_at);
+
+    CREATE TABLE IF NOT EXISTS lumi_social_language_snapshot (
+      id TEXT PRIMARY KEY,
+      snapshot_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `)
 
   const eventColumns = db.prepare('PRAGMA table_info(lumi_memory_events)').all()
@@ -467,6 +475,46 @@ export function createLumiMemoryService(params: {
   defineInvokeHandler(params.context, electronLumiMemorySaveEvent, async ({ userId, event }) => saveEvent(userId, event))
   defineInvokeHandler(params.context, electronLumiMemorySetSeedId, async ({ userId, seedId }) => setMeta(`seed_id:${userId}`, seedId))
   defineInvokeHandler(params.context, electronLumiMemoryClear, async ({ userId }) => clearDatabase(userId))
+  defineInvokeHandler(params.context, electronLumiSocialLanguageGetSnapshot, async () => getSocialLanguageSnapshot())
+  defineInvokeHandler(params.context, electronLumiSocialLanguageReplaceSnapshot, async snapshot => replaceSocialLanguageSnapshot(snapshot))
+}
+
+async function getSocialLanguageSnapshot(): Promise<ElectronLumiSocialLanguageSnapshot> {
+  const { db } = await getDatabase()
+  const row = db.prepare('SELECT snapshot_json FROM lumi_social_language_snapshot WHERE id = ?').get('default')
+  if (typeof row?.snapshot_json !== 'string') {
+    return {
+      version: 4,
+      expressions: [],
+      jargon: [],
+      behaviors: [],
+      decisions: [],
+      observationBuffer: [],
+      observationHistory: [],
+      observationBatches: [],
+      updatedAt: Date.now(),
+      lastMaintenanceAt: Date.now(),
+    }
+  }
+  try {
+    const parsed = JSON.parse(row.snapshot_json) as ElectronLumiSocialLanguageSnapshot
+    return toPlainIpcObject(parsed)
+  }
+  catch {
+    throw new Error('Stored Lumi social-language snapshot is invalid JSON')
+  }
+}
+
+async function replaceSocialLanguageSnapshot(snapshot: ElectronLumiSocialLanguageSnapshot) {
+  const { db } = await getDatabase()
+  const plain = toPlainIpcObject(snapshot)
+  db.prepare(`
+    INSERT INTO lumi_social_language_snapshot (id, snapshot_json, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      snapshot_json = excluded.snapshot_json,
+      updated_at = excluded.updated_at
+  `).run('default', JSON.stringify(plain), plain.updatedAt)
 }
 
 async function getSnapshot(userId: string): Promise<ElectronLumiMemorySnapshot> {

@@ -54,7 +54,7 @@ class AstrBotEventAdapter:
                 isinstance(segment, Comp.Reply)
                 and bool((segment.message_str or "").strip())
             )
-            or (isinstance(segment, Comp.Image) and self._enable_vision)
+            or isinstance(segment, Comp.Image)
             or (isinstance(segment, Comp.Record) and self._enable_hearing)
             for segment in messages
         )
@@ -89,6 +89,7 @@ class AstrBotEventAdapter:
         person_key = await self._identity_mapper.resolve_person(
             platform_instance_id, sender_id
         )
+
         conversation_key = await self._identity_mapper.resolve_conversation(
             unified_origin
         )
@@ -205,6 +206,60 @@ class AstrBotEventAdapter:
                         else {}
                     ),
                 },
+            ),
+            temporary_paths,
+        )
+
+    async def convert_group_observation(
+        self, event: AstrMessageEvent
+    ) -> tuple[LumiPerceptionEvent, list[str]]:
+        """Builds an ordered, read-only text/image observation for learning."""
+        facts = self.routing_facts(event)
+        group_id = str(event.get_group_id() or "")
+        message_id = str(getattr(event.message_obj, "message_id", "") or "")
+        segments = []
+        temporary_paths: list[str] = []
+        for index, component in enumerate(event.get_messages()):
+            if isinstance(component, Comp.Plain) and component.text.strip():
+                segments.append(
+                    LumiTextSegment(
+                        text=component.text,
+                        metadata={"chain_index": index},
+                    )
+                )
+                continue
+            if isinstance(component, Comp.Image):
+                segment, temporary = await self._image_resolver.resolve(
+                    _media_reference(component),
+                    {
+                        "chain_index": index,
+                        "astrbot_component": "Image",
+                        "observation_only": True,
+                    },
+                )
+                segments.append(segment)
+                if temporary:
+                    temporary_paths.append(temporary)
+        if not facts.is_group or not group_id or not message_id or not segments:
+            raise ValueError("Group observation has no eligible text or image")
+        platform_instance_id = event.get_platform_id()
+        return (
+            LumiPerceptionEvent(
+                event_id=f"{platform_instance_id}:{message_id}",
+                platform=event.get_platform_name(),
+                platform_instance_id=platform_instance_id,
+                unified_session_id=event.unified_msg_origin,
+                conversation_id=f"learning:{platform_instance_id}:{group_id}",
+                sender_id=event.get_sender_id(),
+                sender_name=event.get_sender_name() or event.get_sender_id(),
+                group_id=group_id,
+                message_id=message_id,
+                timestamp=int(getattr(event.message_obj, "timestamp", 0) or 0),
+                is_private=False,
+                is_group=True,
+                is_mention=facts.is_mention,
+                segments=segments,
+                metadata={"observation_only": True},
             ),
             temporary_paths,
         )

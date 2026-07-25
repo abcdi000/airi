@@ -105,9 +105,27 @@ describe('lumiServerDatabase', () => {
   it('exports server data without authentication sessions', () => {
     const database = LumiServerDatabase.open(':memory:')
     try {
+      database.acceptUserMessage({
+        conversationId: doggyDirectId,
+        actorPersonId: DOGGY_PERSON_ID,
+        messageId: 'summary-source',
+        idempotencyKey: 'summary-source',
+        content: 'old context',
+        createdAt: 1,
+      })
+      database.saveConversationSummary({
+        version: 1,
+        conversationId: doggyDirectId,
+        summary: 'model-authored summary',
+        throughMessageId: 'summary-source',
+        sourceMessageCount: 1,
+        estimatedSourceTokens: 12,
+        updatedAt: 2,
+      })
       const backup = database.exportBackup()
       expect(backup.format).toBe(LUMI_SERVER_BACKUP_FORMAT)
       expect(backup.sections.people).toHaveLength(2)
+      expect(backup.sections.conversationSummaries).toHaveLength(1)
       expect(backup.sections).not.toHaveProperty('sessions')
     }
     finally {

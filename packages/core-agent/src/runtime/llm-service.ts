@@ -378,7 +378,21 @@ export async function streamFrom({
       // from starting.
       // Keep `steps.then(resolveOnce)` so evaluation runners observe the real end
       // of the stream lifecycle instead of an intermediate tool boundary.
-      void streamResult.steps.then(resolveOnce).catch((error) => {
+      void streamResult.steps.then(async (steps) => {
+        if (options?.onUsage) {
+          for (const step of steps) {
+            if (!step.usage)
+              continue
+            try {
+              await options.onUsage(step.usage)
+            }
+            catch (error) {
+              console.error('Stream usage observer error:', error)
+            }
+          }
+        }
+        resolveOnce()
+      }).catch((error) => {
         rejectOnce(error)
         console.error('Stream steps error:', error)
       })

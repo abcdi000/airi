@@ -73,6 +73,7 @@ class LumiOutputSegment:
     url: str | None = None
     local_path: str | None = None
     mime_type: str | None = None
+    data_base64: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -97,3 +98,28 @@ class LumiHealth:
 class LumiSpeech:
     data: bytes
     mime_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class LumiStudyGroup:
+    source_id: str
+    platform_instance_id: str
+    group_id: str
+    priority: Literal["normal", "high"]
+
+
+@dataclass(frozen=True, slots=True)
+class LumiLearningPolicy:
+    mode: Literal["normal", "observe_only"]
+    groups: tuple[LumiStudyGroup, ...]
+
+    def source_for(self, platform_instance_id: str, group_id: str) -> LumiStudyGroup | None:
+        return next(
+            (
+                group
+                for group in self.groups
+                if group.platform_instance_id == platform_instance_id
+                and group.group_id == group_id
+            ),
+            None,
+        )

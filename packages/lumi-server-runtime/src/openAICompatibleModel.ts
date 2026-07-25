@@ -1,6 +1,7 @@
 import type { Tool } from '@xsai/shared-chat'
 
 import type {
+  LumiConsciousnessCurationResult,
   LumiConsciousnessModel,
   LumiConsciousnessRequest,
 } from './consciousness'
@@ -8,7 +9,7 @@ import type {
 import {
   buildLumiMemoryCuratorPrompt,
   buildLumiMemoryCuratorUserPayload,
-  extractLumiMemoryCandidates,
+  buildSocialLanguageLearningMessages,
   parseLumiMemoryCuratorDocument,
   parseLumiMemoryCuratorOutput,
 } from '@proj-airi/lumi-runtime'
@@ -81,9 +82,27 @@ export function createOpenAICompatibleConsciousnessModel(
         fetch: providerFetch(options),
       })
       const text = await consumeTextResponse(response, emitDelta)
+      return { text }
+    },
+    async generateLanguageText(messages) {
+      const response = streamText({
+        apiKey: options.apiKey?.trim() || undefined,
+        baseURL,
+        model,
+        messages: messages.map(message => ({
+          role: message.role,
+          content: message.content,
+        })),
+        temperature: options.temperature,
+        maxTokens: options.maxOutputTokens,
+        maxSteps: 1,
+        fetch: providerFetch(options),
+      })
+      return await consumeTextResponse(response)
+    },
+    async curateTurn(request, text): Promise<LumiConsciousnessCurationResult> {
       const source = request.messages.at(-1)?.content ?? ''
-      const deterministic = extractLumiMemoryCandidates(source, { sourceMessageId: request.sourceMessageId })
-      let curated = deterministic
+      let result: LumiConsciousnessCurationResult = { candidateMemories: [] }
       if (options.curateMemories !== false && source.trim()) {
         try {
           const curator = streamText({
@@ -122,21 +141,51 @@ export function createOpenAICompatibleConsciousnessModel(
             fetch: providerFetch(options),
           })
           const curatorText = await consumeTextResponse(curator)
-          curated = deduplicateCandidates([
-            ...parseLumiMemoryCuratorOutput(curatorText, request.sourceMessageId),
-            ...deterministic,
-          ])
-          return {
-            text,
-            candidateMemories: curated,
+          result = {
+            candidateMemories: deduplicateCandidates(
+              parseLumiMemoryCuratorOutput(curatorText, request.sourceMessageId),
+            ),
             personStateUpdates: parsePersonStateUpdates(parseLumiMemoryCuratorDocument(curatorText), request.conversationType),
           }
         }
         catch {
-          // Memory curation is post-reply enrichment; deterministic extraction remains available.
+          // Model curation is post-reply enrichment; failure leaves memory unchanged.
         }
       }
-      return { text, candidateMemories: curated }
+      try {
+        const learning = streamText({
+          apiKey: options.apiKey?.trim() || undefined,
+          baseURL,
+          model,
+          messages: buildSocialLanguageLearningMessages({
+            evidence: {
+              messageId: request.sourceMessageId ?? request.conversationId,
+              text: source,
+              personId: request.actorPersonId,
+              conversationId: request.conversationId,
+              platform: 'lumi-online',
+              timestamp: Date.now(),
+              source: 'human',
+              sourceKind: request.conversationType === 'group' ? 'group_chat' : 'chat',
+              authorVerified: true,
+            },
+            recentContext: request.messages
+              .filter((message): message is typeof message & { role: 'user' | 'assistant' } =>
+                message.role === 'user' || message.role === 'assistant')
+              .slice(-8)
+              .map(message => ({ role: message.role, content: message.content })),
+          }),
+          temperature: 0,
+          maxTokens: 1_500,
+          maxSteps: 1,
+          fetch: providerFetch(options),
+        })
+        result.socialLanguageLearningOutput = await consumeTextResponse(learning)
+      }
+      catch {
+        // Deterministic expression learning remains available.
+      }
+      return result
     },
   }
 }
@@ -162,6 +211,16 @@ function providerFetch(options: OpenAICompatibleConsciousnessOptions) {
       body.thinking = { type: thinkingMode }
     if (reasoningEffort !== 'auto')
       body.reasoning_effort = reasoningEffort
+    if (body.stream === true) {
+      body.stream_options = {
+        ...(body.stream_options && typeof body.stream_options === 'object' && !Array.isArray(body.stream_options)
+          ? body.stream_options as Record<string, unknown>
+          : {}),
+        // DeepSeek V4 reports exact prompt cache hit/miss accounting only in
+        // the final streamed usage chunk when this option is enabled.
+        include_usage: true,
+      }
+    }
     return await fetcher(input, { ...init, headers, body: JSON.stringify(body) })
   }
 }

@@ -10,6 +10,8 @@ import { computed, onMounted, reactive, shallowRef } from 'vue'
 
 import AstrBotGatewayStatus from './components/AstrBotGatewayStatus.vue'
 import AstrBotIdentityBindingsEditor from './components/AstrBotIdentityBindingsEditor.vue'
+import AstrBotLearningModePanel from './components/AstrBotLearningModePanel.vue'
+import AstrBotStickerLibraryPanel from './components/AstrBotStickerLibraryPanel.vue'
 
 import { useLocalAstrBotGateway } from './useLocalAstrBotGateway'
 
@@ -21,6 +23,19 @@ const draft = reactive<ElectronLumiAstrBotGatewayConfig>({
   port: 6132,
   apiToken: '',
   identityBindings: [],
+  learningMode: 'normal',
+  studyGroups: [],
+  observationBatchSize: 20,
+  observationHistoryLimit: 5_000,
+  observationConcurrentGroups: 3,
+  stickerLibrary: {
+    enabled: true,
+    collectFromStudyGroups: true,
+    relativePath: 'data/lumi-stickers',
+    maximumItems: 256,
+    sendProbability: 0.18,
+    cooldownMessages: 3,
+  },
 })
 
 const endpoint = computed(() => `http://127.0.0.1:${draft.port}`)
@@ -31,6 +46,8 @@ function applyState() {
   Object.assign(draft, {
     ...gateway.state.value.config,
     identityBindings: gateway.state.value.config.identityBindings.map(binding => ({ ...binding })),
+    studyGroups: gateway.state.value.config.studyGroups.map(group => ({ ...group })),
+    stickerLibrary: { ...gateway.state.value.config.stickerLibrary },
   })
 }
 
@@ -51,6 +68,8 @@ async function save() {
     await gateway.save({
       ...draft,
       identityBindings: draft.identityBindings.map(binding => ({ ...binding })),
+      studyGroups: draft.studyGroups.map(group => ({ ...group })),
+      stickerLibrary: { ...draft.stickerLibrary },
     })
     applyState()
   }
@@ -178,6 +197,26 @@ onMounted(load)
         @update:bindings="updateBindings"
       />
     </section>
+
+    <AstrBotLearningModePanel
+      :mode="draft.learningMode"
+      :groups="draft.studyGroups"
+      :batch-size="draft.observationBatchSize"
+      :history-limit="draft.observationHistoryLimit"
+      :concurrent-groups="draft.observationConcurrentGroups"
+      :disabled="gateway.busy.value"
+      @update:mode="draft.learningMode = $event"
+      @update:groups="draft.studyGroups = $event"
+      @update:batch-size="draft.observationBatchSize = $event"
+      @update:history-limit="draft.observationHistoryLimit = $event"
+      @update:concurrent-groups="draft.observationConcurrentGroups = $event"
+    />
+
+    <AstrBotStickerLibraryPanel
+      v-model="draft.stickerLibrary"
+      :state="gateway.state.value?.stickerLibrary"
+      :disabled="gateway.busy.value"
+    />
 
     <div :class="['sticky bottom-4 flex justify-end border-t border-neutral-200 bg-white/90 pt-4 backdrop-blur dark:border-neutral-800 dark:bg-neutral-950/90']">
       <Button

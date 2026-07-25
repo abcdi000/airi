@@ -56,11 +56,41 @@ const ServerConfigSchema = v.object({
     apiKey: v.optional(v.string()),
     model: v.pipe(v.string(), v.nonEmpty()),
     temperature: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(2))),
-    maxOutputTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1))),
+    maxOutputTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(384_000))),
+    maxContextTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(32_000), v.maxValue(1_000_000)), 1_000_000),
+    outputReserveTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_024), v.maxValue(384_000)), 64_000),
+    promptReserveTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_024), v.maxValue(200_000)), 32_000),
     maxSteps: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(64)), 8),
     thinkingMode: v.optional(v.picklist(['auto', 'enabled', 'disabled']), 'auto'),
     reasoningEffort: v.optional(v.picklist(['auto', 'high', 'max']), 'auto'),
     providerOptions: v.optional(v.record(v.string(), v.unknown()), {}),
+  }),
+  languageLearning: v.optional(v.object({
+    enabled: v.optional(v.boolean(), true),
+    expressionLearningEnabled: v.optional(v.boolean(), true),
+    behaviorLearningEnabled: v.optional(v.boolean(), true),
+    jargonLearningEnabled: v.optional(v.boolean(), true),
+    selfExpressionLearningEnabled: v.optional(v.boolean(), true),
+    globalDiffusionEnabled: v.optional(v.boolean(), true),
+    maxSelectedExpressions: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(3)), 3),
+    vectorCandidateLimit: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100)), 24),
+    preciseSelectorEnabled: v.optional(v.boolean(), true),
+    feedbackLearningEnabled: v.optional(v.boolean(), true),
+    promptLoggingEnabled: v.optional(v.boolean(), false),
+    multiMessageReplyEnabled: v.optional(v.boolean(), true),
+  }), {
+    enabled: true,
+    expressionLearningEnabled: true,
+    behaviorLearningEnabled: true,
+    jargonLearningEnabled: true,
+    selfExpressionLearningEnabled: true,
+    globalDiffusionEnabled: true,
+    maxSelectedExpressions: 3,
+    vectorCandidateLimit: 24,
+    preciseSelectorEnabled: true,
+    feedbackLearningEnabled: true,
+    promptLoggingEnabled: false,
+    multiMessageReplyEnabled: true,
   }),
   transcription: v.optional(v.object({
     providerId: v.optional(v.string(), 'openai'),
@@ -90,6 +120,31 @@ const ServerConfigSchema = v.object({
     maxAudioBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100 * 1024 * 1024)), 25 * 1024 * 1024),
     responseTimeoutMs: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(600_000)), 120_000),
     maxRequestBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_024), v.maxValue(200 * 1024 * 1024)), 50 * 1024 * 1024),
+    learningMode: v.optional(v.picklist(['normal', 'observe_only']), 'normal'),
+    studyGroups: v.optional(v.array(v.object({
+      id: v.pipe(v.string(), v.nonEmpty()),
+      platformInstanceId: v.pipe(v.string(), v.nonEmpty()),
+      groupId: v.pipe(v.string(), v.nonEmpty()),
+      displayName: v.pipe(v.string(), v.nonEmpty()),
+      enabled: v.optional(v.boolean(), true),
+      priority: v.optional(v.picklist(['normal', 'high']), 'normal'),
+    })), []),
+    observationBatchSize: v.optional(v.pipe(v.number(), v.integer(), v.minValue(5), v.maxValue(200)), 20),
+    stickerLibrary: v.optional(v.object({
+      enabled: v.optional(v.boolean(), true),
+      collectFromStudyGroups: v.optional(v.boolean(), true),
+      relativePath: v.optional(v.pipe(v.string(), v.nonEmpty()), 'lumi-stickers'),
+      maximumItems: v.optional(v.pipe(v.number(), v.integer(), v.minValue(16), v.maxValue(5_000)), 256),
+      sendProbability: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.18),
+      cooldownMessages: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(100)), 3),
+    }), {
+      enabled: true,
+      collectFromStudyGroups: true,
+      relativePath: 'lumi-stickers',
+      maximumItems: 256,
+      sendProbability: 0.18,
+      cooldownMessages: 3,
+    }),
   })),
   mcp: v.optional(v.object({
     mcpServers: v.record(v.string(), McpServerSchema),
@@ -215,6 +270,17 @@ export async function upgradeLumiServerConfig(path: string): Promise<boolean> {
       maxAudioBytes: 25 * 1024 * 1024,
       responseTimeoutMs: 120_000,
       maxRequestBytes: 50 * 1024 * 1024,
+      learningMode: 'normal',
+      studyGroups: [],
+      observationBatchSize: 20,
+      stickerLibrary: {
+        enabled: true,
+        collectFromStudyGroups: true,
+        relativePath: 'lumi-stickers',
+        maximumItems: 256,
+        sendProbability: 0.18,
+        cooldownMessages: 3,
+      },
     }
     changed = true
   }
@@ -223,6 +289,35 @@ export async function upgradeLumiServerConfig(path: string): Promise<boolean> {
     if (!Array.isArray(astrbot.identityBindings) || astrbot.identityBindings.length === 0)
       astrbot.identityBindings = defaultAstrBotIdentityBindings()
     migrations.astrbotIdentityDefaultsV1 = true
+    raw._managerMigrations = migrations
+    changed = true
+  }
+  if (!raw.languageLearning) {
+    raw.languageLearning = {
+      enabled: true,
+      expressionLearningEnabled: true,
+      behaviorLearningEnabled: true,
+      jargonLearningEnabled: true,
+      selfExpressionLearningEnabled: true,
+      globalDiffusionEnabled: true,
+      maxSelectedExpressions: 3,
+      vectorCandidateLimit: 24,
+      preciseSelectorEnabled: true,
+      feedbackLearningEnabled: true,
+      promptLoggingEnabled: false,
+      multiMessageReplyEnabled: true,
+    }
+    changed = true
+  }
+  if (!migrations.consciousnessContextAndExpressionTrialV1) {
+    const model = raw.model as Record<string, unknown>
+    model.maxContextTokens ??= 1_000_000
+    model.outputReserveTokens ??= 64_000
+    model.promptReserveTokens ??= 32_000
+    const languageLearning = raw.languageLearning as Record<string, unknown> | undefined
+    if (languageLearning)
+      languageLearning.preciseSelectorEnabled = true
+    migrations.consciousnessContextAndExpressionTrialV1 = true
     raw._managerMigrations = migrations
     changed = true
   }
@@ -258,10 +353,27 @@ export async function initializeLumiServerConfig(path: string): Promise<string> 
       baseURL: 'https://api.deepseek.com',
       apiKey: '',
       model: 'deepseek-v4-flash',
+      maxContextTokens: 1_000_000,
+      outputReserveTokens: 64_000,
+      promptReserveTokens: 32_000,
       maxSteps: 8,
       thinkingMode: 'auto',
       reasoningEffort: 'auto',
       providerOptions: {},
+    },
+    languageLearning: {
+      enabled: true,
+      expressionLearningEnabled: true,
+      behaviorLearningEnabled: true,
+      jargonLearningEnabled: true,
+      selfExpressionLearningEnabled: true,
+      globalDiffusionEnabled: true,
+      maxSelectedExpressions: 3,
+      vectorCandidateLimit: 24,
+      preciseSelectorEnabled: true,
+      feedbackLearningEnabled: true,
+      promptLoggingEnabled: false,
+      multiMessageReplyEnabled: true,
     },
     transcription: {
       providerId: 'openai',
@@ -286,6 +398,17 @@ export async function initializeLumiServerConfig(path: string): Promise<string> 
       maxAudioBytes: 25 * 1024 * 1024,
       responseTimeoutMs: 120_000,
       maxRequestBytes: 50 * 1024 * 1024,
+      learningMode: 'normal',
+      studyGroups: [],
+      observationBatchSize: 20,
+      stickerLibrary: {
+        enabled: true,
+        collectFromStudyGroups: true,
+        relativePath: 'lumi-stickers',
+        maximumItems: 256,
+        sendProbability: 0.18,
+        cooldownMessages: 3,
+      },
     },
     mcp: { mcpServers: {} },
     plugins: { enabled: [], settings: {} },

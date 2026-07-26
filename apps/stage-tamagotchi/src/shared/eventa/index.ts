@@ -98,7 +98,8 @@ export interface ElectronLumiAstrBotGatewayConfig {
   port: number
   apiToken: string
   identityBindings: ElectronLumiAstrBotIdentityBinding[]
-  learningMode: 'normal' | 'observe_only'
+  privateReplyEnabled: boolean
+  groupObservationEnabled: boolean
   studyGroups: ElectronLumiAstrBotStudyGroup[]
   observationBatchSize: number
   observationHistoryLimit: number

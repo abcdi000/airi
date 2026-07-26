@@ -35,6 +35,7 @@ class LumiAudioSegment:
 
 
 LumiPerceptionSegment: TypeAlias = LumiTextSegment | LumiImageSegment | LumiAudioSegment
+LumiGroupObservationSegment: TypeAlias = LumiTextSegment | LumiImageSegment
 
 
 @dataclass(slots=True)
@@ -61,6 +62,37 @@ class LumiPerceptionEvent:
             if segment["type"] in {"image", "audio"}:
                 # Lumi Server receives the resolved bytes, not signed platform URLs
                 # or filesystem paths from the AstrBot host.
+                segment.pop("source_url", None)
+                segment.pop("local_path", None)
+        return payload
+
+
+@dataclass(slots=True)
+class LumiGroupObservationEvent:
+    """A read-only group input that cannot carry any reply capability."""
+
+    event_id: str
+    message_id: str
+    source_id: str
+    group_id: str
+    platform: str
+    platform_instance_id: str
+    sender_id: str
+    sender_name: str
+    timestamp: int
+    segments: list[LumiGroupObservationSegment]
+    author_verified: bool = True
+    is_lumi: bool = False
+    source_kind: Literal["human_message"] = "human_message"
+    conversation_type: Literal["group_observation"] = "group_observation"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_wire(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["is_private"] = False
+        payload["is_group"] = True
+        for segment in payload["segments"]:
+            if segment["type"] == "image":
                 segment.pop("source_url", None)
                 segment.pop("local_path", None)
         return payload
@@ -110,7 +142,8 @@ class LumiStudyGroup:
 
 @dataclass(frozen=True, slots=True)
 class LumiLearningPolicy:
-    mode: Literal["normal", "observe_only"]
+    private_reply_enabled: bool
+    group_observation_enabled: bool
     groups: tuple[LumiStudyGroup, ...]
 
     def source_for(self, platform_instance_id: str, group_id: str) -> LumiStudyGroup | None:

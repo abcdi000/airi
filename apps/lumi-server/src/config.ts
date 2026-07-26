@@ -120,7 +120,12 @@ const ServerConfigSchema = v.object({
     maxAudioBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100 * 1024 * 1024)), 25 * 1024 * 1024),
     responseTimeoutMs: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(600_000)), 120_000),
     maxRequestBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_024), v.maxValue(200 * 1024 * 1024)), 50 * 1024 * 1024),
-    learningMode: v.optional(v.picklist(['normal', 'observe_only']), 'normal'),
+    privateReplyEnabled: v.optional(v.boolean()),
+    groupObservationEnabled: v.optional(v.boolean()),
+    // NOTICE:
+    // This field is accepted only for one-time migration of Server configs
+    // created before private replies and group observation became independent.
+    learningMode: v.optional(v.picklist(['normal', 'observe_only'])),
     studyGroups: v.optional(v.array(v.object({
       id: v.pipe(v.string(), v.nonEmpty()),
       platformInstanceId: v.pipe(v.string(), v.nonEmpty()),
@@ -191,10 +196,15 @@ const ServerConfigSchema = v.object({
 })
 
 type ParsedServerConfig = v.InferOutput<typeof ServerConfigSchema>
-export type LumiServerProcessConfig = Omit<ParsedServerConfig, 'vector' | 'background'> & {
+type ParsedAstrBotConfig = NonNullable<ParsedServerConfig['astrbot']>
+export type LumiServerProcessConfig = Omit<ParsedServerConfig, 'vector' | 'background' | 'astrbot'> & {
   vector: NonNullable<ParsedServerConfig['vector']>
   background: NonNullable<ParsedServerConfig['background']>
   plugins: NonNullable<ParsedServerConfig['plugins']>
+  astrbot?: Omit<ParsedAstrBotConfig, 'learningMode' | 'privateReplyEnabled' | 'groupObservationEnabled'> & {
+    privateReplyEnabled: boolean
+    groupObservationEnabled: boolean
+  }
 }
 
 /** Reads and validates a Server Manager-owned JSON configuration file. */
@@ -213,8 +223,18 @@ export async function loadLumiServerConfig(path: string): Promise<LumiServerProc
     autonomousLife: { enabled: true, minimumIntervalMs: 1_200_000, maximumIntervalMs: 2_700_000 },
   }
   const plugins = config.plugins ?? { enabled: [], settings: {} }
+  let astrbot: LumiServerProcessConfig['astrbot']
+  if (config.astrbot) {
+    const { learningMode, ...astrbotConfig } = config.astrbot
+    astrbot = {
+      ...astrbotConfig,
+      privateReplyEnabled: config.astrbot.privateReplyEnabled ?? learningMode !== 'observe_only',
+      groupObservationEnabled: config.astrbot.groupObservationEnabled ?? learningMode === 'observe_only',
+    }
+  }
   return {
     ...config,
+    astrbot,
     dataDirectory: resolve(dirname(configPath), config.dataDirectory),
     vector: {
       ...vector,
@@ -270,7 +290,8 @@ export async function upgradeLumiServerConfig(path: string): Promise<boolean> {
       maxAudioBytes: 25 * 1024 * 1024,
       responseTimeoutMs: 120_000,
       maxRequestBytes: 50 * 1024 * 1024,
-      learningMode: 'normal',
+      privateReplyEnabled: true,
+      groupObservationEnabled: false,
       studyGroups: [],
       observationBatchSize: 20,
       stickerLibrary: {
@@ -289,6 +310,18 @@ export async function upgradeLumiServerConfig(path: string): Promise<boolean> {
     if (!Array.isArray(astrbot.identityBindings) || astrbot.identityBindings.length === 0)
       astrbot.identityBindings = defaultAstrBotIdentityBindings()
     migrations.astrbotIdentityDefaultsV1 = true
+    raw._managerMigrations = migrations
+    changed = true
+  }
+  if (!migrations.astrbotIndependentPolicyV2) {
+    const astrbot = raw.astrbot as Record<string, unknown>
+    const legacyMode = astrbot.learningMode
+    if (typeof astrbot.privateReplyEnabled !== 'boolean')
+      astrbot.privateReplyEnabled = legacyMode !== 'observe_only'
+    if (typeof astrbot.groupObservationEnabled !== 'boolean')
+      astrbot.groupObservationEnabled = legacyMode === 'observe_only'
+    delete astrbot.learningMode
+    migrations.astrbotIndependentPolicyV2 = true
     raw._managerMigrations = migrations
     changed = true
   }
@@ -398,7 +431,8 @@ export async function initializeLumiServerConfig(path: string): Promise<string> 
       maxAudioBytes: 25 * 1024 * 1024,
       responseTimeoutMs: 120_000,
       maxRequestBytes: 50 * 1024 * 1024,
-      learningMode: 'normal',
+      privateReplyEnabled: true,
+      groupObservationEnabled: false,
       studyGroups: [],
       observationBatchSize: 20,
       stickerLibrary: {

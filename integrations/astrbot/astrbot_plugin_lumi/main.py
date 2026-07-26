@@ -51,6 +51,10 @@ class Main(Star):
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=-100)
     async def bridge_message(self, event: AstrMessageEvent) -> None:
         event_id = _safe_event_id(event)
+        if not self._service.config.private_reply_enabled:
+            event.should_call_llm(True)
+            event.stop_event()
+            return
         try:
             policy = await self._get_learning_policy()
         except LumiBridgeError as error:
@@ -63,7 +67,7 @@ class Main(Star):
             event.should_call_llm(True)
             event.stop_event()
             return
-        if policy.mode == "observe_only":
+        if not policy.private_reply_enabled:
             event.should_call_llm(True)
             event.stop_event()
             return
@@ -168,46 +172,56 @@ class Main(Star):
     async def observe_group_message(self, event: AstrMessageEvent) -> None:
         """Observes configured groups without creating any reply side effect."""
         event_id = _safe_event_id(event)
-        facts = self._service.adapter.routing_facts(event)
-        if (
-            facts.is_stopped
-            or facts.is_self_message
-            or not facts.is_platform_message
-            or not facts.has_supported_content
-        ):
-            return
-        if (
-            self._service.config.ignore_command_messages
-            and any(
-                facts.text.lstrip().startswith(prefix)
-                for prefix in self._service.config.command_prefixes
-            )
-        ):
-            return
-        try:
-            policy = await self._get_learning_policy()
-        except LumiBridgeError as error:
-            logger.warning(
-                "Lumi learning policy unavailable; group event ignored "
-                "event_id=%s reason=%s",
-                event_id,
-                str(error),
-            )
-            return
-        group_id = str(event.get_group_id() or "")
-        source = policy.source_for(facts.platform_instance_id, group_id)
-        if policy.mode != "observe_only" or source is None:
-            return
-
         # NOTICE:
-        # This path intentionally never calls response conversion, event.send,
-        # speech synthesis, Lumi consciousness, MCP, or the private-session
-        # coordinator. The runtime endpoint also validates the allowlist.
+        # AstrBot 4.26.7 executes its default agent only when call_llm is false.
+        # Suppression must happen before every filter or remote policy call so a
+        # failing policy service can never leak a group message to another model.
         event.should_call_llm(True)
         temporary_paths: list[str] = []
         try:
+            facts = self._service.adapter.routing_facts(event)
+            if (
+                facts.is_stopped
+                or facts.is_self_message
+                or not facts.is_platform_message
+                or not facts.has_supported_content
+            ):
+                return
+            if not self._service.config.group_observation_enabled:
+                return
+            if (
+                self._service.config.ignore_command_messages
+                and any(
+                    facts.text.lstrip().startswith(prefix)
+                    for prefix in self._service.config.command_prefixes
+                )
+            ):
+                return
+            try:
+                policy = await self._get_learning_policy()
+            except LumiBridgeError as error:
+                logger.warning(
+                    "Lumi learning policy unavailable; group event dropped "
+                    "event_id=%s reason=%s",
+                    event_id,
+                    str(error),
+                )
+                return
+            if not policy.group_observation_enabled:
+                return
+            group_id = str(event.get_group_id() or "")
+            source = policy.source_for(facts.platform_instance_id, group_id)
+            if source is None:
+                return
+
+            # This path intentionally never calls response conversion,
+            # event.send, speech synthesis, consciousness, MCP, Tool Mesh, or
+            # the private-session failure coordinator.
             observation, temporary_paths = (
-                await self._service.adapter.convert_group_observation(event)
+                await self._service.adapter.convert_group_observation(
+                    event,
+                    source.source_id,
+                )
             )
             await self._service.client.observe_group(observation)
             logger.debug(
@@ -220,6 +234,11 @@ class Main(Star):
                 "Lumi group observation ignored event_id=%s reason=%s",
                 event_id,
                 str(error),
+            )
+        except Exception:
+            logger.exception(
+                "Unexpected Lumi group observation failure event_id=%s",
+                event_id,
             )
         finally:
             cleanup_temporary_files(temporary_paths)
@@ -238,7 +257,8 @@ class Main(Star):
                     f"Token: {'configured' if config.lumi_api_token else 'missing'}",
                     f"Trigger: {config.trigger_mode}",
                     "Identity authorization: managed by Lumi",
-                    "Group messages: disabled",
+                    f"Private replies: {'enabled' if config.private_reply_enabled else 'disabled'}",
+                    f"Group observation: {'enabled (read-only)' if config.group_observation_enabled else 'disabled'}",
                     f"Vision: {'enabled' if config.enable_vision else 'disabled'}",
                     f"Hearing: {'enabled' if config.enable_hearing else 'disabled'}",
                 ]

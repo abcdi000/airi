@@ -46,7 +46,7 @@ def decide_routing(config: LumiPluginConfig, facts: RoutingFacts) -> RoutingDeci
     ):
         return RoutingDecision(False, "command")
     if facts.is_private:
-        if not config.handle_private_messages:
+        if not config.private_reply_enabled:
             return RoutingDecision(False, "private-disabled")
         if config.trigger_mode in {"private_always", "all_messages"}:
             return RoutingDecision(True, "private")

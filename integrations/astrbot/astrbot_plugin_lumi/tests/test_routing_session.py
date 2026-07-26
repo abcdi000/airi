@@ -46,6 +46,25 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(configured.lumi_endpoint, "http://127.0.0.1:6130")
         self.assertEqual(configured.speech_endpoint, "http://127.0.0.1:6132")
 
+    def test_independent_private_and_group_gates_can_both_be_enabled(self) -> None:
+        configured = config(
+            private_reply_enabled=True,
+            group_observation_enabled=True,
+        )
+
+        self.assertTrue(configured.private_reply_enabled)
+        self.assertTrue(configured.group_observation_enabled)
+
+    def test_legacy_private_gate_is_used_only_when_new_gate_is_missing(self) -> None:
+        legacy = config(handle_private_messages=False)
+        migrated = config(
+            handle_private_messages=False,
+            private_reply_enabled=True,
+        )
+
+        self.assertFalse(legacy.private_reply_enabled)
+        self.assertTrue(migrated.private_reply_enabled)
+
     def test_server_target_can_use_a_distinct_desktop_speech_token(self) -> None:
         configured = config(
             lumi_target="server",

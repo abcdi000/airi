@@ -75,7 +75,10 @@ export interface LumiNetworkServerOptions {
     responseTimeoutMs?: number
     /** Maximum base64 JSON request size. @default 52428800 */
     maxRequestBytes?: number
-    learningMode?: 'normal' | 'observe_only'
+    /** @default true */
+    privateReplyEnabled?: boolean
+    /** @default false */
+    groupObservationEnabled?: boolean
     studyGroups?: Array<{
       id: string
       platformInstanceId: string
@@ -240,7 +243,12 @@ export async function createLumiNetworkServer(options: LumiNetworkServerOptions)
     if (!hasIntegrationToken(event.req.headers, options.astrbot!.apiToken))
       return Response.json({ error: 'Authentication required' }, { status: 401 })
     return {
-      mode: options.astrbot!.learningMode ?? 'normal',
+      private_reply_enabled: options.astrbot!.privateReplyEnabled ?? true,
+      group_observation_enabled: options.astrbot!.groupObservationEnabled ?? false,
+      // Compatibility projection for old installed plugins.
+      mode: options.astrbot!.groupObservationEnabled && options.astrbot!.privateReplyEnabled === false
+        ? 'observe_only'
+        : 'normal',
       groups: (options.astrbot!.studyGroups ?? [])
         .filter(group => group.enabled)
         .map(group => ({
@@ -275,10 +283,20 @@ export async function createLumiNetworkServer(options: LumiNetworkServerOptions)
       return Response.json({ error: 'AstrBot integration is disabled' }, { status: 404 })
     if (!hasIntegrationToken(event.req.headers, options.astrbot!.apiToken))
       return Response.json({ error: 'Authentication required' }, { status: 401 })
-    if ((options.astrbot!.learningMode ?? 'normal') !== 'observe_only')
-      return Response.json({ error: 'Lumi learning mode is not active', code: 'invalid_event' }, { status: 409 })
+    if (options.astrbot!.privateReplyEnabled === false)
+      return Response.json({ error: 'Lumi private replies are disabled', code: 'invalid_event' }, { status: 409 })
+    if (!(options.astrbot!.groupObservationEnabled ?? false))
+      return Response.json({ error: 'Lumi group observation is disabled', code: 'invalid_event' }, { status: 409 })
     try {
       const body = await event.req.json() as Record<string, unknown>
+      if (body.conversation_type !== 'group_observation')
+        return Response.json({ error: 'Observation conversation type is invalid', code: 'invalid_event' }, { status: 400 })
+      if (body.author_verified !== true || body.is_lumi !== false || body.source_kind !== 'human_message') {
+        return Response.json(
+          { error: 'Observation source is not an eligible verified human message', code: 'invalid_event' },
+          { status: 400 },
+        )
+      }
       const platformInstanceId = requiredNetworkText(body.platform_instance_id, 'platform instance id', 160)
       const groupId = requiredNetworkText(body.group_id, 'group id', 240)
       const source = (options.astrbot!.studyGroups ?? []).find(group =>

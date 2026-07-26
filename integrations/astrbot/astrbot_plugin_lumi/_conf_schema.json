@@ -67,9 +67,22 @@
     "default": "private_always"
   },
   "handle_private_messages": {
-    "description": "处理私聊",
+    "description": "处理私聊（旧配置兼容）",
     "type": "bool",
-    "default": true
+    "default": true,
+    "hint": "旧版字段。新安装请使用“允许 Lumi 回复私聊”；读取旧配置时会自动作为默认值。"
+  },
+  "private_reply_enabled": {
+    "description": "允许 Lumi 回复私聊",
+    "type": "bool",
+    "default": true,
+    "hint": "这是插件本地门禁；Lumi 客户端或 Server 中的私聊开关也必须开启。"
+  },
+  "group_observation_enabled": {
+    "description": "允许只读群聊观察",
+    "type": "bool",
+    "default": true,
+    "hint": "只允许插件把群消息交给 Lumi 的白名单观察接口。任何群消息都会禁止 AstrBot 默认 LLM 并停止传播，Lumi 永远不能向群内发送。"
   },
   "handle_group_mentions": {
     "description": "群聊回复（固定关闭）",

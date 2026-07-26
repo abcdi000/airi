@@ -23,8 +23,8 @@ class LumiPluginConfig:
     request_timeout_seconds: float
     connect_timeout_seconds: float
     trigger_mode: TriggerMode
-    handle_private_messages: bool
-    handle_group_mentions: bool
+    private_reply_enabled: bool
+    group_observation_enabled: bool
     wake_words: tuple[str, ...]
     ignore_command_messages: bool
     command_prefixes: tuple[str, ...]
@@ -127,8 +127,15 @@ class LumiPluginConfig:
                 raw.get("connect_timeout_seconds", 10), "connect_timeout_seconds"
             ),
             trigger_mode=cast(TriggerMode, trigger_mode),
-            handle_private_messages=bool(raw.get("handle_private_messages", True)),
-            handle_group_mentions=False,
+            private_reply_enabled=bool(
+                raw.get(
+                    "private_reply_enabled",
+                    raw.get("handle_private_messages", True),
+                )
+            ),
+            group_observation_enabled=bool(
+                raw.get("group_observation_enabled", True)
+            ),
             wake_words=_strings(raw.get("wake_words", ["Lumi", "lumi"])),
             ignore_command_messages=bool(raw.get("ignore_command_messages", True)),
             command_prefixes=_strings(raw.get("command_prefixes", ["/"])),

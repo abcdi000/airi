@@ -284,7 +284,10 @@ class MessageParsingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         facts = adapter.routing_facts(event)
-        observation, temporary = await adapter.convert_group_observation(event)
+        observation, temporary = await adapter.convert_group_observation(
+            event,
+            "default:100",
+        )
 
         self.assertTrue(facts.has_supported_content)
         self.assertEqual([item.type for item in observation.segments], ["image"])

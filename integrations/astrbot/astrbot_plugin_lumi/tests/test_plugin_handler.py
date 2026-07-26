@@ -99,6 +99,7 @@ from astrbot_plugin_lumi.lumi_bridge.exceptions import (  # noqa: E402
     LumiUnavailableError,
 )
 from astrbot_plugin_lumi.lumi_bridge.models import (  # noqa: E402
+    LumiGroupObservationEvent,
     LumiHealth,
     LumiLearningPolicy,
     LumiOutputSegment,
@@ -166,13 +167,23 @@ class FakeAdapter:
         return perception(), []
 
     async def convert_group_observation(
-        self, _event: FakeEvent
-    ) -> tuple[LumiPerceptionEvent, list[str]]:
-        event = perception()
-        event.is_private = False
-        event.is_group = True
-        event.group_id = "100"
-        return event, []
+        self, _event: FakeEvent, source_id: str
+    ) -> tuple[LumiGroupObservationEvent, list[str]]:
+        return (
+            LumiGroupObservationEvent(
+                event_id="qq-bot-1:message-1",
+                message_id="message-1",
+                source_id=source_id,
+                group_id="100",
+                platform="aiocqhttp",
+                platform_instance_id="qq-bot-1",
+                sender_id="300",
+                sender_name="Friend",
+                timestamp=1,
+                segments=[LumiTextSegment(text="hello")],
+            ),
+            [],
+        )
 
 
 class FakeSessions:
@@ -185,9 +196,17 @@ class FakeClient:
         self,
         error: Exception | None = None,
         response: LumiResponse | None = None,
+        learning_policy: LumiLearningPolicy | None = None,
+        learning_policy_error: Exception | None = None,
     ) -> None:
         self.error = error
         self.response = response or LumiResponse("reply-1", "Lumi reply")
+        self.learning_policy_value = learning_policy or LumiLearningPolicy(
+            private_reply_enabled=True,
+            group_observation_enabled=False,
+            groups=(),
+        )
+        self.learning_policy_error = learning_policy_error
         self.calls = 0
         self.speech_calls: list[str] = []
 
@@ -210,9 +229,11 @@ class FakeClient:
         return LumiSpeech(b"RIFF0000WAVEaudio", "audio/wav")
 
     async def learning_policy(self) -> LumiLearningPolicy:
-        return LumiLearningPolicy(mode="normal", groups=())
+        if self.learning_policy_error:
+            raise self.learning_policy_error
+        return self.learning_policy_value
 
-    async def observe_group(self, _event: LumiPerceptionEvent) -> None:
+    async def observe_group(self, _event: LumiGroupObservationEvent) -> None:
         self.calls += 1
 
 
@@ -225,16 +246,27 @@ class FakeService:
         routing_facts: RoutingFacts | None = None,
         response: LumiResponse | None = None,
         voice_reply_mode: str = "all_text",
+        private_reply_enabled: bool = True,
+        group_observation_enabled: bool = True,
+        learning_policy: LumiLearningPolicy | None = None,
+        learning_policy_error: Exception | None = None,
     ) -> None:
         self.config = LumiPluginConfig.from_mapping(
             {
                 "failure_policy": failure_policy,
                 "voice_reply_mode": voice_reply_mode,
+                "private_reply_enabled": private_reply_enabled,
+                "group_observation_enabled": group_observation_enabled,
             }
         )
         self.adapter = FakeAdapter(routing_facts)
         self.sessions = FakeSessions()
-        self.client = FakeClient(error, response)
+        self.client = FakeClient(
+            error,
+            response,
+            learning_policy,
+            learning_policy_error,
+        )
         self.speech_client = self.client
         self._temporary = tempfile.TemporaryDirectory()
         self.temp_directory = Path(self._temporary.name)
@@ -355,7 +387,7 @@ class PluginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.call_llm_values, [True])
         self.assertTrue(event.stopped)
 
-    async def test_group_message_is_not_claimed_by_lumi(self) -> None:
+    async def test_non_allowlisted_group_is_suppressed_and_dropped(self) -> None:
         plugin = Main.__new__(Main)
         plugin._service = FakeService(
             routing_facts=RoutingFacts(
@@ -374,12 +406,12 @@ class PluginHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         event = FakeEvent()
 
-        await plugin.bridge_message(event)
+        await plugin.observe_group_message(event)
 
         self.assertEqual(plugin._service.client.calls, 0)
         self.assertEqual(event.sent, [])
-        self.assertEqual(event.call_llm_values, [])
-        self.assertFalse(event.stopped)
+        self.assertEqual(event.call_llm_values, [True])
+        self.assertTrue(event.stopped)
 
     async def test_learning_group_is_observed_without_any_reply(self) -> None:
         plugin = Main.__new__(Main)
@@ -399,7 +431,8 @@ class PluginHandlerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         plugin._learning_policy = LumiLearningPolicy(
-            mode="observe_only",
+            private_reply_enabled=True,
+            group_observation_enabled=True,
             groups=(
                 LumiStudyGroup(
                     source_id="qq-bot-1:100",
@@ -416,6 +449,117 @@ class PluginHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(plugin._service.client.calls, 1)
         self.assertEqual(event.sent, [])
+        self.assertEqual(event.call_llm_values, [True])
+        self.assertTrue(event.stopped)
+
+    async def test_group_policy_failure_still_suppresses_and_stops(self) -> None:
+        plugin = Main.__new__(Main)
+        plugin._service = FakeService(
+            routing_facts=RoutingFacts(
+                platform_instance_id="qq-bot-1",
+                sender_id="300",
+                is_platform_message=True,
+                is_private=False,
+                is_group=True,
+                is_mention=False,
+                is_wake=False,
+                is_self_message=False,
+                is_stopped=False,
+                has_supported_content=True,
+                text="hello",
+            ),
+            learning_policy_error=LumiUnavailableError("offline"),
+        )
+        event = FakeEvent()
+
+        await plugin.observe_group_message(event)
+
+        self.assertEqual(plugin._service.client.calls, 0)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(event.call_llm_values, [True])
+        self.assertTrue(event.stopped)
+
+    async def test_unsupported_group_event_is_suppressed_before_filtering(self) -> None:
+        plugin = Main.__new__(Main)
+        plugin._service = FakeService(
+            routing_facts=RoutingFacts(
+                platform_instance_id="qq-bot-1",
+                sender_id="300",
+                is_platform_message=True,
+                is_private=False,
+                is_group=True,
+                is_mention=False,
+                is_wake=False,
+                is_self_message=False,
+                is_stopped=False,
+                has_supported_content=False,
+                text="",
+            )
+        )
+        event = FakeEvent()
+
+        await plugin.observe_group_message(event)
+
+        self.assertEqual(plugin._service.client.calls, 0)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(event.call_llm_values, [True])
+        self.assertTrue(event.stopped)
+
+    async def test_group_command_is_suppressed_without_observation(self) -> None:
+        plugin = Main.__new__(Main)
+        plugin._service = FakeService(
+            routing_facts=RoutingFacts(
+                platform_instance_id="qq-bot-1",
+                sender_id="300",
+                is_platform_message=True,
+                is_private=False,
+                is_group=True,
+                is_mention=False,
+                is_wake=False,
+                is_self_message=False,
+                is_stopped=False,
+                has_supported_content=True,
+                text="/help",
+            )
+        )
+        event = FakeEvent()
+
+        await plugin.observe_group_message(event)
+
+        self.assertEqual(plugin._service.client.calls, 0)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(event.call_llm_values, [True])
+        self.assertTrue(event.stopped)
+
+    async def test_disabled_local_group_observation_still_suppresses_group(
+        self,
+    ) -> None:
+        plugin = Main.__new__(Main)
+        plugin._service = FakeService(group_observation_enabled=False)
+        event = FakeEvent()
+
+        await plugin.observe_group_message(event)
+
+        self.assertEqual(plugin._service.client.calls, 0)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(event.call_llm_values, [True])
+        self.assertTrue(event.stopped)
+
+    async def test_private_reply_and_group_observation_can_both_be_enabled(
+        self,
+    ) -> None:
+        policy = LumiLearningPolicy(
+            private_reply_enabled=True,
+            group_observation_enabled=True,
+            groups=(),
+        )
+        plugin = Main.__new__(Main)
+        plugin._service = FakeService(learning_policy=policy)
+        event = FakeEvent()
+
+        await plugin.bridge_message(event)
+
+        self.assertEqual(plugin._service.client.calls, 1)
         self.assertEqual(event.call_llm_values, [True])
         self.assertTrue(event.stopped)
 

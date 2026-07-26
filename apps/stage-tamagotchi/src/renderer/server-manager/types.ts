@@ -39,7 +39,8 @@ export interface ManagerState {
     astrbot: {
       enabled: boolean
       tokenConfigured: boolean
-      learningMode: 'normal' | 'observe_only'
+      privateReplyEnabled: boolean
+      groupObservationEnabled: boolean
       studyGroups: Array<{
         id: string
         platformInstanceId: string

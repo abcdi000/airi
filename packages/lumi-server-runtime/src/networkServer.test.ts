@@ -238,7 +238,8 @@ describe('createLumiNetworkServer', () => {
           externalUserId: '10001',
           personId: DOGGY_PERSON_ID,
         }],
-        learningMode: 'observe_only',
+        privateReplyEnabled: true,
+        groupObservationEnabled: true,
         studyGroups: [{
           id: 'friends',
           platformInstanceId: 'qq-bot-1',
@@ -260,6 +261,16 @@ describe('createLumiNetworkServer', () => {
       'content-type': 'application/json',
     }
     try {
+      const policyResponse = await server.app.request(
+        '/api/lumi/integrations/astrbot/learning-policy',
+        { headers },
+      )
+      expect(policyResponse.status).toBe(200)
+      expect(await policyResponse.json()).toMatchObject({
+        private_reply_enabled: true,
+        group_observation_enabled: true,
+      })
+
       const observationBody = JSON.stringify({
         event_id: 'group-message-1',
         message_id: 'group-message-1',
@@ -268,6 +279,10 @@ describe('createLumiNetworkServer', () => {
         group_id: '20001',
         sender_id: '30001',
         sender_name: 'Friend',
+        author_verified: true,
+        is_lumi: false,
+        source_kind: 'human_message',
+        conversation_type: 'group_observation',
         timestamp: 1_700_000_000,
         segments: [
           { type: 'text', text: '笑死了' },
@@ -280,6 +295,10 @@ describe('createLumiNetworkServer', () => {
         body: observationBody,
       })
       expect(observation.status).toBe(202)
+      expect(await observation.json()).toEqual({
+        accepted: true,
+        reply_suppressed: true,
+      })
       expect(await stickerLibrary.snapshot()).toMatchObject({ stats: { owned: 1 } })
 
       const privateBody = JSON.stringify({

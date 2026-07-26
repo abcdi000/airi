@@ -31,7 +31,11 @@ from lumi_bridge.media import (
     cleanup_temporary_files,
     redact_url,
 )
-from lumi_bridge.models import LumiPerceptionEvent, LumiTextSegment
+from lumi_bridge.models import (
+    LumiGroupObservationEvent,
+    LumiPerceptionEvent,
+    LumiTextSegment,
+)
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"content"
@@ -53,6 +57,21 @@ def perception() -> LumiPerceptionEvent:
         is_private=True,
         is_group=False,
         is_mention=False,
+        segments=[LumiTextSegment(text="hello")],
+    )
+
+
+def group_observation() -> LumiGroupObservationEvent:
+    return LumiGroupObservationEvent(
+        event_id="qq:group-message",
+        message_id="group-message",
+        source_id="default:100",
+        group_id="100",
+        platform="aiocqhttp",
+        platform_instance_id="default",
+        sender_id="300",
+        sender_name="Friend",
+        timestamp=1,
         segments=[LumiTextSegment(text="hello")],
     )
 
@@ -293,7 +312,8 @@ class HttpLumiClientTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(
                     200,
                     json={
-                        "mode": "observe_only",
+                        "private_reply_enabled": True,
+                        "group_observation_enabled": True,
                         "groups": [
                             {
                                 "source_id": "default:100",
@@ -317,10 +337,11 @@ class HttpLumiClientTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             policy = await client.learning_policy()
-            await client.observe_group(perception())
+            await client.observe_group(group_observation())
         finally:
             await client.close()
-        self.assertEqual(policy.mode, "observe_only")
+        self.assertTrue(policy.private_reply_enabled)
+        self.assertTrue(policy.group_observation_enabled)
         self.assertIsNotNone(policy.source_for("default", "100"))
         self.assertEqual(
             observed_paths,

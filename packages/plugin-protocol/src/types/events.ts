@@ -620,6 +620,12 @@ export interface LumiExternalGroupObservationRequestEvent {
   groupId: string
   senderId: string
   senderName: string
+  /** Whether the integration verified that the author maps to the supplied sender identity. */
+  authorVerified: true
+  /** Group observation must never ingest Lumi's own outbound messages. */
+  isLumi: false
+  /** Only real human chat messages may enter the social-language learner. */
+  sourceKind: 'human_message'
   text: string
   timestamp: number
   batchSize: number

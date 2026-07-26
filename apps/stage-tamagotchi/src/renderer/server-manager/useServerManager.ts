@@ -158,7 +158,8 @@ function createContext() {
     tlsPassphrase: '',
     astrbotEnabled: false,
     astrbotBindingsText: '',
-    astrbotLearningMode: 'normal' as 'normal' | 'observe_only',
+    astrbotPrivateReplyEnabled: true,
+    astrbotGroupObservationEnabled: false,
     astrbotStudyGroupsText: '',
     astrbotObservationBatchSize: 20,
     astrbotStickerEnabled: true,
@@ -224,7 +225,8 @@ function createContext() {
         astrbotBindingsText: next.config.astrbot.identityBindings
           .map(binding => `${binding.platformInstanceId} | ${binding.externalUserId} | ${binding.personId}`)
           .join('\n'),
-        astrbotLearningMode: next.config.astrbot.learningMode,
+        astrbotPrivateReplyEnabled: next.config.astrbot.privateReplyEnabled,
+        astrbotGroupObservationEnabled: next.config.astrbot.groupObservationEnabled,
         astrbotStudyGroupsText: next.config.astrbot.studyGroups
           .map(group => `${group.platformInstanceId} | ${group.groupId} | ${group.displayName} | ${group.priority}`)
           .join('\n'),
@@ -432,7 +434,8 @@ function createContext() {
         : undefined,
       astrbotEnabled: configDraft.astrbotEnabled,
       astrbotIdentityBindings,
-      astrbotLearningMode: configDraft.astrbotLearningMode,
+      astrbotPrivateReplyEnabled: configDraft.astrbotPrivateReplyEnabled,
+      astrbotGroupObservationEnabled: configDraft.astrbotGroupObservationEnabled,
       astrbotStudyGroups,
       astrbotObservationBatchSize: Number(configDraft.astrbotObservationBatchSize),
       astrbotStickerLibrary: {

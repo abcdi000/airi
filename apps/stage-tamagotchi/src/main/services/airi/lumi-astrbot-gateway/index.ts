@@ -50,6 +50,11 @@ const gatewayConfigSchema = object({
     externalUserId: string(),
     personId: string(),
   })),
+  privateReplyEnabled: optional(boolean()),
+  groupObservationEnabled: optional(boolean()),
+  // NOTICE:
+  // Kept only so persisted v1 desktop settings can be migrated during normalization.
+  // New settings must never write this mutually exclusive field.
   learningMode: optional(picklist(['normal', 'observe_only'])),
   studyGroups: optional(array(object({
     id: string(),
@@ -89,7 +94,8 @@ function createDefaultConfig(): ElectronLumiAstrBotGatewayConfig {
         personId: MOUSSY_PERSON_ID,
       })),
     ],
-    learningMode: 'normal',
+    privateReplyEnabled: true,
+    groupObservationEnabled: false,
     studyGroups: [],
     observationBatchSize: 20,
     observationHistoryLimit: 5_000,
@@ -493,7 +499,13 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
         return Response.json({ error: 'Authentication required' }, { status: 401 })
       const current = currentConfig()
       return Response.json({
-        mode: current.learningMode,
+        private_reply_enabled: current.privateReplyEnabled,
+        group_observation_enabled: current.groupObservationEnabled,
+        // Older installed plugins can still read this projection while the
+        // authoritative policy remains the two independent booleans above.
+        mode: current.groupObservationEnabled && !current.privateReplyEnabled
+          ? 'observe_only'
+          : 'normal',
         groups: current.studyGroups
           .filter(group => group.enabled)
           .map(group => ({
@@ -549,6 +561,9 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
               groupId: observation.groupId,
               senderId: observation.senderId,
               senderName: observation.senderName,
+              authorVerified: observation.authorVerified,
+              isLumi: observation.isLumi,
+              sourceKind: observation.sourceKind,
               text: observation.text,
               timestamp: observation.timestamp,
               batchSize: currentConfig().observationBatchSize,
@@ -585,6 +600,8 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
   async function perceiveAndRespond(input: unknown): Promise<GatewayResponse> {
     if (await readLumiClientRuntimeMode() !== 'offline-client')
       throw new GatewayRequestError('runtime_mode_conflict', 'The desktop client is currently using Lumi Server mode')
+    if (!currentConfig().privateReplyEnabled)
+      throw new GatewayRequestError('invalid_event', 'Lumi private replies are disabled')
     const runtimeStatus = await probeRuntimeStatus()
     if (!runtimeStatus.available) {
       throw new GatewayRequestError(
@@ -962,12 +979,14 @@ function normalizeConfig(input: unknown): ElectronLumiAstrBotGatewayConfig {
   const cooldownMessages = Math.floor(stickerInput.cooldownMessages)
   if (cooldownMessages < 0 || cooldownMessages > 100)
     throw new Error('Lumi sticker cooldown must be between 0 and 100 messages')
+  const legacyMode = parsed.output.learningMode
   return {
     enabled: parsed.output.enabled,
     port: parsed.output.port,
     apiToken,
     identityBindings,
-    learningMode: parsed.output.learningMode ?? 'normal',
+    privateReplyEnabled: parsed.output.privateReplyEnabled ?? legacyMode !== 'observe_only',
+    groupObservationEnabled: parsed.output.groupObservationEnabled ?? legacyMode === 'observe_only',
     studyGroups,
     observationBatchSize,
     observationHistoryLimit,
@@ -984,11 +1003,15 @@ function normalizeConfig(input: unknown): ElectronLumiAstrBotGatewayConfig {
 }
 
 function validateGroupObservation(value: unknown, config: ElectronLumiAstrBotGatewayConfig) {
-  if (config.learningMode !== 'observe_only')
-    throw new GatewayRequestError('invalid_event', 'Lumi learning mode is not active')
+  if (!config.groupObservationEnabled)
+    throw new GatewayRequestError('invalid_event', 'Lumi group observation is disabled')
   if (!value || typeof value !== 'object')
     throw new GatewayRequestError('invalid_event', 'Invalid AstrBot group observation')
   const event = value as Record<string, unknown>
+  if (event.conversation_type !== 'group_observation')
+    throw new GatewayRequestError('invalid_event', 'Observation conversation type is invalid')
+  if (event.author_verified !== true || event.is_lumi !== false || event.source_kind !== 'human_message')
+    throw new GatewayRequestError('invalid_event', 'Observation source is not an eligible verified human message')
   const platformInstanceId = requiredText(event.platform_instance_id, 'platform instance id', 160)
   const groupId = requiredText(event.group_id, 'group id', 240)
   const source = config.studyGroups.find(group =>
@@ -1039,6 +1062,9 @@ function validateGroupObservation(value: unknown, config: ElectronLumiAstrBotGat
     groupId,
     senderId: requiredText(event.sender_id, 'sender id', 240),
     senderName: requiredText(event.sender_name, 'sender name', 240),
+    authorVerified: true as const,
+    isLumi: false as const,
+    sourceKind: 'human_message' as const,
     text,
     images,
     timestamp: finiteOptionalInteger(event.timestamp) ?? Date.now(),

@@ -17,6 +17,7 @@ from .exceptions import (
     VisionUnavailableError,
 )
 from .models import (
+    LumiGroupObservationEvent,
     LumiHealth,
     LumiLearningPolicy,
     LumiOutputSegment,
@@ -36,7 +37,7 @@ class LumiRuntimeClient(Protocol):
 
     async def learning_policy(self) -> LumiLearningPolicy: ...
 
-    async def observe_group(self, event: LumiPerceptionEvent) -> None: ...
+    async def observe_group(self, event: LumiGroupObservationEvent) -> None: ...
 
     async def synthesize_speech(self, text: str) -> LumiSpeech: ...
 
@@ -151,9 +152,19 @@ class HttpLumiRuntimeClient:
         self._raise_for_response(response)
         try:
             payload = response.json()
-            mode = payload["mode"]
-            if mode not in {"normal", "observe_only"}:
-                raise ValueError("invalid mode")
+            mode = payload.get("mode")
+            if mode is not None and mode not in {"normal", "observe_only"}:
+                raise ValueError("invalid legacy mode")
+            private_reply_enabled = payload.get("private_reply_enabled")
+            group_observation_enabled = payload.get("group_observation_enabled")
+            if private_reply_enabled is not None and not isinstance(
+                private_reply_enabled, bool
+            ):
+                raise ValueError("invalid private reply policy")
+            if group_observation_enabled is not None and not isinstance(
+                group_observation_enabled, bool
+            ):
+                raise ValueError("invalid group observation policy")
             groups = tuple(
                 LumiStudyGroup(
                     source_id=str(item["source_id"]),
@@ -165,11 +176,23 @@ class HttpLumiRuntimeClient:
                 )
                 for item in payload.get("groups", [])
             )
-            return LumiLearningPolicy(mode=mode, groups=groups)
+            return LumiLearningPolicy(
+                private_reply_enabled=(
+                    private_reply_enabled
+                    if isinstance(private_reply_enabled, bool)
+                    else mode != "observe_only"
+                ),
+                group_observation_enabled=(
+                    group_observation_enabled
+                    if isinstance(group_observation_enabled, bool)
+                    else mode == "observe_only"
+                ),
+                groups=groups,
+            )
         except (KeyError, TypeError, ValueError) as error:
             raise LumiProtocolError("Lumi returned an invalid learning policy") from error
 
-    async def observe_group(self, event: LumiPerceptionEvent) -> None:
+    async def observe_group(self, event: LumiGroupObservationEvent) -> None:
         if not self._api_token:
             raise LumiAuthenticationError("Lumi integration token is not configured")
         try:

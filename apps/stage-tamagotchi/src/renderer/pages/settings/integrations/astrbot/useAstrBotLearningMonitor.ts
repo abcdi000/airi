@@ -50,7 +50,7 @@ export interface AstrBotLearningMonitorChange {
  * - Read-only computed monitor rows and counters
  */
 export function useAstrBotLearningMonitor(options: {
-  mode: MaybeRefOrGetter<ElectronLumiAstrBotGatewayConfig['learningMode']>
+  groupObservationEnabled: MaybeRefOrGetter<ElectronLumiAstrBotGatewayConfig['groupObservationEnabled']>
   groups: MaybeRefOrGetter<ElectronLumiAstrBotStudyGroup[]>
   batchSize: MaybeRefOrGetter<number>
   concurrentGroups: MaybeRefOrGetter<number>
@@ -64,7 +64,7 @@ export function useAstrBotLearningMonitor(options: {
   const isReprocessing = shallowRef(false)
   const reprocessResult = shallowRef<string>()
   useIntervalFn(() => {
-    if (toValue(options.mode) === 'observe_only') {
+    if (toValue(options.groupObservationEnabled)) {
       void store.refreshFromPersistence()
       void getGatewayState()
         .then(state => gatewayState.value = state)
@@ -112,7 +112,7 @@ export function useAstrBotLearningMonitor(options: {
     }
   }
   const status = computed(() => {
-    if (toValue(options.mode) !== 'observe_only')
+    if (!toValue(options.groupObservationEnabled))
       return { tone: 'idle' as const, label: '未启用学习模式', detail: '切换并保存后才会接收指定群聊' }
     if (!enabledGroups.value.length)
       return { tone: 'warning' as const, label: '等待配置学习群', detail: '当前不会接收任何群聊' }

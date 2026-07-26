@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Button, FieldCheckbox, FieldInput, FieldSelect, Textarea } from '@proj-airi/ui'
+import { Button, FieldCheckbox, FieldInput, Textarea } from '@proj-airi/ui'
 
 import ManagerPage from '../components/ManagerPage.vue'
 
@@ -58,14 +58,16 @@ function save() {
           <h3 :class="['text-base font-semibold']">
             群聊学习与表情包
           </h3>
-          <FieldSelect
-            v-model="manager.configDraft.astrbotLearningMode"
-            label="运行模式"
-            :options="[
-              { label: '正常私聊', value: 'normal' },
-              { label: '只读学习', value: 'observe_only' },
-            ]"
-          />
+          <div :class="['grid gap-4 sm:grid-cols-2']">
+            <FieldCheckbox
+              v-model="manager.configDraft.astrbotPrivateReplyEnabled"
+              label="允许 Lumi 回复私聊"
+            />
+            <FieldCheckbox
+              v-model="manager.configDraft.astrbotGroupObservationEnabled"
+              label="启用只读群聊观察"
+            />
+          </div>
           <Textarea
             v-model="manager.configDraft.astrbotStudyGroupsText"
             label="允许观察的群（每行一条）"

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import type { ElectronLumiAstrBotGatewayConfig, ElectronLumiAstrBotStudyGroup } from '../../../../../../shared/eventa'
 
-import { Button, FieldCheckbox, FieldInput, FieldSelect } from '@proj-airi/ui'
+import { Button, FieldCheckbox, FieldInput } from '@proj-airi/ui'
 
 const props = defineProps<{
-  mode: ElectronLumiAstrBotGatewayConfig['learningMode']
+  privateReplyEnabled: ElectronLumiAstrBotGatewayConfig['privateReplyEnabled']
+  groupObservationEnabled: ElectronLumiAstrBotGatewayConfig['groupObservationEnabled']
   groups: ElectronLumiAstrBotStudyGroup[]
   batchSize: number
   historyLimit: number
@@ -13,7 +14,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  'update:mode': [value: ElectronLumiAstrBotGatewayConfig['learningMode']]
+  'update:privateReplyEnabled': [value: ElectronLumiAstrBotGatewayConfig['privateReplyEnabled']]
+  'update:groupObservationEnabled': [value: ElectronLumiAstrBotGatewayConfig['groupObservationEnabled']]
   'update:groups': [value: ElectronLumiAstrBotStudyGroup[]]
   'update:batchSize': [value: number]
   'update:historyLimit': [value: number]
@@ -65,16 +67,28 @@ function removeGroup(target: ElectronLumiAstrBotStudyGroup) {
     </header>
 
     <div :class="['grid gap-4 md:grid-cols-2']">
-      <FieldSelect
-        :model-value="mode"
-        label="运行模式"
-        :options="[
-          { label: '正常私聊', value: 'normal' },
-          { label: '只读学习', value: 'observe_only' },
-        ]"
-        :disabled="disabled"
-        @update:model-value="emit('update:mode', $event as ElectronLumiAstrBotGatewayConfig['learningMode'])"
-      />
+      <div :class="['flex flex-col gap-3 border-b border-neutral-200 pb-4 dark:border-neutral-800']">
+        <FieldCheckbox
+          :model-value="privateReplyEnabled"
+          label="允许 Lumi 回复私聊"
+          :disabled="disabled"
+          @update:model-value="emit('update:privateReplyEnabled', Boolean($event))"
+        />
+        <p :class="['text-xs text-neutral-500 dark:text-neutral-400']">
+          关闭后，已绑定账号的私聊也不会进入 Lumi 意识；它与群聊观察互不影响。
+        </p>
+      </div>
+      <div :class="['flex flex-col gap-3 border-b border-neutral-200 pb-4 dark:border-neutral-800']">
+        <FieldCheckbox
+          :model-value="groupObservationEnabled"
+          label="启用只读群聊观察"
+          :disabled="disabled"
+          @update:model-value="emit('update:groupObservationEnabled', Boolean($event))"
+        />
+        <p :class="['text-xs text-neutral-500 dark:text-neutral-400']">
+          可以与私聊回复同时开启。任何群消息都只用于白名单学习，永远不会触发发送。
+        </p>
+      </div>
       <FieldInput
         :model-value="String(batchSize)"
         label="每批消息数"

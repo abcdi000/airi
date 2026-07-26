@@ -7,15 +7,15 @@ import { computed, toRefs } from 'vue'
 import { useAstrBotLearningMonitor } from '../useAstrBotLearningMonitor'
 
 const props = defineProps<{
-  mode: ElectronLumiAstrBotGatewayConfig['learningMode']
+  groupObservationEnabled: ElectronLumiAstrBotGatewayConfig['groupObservationEnabled']
   groups: ElectronLumiAstrBotStudyGroup[]
   batchSize: number
   historyLimit: number
   concurrentGroups: number
 }>()
 
-const { batchSize, concurrentGroups, groups, mode } = toRefs(props)
-const monitor = useAstrBotLearningMonitor({ mode, groups, batchSize, concurrentGroups })
+const { batchSize, concurrentGroups, groupObservationEnabled, groups } = toRefs(props)
+const monitor = useAstrBotLearningMonitor({ groupObservationEnabled, groups, batchSize, concurrentGroups })
 const statusClasses = computed(() => ({
   idle: 'bg-neutral-400',
   warning: 'bg-amber-500',

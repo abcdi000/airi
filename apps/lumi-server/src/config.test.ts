@@ -26,6 +26,10 @@ describe('lumi Server process configuration', () => {
         outputReserveTokens: 64_000,
         promptReserveTokens: 32_000,
       })
+      expect(config.astrbot).toMatchObject({
+        privateReplyEnabled: true,
+        groupObservationEnabled: false,
+      })
       expect(JSON.parse(await readFile(path, 'utf8'))).not.toHaveProperty('airiAccount')
       await expect(initializeLumiServerConfig(path)).rejects.toMatchObject({ code: 'EEXIST' })
     }
@@ -50,6 +54,9 @@ describe('lumi Server process configuration', () => {
       const upgraded = JSON.parse(await readFile(path, 'utf8'))
       expect(upgraded.astrbot.enabled).toBe(false)
       expect(upgraded.astrbot.apiToken.length).toBeGreaterThanOrEqual(32)
+      expect(upgraded.astrbot.privateReplyEnabled).toBe(true)
+      expect(upgraded.astrbot.groupObservationEnabled).toBe(false)
+      expect(upgraded.astrbot).not.toHaveProperty('learningMode')
       expect(upgraded.astrbot.identityBindings).toHaveLength(6)
       expect(upgraded.languageLearning).toMatchObject({
         enabled: true,
@@ -75,6 +82,45 @@ describe('lumi Server process configuration', () => {
       ]))
       await expect(loadLumiServerConfig(path)).resolves.toMatchObject({
         astrbot: { enabled: false },
+      })
+    }
+    finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('migrates legacy observe-only policy without preventing later dual enablement', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lumi-server-policy-upgrade-'))
+    const path = join(directory, 'server.json')
+    try {
+      await initializeLumiServerConfig(path)
+      const legacy = JSON.parse(await readFile(path, 'utf8'))
+      delete legacy.astrbot.privateReplyEnabled
+      delete legacy.astrbot.groupObservationEnabled
+      legacy.astrbot.learningMode = 'observe_only'
+      await writeFile(path, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8')
+
+      await expect(loadLumiServerConfig(path)).resolves.toMatchObject({
+        astrbot: {
+          privateReplyEnabled: false,
+          groupObservationEnabled: true,
+        },
+      })
+      await expect(upgradeLumiServerConfig(path)).resolves.toBe(true)
+
+      const migrated = JSON.parse(await readFile(path, 'utf8'))
+      expect(migrated.astrbot).toMatchObject({
+        privateReplyEnabled: false,
+        groupObservationEnabled: true,
+      })
+      expect(migrated.astrbot).not.toHaveProperty('learningMode')
+      migrated.astrbot.privateReplyEnabled = true
+      await writeFile(path, `${JSON.stringify(migrated, null, 2)}\n`, 'utf8')
+      await expect(loadLumiServerConfig(path)).resolves.toMatchObject({
+        astrbot: {
+          privateReplyEnabled: true,
+          groupObservationEnabled: true,
+        },
       })
     }
     finally {

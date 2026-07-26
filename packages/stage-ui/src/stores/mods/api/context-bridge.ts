@@ -1464,6 +1464,8 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
           return
         try {
           const data = event.data
+          if (data.authorVerified !== true || data.isLumi !== false || data.sourceKind !== 'human_message')
+            throw new Error('Group observation author or source is not trusted')
           const text = data.text.trim()
           if (!text || text.length > 4_000)
             throw new Error('Group observation text is empty or too long')

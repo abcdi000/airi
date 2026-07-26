@@ -54,7 +54,8 @@ export interface LumiServerManagerState {
     astrbot: {
       enabled: boolean
       tokenConfigured: boolean
-      learningMode: 'normal' | 'observe_only'
+      privateReplyEnabled: boolean
+      groupObservationEnabled: boolean
       studyGroups: Array<{
         id: string
         platformInstanceId: string
@@ -158,7 +159,8 @@ export async function setupLumiServerManager() {
         astrbot: {
           enabled: config.astrbot?.enabled ?? false,
           tokenConfigured: Boolean(config.astrbot?.apiToken),
-          learningMode: config.astrbot?.learningMode ?? 'normal',
+          privateReplyEnabled: config.astrbot?.privateReplyEnabled ?? true,
+          groupObservationEnabled: config.astrbot?.groupObservationEnabled ?? false,
           studyGroups: config.astrbot?.studyGroups ?? [],
           observationBatchSize: config.astrbot?.observationBatchSize ?? 20,
           stickerLibrary: config.astrbot?.stickerLibrary ?? {
@@ -480,8 +482,11 @@ export async function setupLumiServerManager() {
               ),
             }
           : {}),
-        ...(patch.astrbotLearningMode === 'normal' || patch.astrbotLearningMode === 'observe_only'
-          ? { learningMode: patch.astrbotLearningMode }
+        ...(typeof patch.astrbotPrivateReplyEnabled === 'boolean'
+          ? { privateReplyEnabled: patch.astrbotPrivateReplyEnabled }
+          : {}),
+        ...(typeof patch.astrbotGroupObservationEnabled === 'boolean'
+          ? { groupObservationEnabled: patch.astrbotGroupObservationEnabled }
           : {}),
         ...(Array.isArray(patch.astrbotStudyGroups) ? { studyGroups: patch.astrbotStudyGroups } : {}),
         ...(typeof patch.astrbotObservationBatchSize === 'number'

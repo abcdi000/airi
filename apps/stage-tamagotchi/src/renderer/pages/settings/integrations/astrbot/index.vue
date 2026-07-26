@@ -23,7 +23,8 @@ const draft = reactive<ElectronLumiAstrBotGatewayConfig>({
   port: 6132,
   apiToken: '',
   identityBindings: [],
-  learningMode: 'normal',
+  privateReplyEnabled: true,
+  groupObservationEnabled: false,
   studyGroups: [],
   observationBatchSize: 20,
   observationHistoryLimit: 5_000,
@@ -199,13 +200,15 @@ onMounted(load)
     </section>
 
     <AstrBotLearningModePanel
-      :mode="draft.learningMode"
+      :private-reply-enabled="draft.privateReplyEnabled"
+      :group-observation-enabled="draft.groupObservationEnabled"
       :groups="draft.studyGroups"
       :batch-size="draft.observationBatchSize"
       :history-limit="draft.observationHistoryLimit"
       :concurrent-groups="draft.observationConcurrentGroups"
       :disabled="gateway.busy.value"
-      @update:mode="draft.learningMode = $event"
+      @update:private-reply-enabled="draft.privateReplyEnabled = $event"
+      @update:group-observation-enabled="draft.groupObservationEnabled = $event"
       @update:groups="draft.studyGroups = $event"
       @update:batch-size="draft.observationBatchSize = $event"
       @update:history-limit="draft.observationHistoryLimit = $event"

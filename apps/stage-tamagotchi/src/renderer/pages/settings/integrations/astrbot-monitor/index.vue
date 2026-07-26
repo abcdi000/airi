@@ -31,7 +31,7 @@ onMounted(load)
 
     <AstrBotLearningMonitor
       v-motion
-      :mode="gateway.state.value?.config.learningMode ?? 'normal'"
+      :group-observation-enabled="gateway.state.value?.config.groupObservationEnabled ?? false"
       :groups="gateway.state.value?.config.studyGroups ?? []"
       :batch-size="gateway.state.value?.config.observationBatchSize ?? 20"
       :history-limit="gateway.state.value?.config.observationHistoryLimit ?? 5_000"

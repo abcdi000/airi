@@ -9,7 +9,7 @@ from astrbot.api.event import AstrMessageEvent
 
 from .identity import IdentityMapper
 from .media import AudioResolver, ImageResolver, MediaReference
-from .models import LumiPerceptionEvent, LumiTextSegment
+from .models import LumiGroupObservationEvent, LumiPerceptionEvent, LumiTextSegment
 from .routing import RoutingFacts
 
 
@@ -211,8 +211,8 @@ class AstrBotEventAdapter:
         )
 
     async def convert_group_observation(
-        self, event: AstrMessageEvent
-    ) -> tuple[LumiPerceptionEvent, list[str]]:
+        self, event: AstrMessageEvent, source_id: str
+    ) -> tuple[LumiGroupObservationEvent, list[str]]:
         """Builds an ordered, read-only text/image observation for learning."""
         facts = self.routing_facts(event)
         group_id = str(event.get_group_id() or "")
@@ -244,20 +244,16 @@ class AstrBotEventAdapter:
             raise ValueError("Group observation has no eligible text or image")
         platform_instance_id = event.get_platform_id()
         return (
-            LumiPerceptionEvent(
+            LumiGroupObservationEvent(
                 event_id=f"{platform_instance_id}:{message_id}",
+                message_id=message_id,
+                source_id=source_id,
+                group_id=group_id,
                 platform=event.get_platform_name(),
                 platform_instance_id=platform_instance_id,
-                unified_session_id=event.unified_msg_origin,
-                conversation_id=f"learning:{platform_instance_id}:{group_id}",
                 sender_id=event.get_sender_id(),
                 sender_name=event.get_sender_name() or event.get_sender_id(),
-                group_id=group_id,
-                message_id=message_id,
                 timestamp=int(getattr(event.message_obj, "timestamp", 0) or 0),
-                is_private=False,
-                is_group=True,
-                is_mention=facts.is_mention,
                 segments=segments,
                 metadata={"observation_only": True},
             ),

@@ -97,6 +97,28 @@ export interface GroupObservationEnvelope {
   senderId: string
   senderName: string
   timestamp: number
+  /** True only after the platform adapter verified the author identity. */
+  authorVerified: boolean
+  /** True when the event was emitted by Lumi itself and must be ignored. */
+  isLumi: boolean
+  /**
+   * Security classification assigned by the ingress adapter.
+   *
+   * Only `human_message` can enter social learning.
+   */
+  sourceKind:
+    | 'human_message'
+    | 'command'
+    | 'system'
+    | 'tool'
+    | 'planner'
+    | 'memory'
+    | 'web'
+    | 'subtitle'
+    | 'forward'
+    | 'code'
+    | 'roleplay'
+    | 'unknown'
   text?: string
   images: readonly GroupObservationImage[]
   segments: readonly GroupObservationSegment[]
@@ -161,4 +183,8 @@ export function validateGroupObservationEnvelope(envelope: GroupObservationEnvel
   requireNonEmpty(envelope.senderId, 'senderId')
   if (!Number.isFinite(envelope.timestamp) || envelope.timestamp <= 0)
     throw new TypeError('timestamp must be a positive finite number')
+  if (typeof envelope.authorVerified !== 'boolean')
+    throw new TypeError('authorVerified must be a boolean')
+  if (typeof envelope.isLumi !== 'boolean')
+    throw new TypeError('isLumi must be a boolean')
 }

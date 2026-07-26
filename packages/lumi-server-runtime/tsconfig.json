@@ -5,6 +5,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "paths": {
+      "@proj-airi/lumi-agent-runtime": ["../lumi-agent-runtime/src/index.ts"],
       "@proj-airi/lumi-online": ["../lumi-online/src/index.ts"],
       "@proj-airi/lumi-runtime": ["../lumi-runtime/src/index.ts"]
     },

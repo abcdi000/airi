@@ -32,6 +32,8 @@ export interface GroupObservationPolicy {
 export interface GroupObservationPersistencePort {
   /** Returns whether an event was already accepted. */
   hasEvent: (eventId: string) => Promise<boolean>
+  /** Restores accepted evidence that has not completed a curator batch. */
+  loadPending: () => Promise<readonly GroupObservationEnvelope[]>
   /** Persists accepted evidence before it becomes eligible for a batch. */
   append: (observation: GroupObservationEnvelope) => Promise<void>
 }
@@ -82,6 +84,7 @@ interface SourceQueue {
   policy: StudyGroupPolicy
   pending: GroupObservationEnvelope[]
   processing: Promise<void>
+  active: boolean
 }
 
 /**
@@ -109,6 +112,7 @@ export class GroupObservationRuntime {
   readonly #audit?: GroupObservationAuditPort
   readonly #sources = new Map<string, SourceQueue>()
   readonly #inflightEventIds = new Set<string>()
+  #initialization?: Promise<void>
 
   constructor(options: {
     policy: GroupObservationPolicy
@@ -130,6 +134,7 @@ export class GroupObservationRuntime {
         policy: source,
         pending: [],
         processing: Promise.resolve(),
+        active: false,
       })
     }
     this.#policy = options.policy
@@ -152,6 +157,7 @@ export class GroupObservationRuntime {
    */
   async observe(envelope: GroupObservationEnvelope): Promise<GroupObservationReceipt> {
     validateGroupObservationEnvelope(envelope)
+    await this.#initialize()
     const source = this.#sources.get(envelope.sourceId)
     const reason = this.#dropReason(envelope, source)
     if (reason)
@@ -172,7 +178,7 @@ export class GroupObservationRuntime {
     queue.pending.push(envelope)
     const batchQueued = queue.pending.length >= this.#policy.batchSize
     if (batchQueued)
-      this.#queueReadyBatches(queue)
+      this.#queueReadyBatch(queue)
 
     await this.#audit?.record({
       eventId: envelope.eventId,
@@ -202,7 +208,32 @@ export class GroupObservationRuntime {
    * - Nothing after all source-local chains settle
    */
   async drain(): Promise<void> {
-    await Promise.all([...this.#sources.values()].map(source => source.processing))
+    await this.#initialize()
+    while (true) {
+      const active = [...this.#sources.values()].filter(source => source.active)
+      if (!active.length)
+        return
+      await Promise.all(active.map(source => source.processing))
+    }
+  }
+
+  /**
+   * Restores persisted evidence and retries complete source-local batches.
+   *
+   * Use when:
+   * - A host starts after an unclean shutdown
+   * - An operator retries a batch after a curator outage
+   *
+   * Expects:
+   * - The persistence port returns only unconsumed evidence
+   *
+   * Returns:
+   * - Nothing after all currently eligible batches have been scheduled
+   */
+  async resume(): Promise<void> {
+    await this.#initialize()
+    for (const source of this.#sources.values())
+      this.#queueReadyBatch(source)
   }
 
   #dropReason(
@@ -254,35 +285,86 @@ export class GroupObservationRuntime {
     }
   }
 
-  #queueReadyBatches(source: SourceQueue): void {
-    while (source.pending.length >= this.#policy.batchSize) {
-      const observations = source.pending.splice(0, this.#policy.batchSize)
-      const batch: GroupObservationBatch = {
-        sourceId: source.policy.sourceId,
-        platformInstanceId: source.policy.platformInstanceId,
-        groupId: source.policy.groupId,
-        observations,
+  #initialize(): Promise<void> {
+    this.#initialization ??= this.#restorePending()
+    return this.#initialization
+  }
+
+  async #restorePending(): Promise<void> {
+    const restored = await this.#persistence.loadPending()
+    for (const envelope of restored) {
+      try {
+        validateGroupObservationEnvelope(envelope)
+        const source = this.#sources.get(envelope.sourceId)
+        const reason = this.#dropReason(envelope, source)
+        if (reason) {
+          await this.#audit?.record({
+            eventId: envelope.eventId,
+            sourceId: envelope.sourceId,
+            outcome: 'dropped',
+            reason,
+          })
+          continue
+        }
+        if (source && !source.pending.some(item => item.eventId === envelope.eventId))
+          source.pending.push(envelope)
       }
-      source.processing = source.processing.then(async () => {
-        try {
-          await this.#consumer.consume(batch)
-          await this.#audit?.record({
-            eventId: observations.at(-1)?.eventId ?? source.policy.sourceId,
-            sourceId: source.policy.sourceId,
-            outcome: 'batch_completed',
-            batchSize: observations.length,
-          })
-        }
-        catch (error) {
-          await this.#audit?.record({
-            eventId: observations.at(-1)?.eventId ?? source.policy.sourceId,
-            sourceId: source.policy.sourceId,
-            outcome: 'batch_failed',
-            reason: errorMessageFrom(error) ?? 'Unknown group learning failure',
-            batchSize: observations.length,
-          })
-        }
-      })
+      catch (error) {
+        await this.#audit?.record({
+          eventId: envelope.eventId,
+          sourceId: envelope.sourceId,
+          outcome: 'dropped',
+          reason: errorMessageFrom(error) ?? 'Invalid persisted group observation',
+        })
+      }
     }
+    for (const source of this.#sources.values()) {
+      source.pending.sort((left, right) =>
+        left.timestamp - right.timestamp || left.messageId.localeCompare(right.messageId),
+      )
+      this.#queueReadyBatch(source)
+    }
+  }
+
+  #queueReadyBatch(source: SourceQueue): void {
+    if (source.active || source.pending.length < this.#policy.batchSize)
+      return
+
+    const observations = source.pending.splice(0, this.#policy.batchSize)
+    const batch: GroupObservationBatch = {
+      sourceId: source.policy.sourceId,
+      platformInstanceId: source.policy.platformInstanceId,
+      groupId: source.policy.groupId,
+      observations,
+    }
+    source.active = true
+    source.processing = source.processing.then(async () => {
+      let completed = false
+      try {
+        await this.#consumer.consume(batch)
+        completed = true
+        await this.#audit?.record({
+          eventId: observations.at(-1)?.eventId ?? source.policy.sourceId,
+          sourceId: source.policy.sourceId,
+          outcome: 'batch_completed',
+          batchSize: observations.length,
+        })
+      }
+      catch (error) {
+        source.pending.unshift(...observations)
+        await this.#audit?.record({
+          eventId: observations.at(-1)?.eventId ?? source.policy.sourceId,
+          sourceId: source.policy.sourceId,
+          outcome: 'batch_failed',
+          reason: errorMessageFrom(error) ?? 'Unknown group learning failure',
+          batchSize: observations.length,
+        })
+      }
+      finally {
+        source.active = false
+        if (completed)
+          this.#queueReadyBatch(source)
+      }
+    })
   }
 }

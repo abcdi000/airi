@@ -1,4 +1,8 @@
-import type { LumiConsciousnessModel, LumiServerDatabase } from '@proj-airi/lumi-server-runtime'
+import type {
+  LumiConsciousnessModel,
+  LumiServerDatabase,
+  LumiServerGroupObservationRuntime,
+} from '@proj-airi/lumi-server-runtime'
 
 import type { LumiServerProcessConfig } from './config'
 
@@ -13,6 +17,7 @@ import {
   buildLumiStickerSelectionMessages,
   createLumiNetworkServer,
   createLumiNodeConsciousness,
+  createLumiServerGroupObservationRuntime,
   createOpenAICompatibleConsciousnessModel,
   createOpenAICompatibleTranscriber,
   createOpenAICompatibleVisionAnalyzer,
@@ -79,6 +84,7 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
   let jobWorker: LumiServerJobWorker | undefined
   let databaseRef: LumiServerDatabase | undefined
   let migrationService: LumiServerMigrationService | undefined
+  let groupObservationRuntime: LumiServerGroupObservationRuntime | undefined
   let server: Awaited<ReturnType<typeof createLumiNetworkServer>> | undefined
   try {
     server = await createLumiNetworkServer({
@@ -109,6 +115,11 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
             studyGroups: config.astrbot.studyGroups,
             observationBatchSize: config.astrbot.observationBatchSize,
             stickerLibrary,
+            observeGroup: async (input) => {
+              if (!groupObservationRuntime)
+                throw new Error('Lumi group observation runtime is not ready')
+              return await groupObservationRuntime.observe(input)
+            },
           }
         : undefined,
       onGenerationError(error, context) {
@@ -151,6 +162,24 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
           },
         })
         stickerIntelligenceModel = model
+        if (config.astrbot?.enabled) {
+          groupObservationRuntime = createLumiServerGroupObservationRuntime({
+            database,
+            model,
+            enabled: config.astrbot.groupObservationEnabled,
+            batchSize: config.astrbot.observationBatchSize,
+            studyGroups: config.astrbot.studyGroups.map(group => ({
+              sourceId: group.id,
+              platformInstanceId: group.platformInstanceId,
+              groupId: group.groupId,
+              enabled: group.enabled,
+            })),
+            languageLearning: config.languageLearning,
+          })
+          void groupObservationRuntime.resume().catch((error) => {
+            console.error('[group-observation] Failed to resume persisted learning batches', error)
+          })
+        }
         const backgroundLife = new LumiBackgroundLife({
           database,
           model,
@@ -192,6 +221,7 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
         })
       },
       async beforeDatabaseClose() {
+        await groupObservationRuntime?.drain()
         await jobWorker?.stop()
         await vectorService?.stop()
       },

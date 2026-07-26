@@ -1,3 +1,4 @@
+import type { GroupObservationEnvelope, GroupObservationReceipt } from '@proj-airi/lumi-agent-runtime'
 import type { Hooks as CrossWebSocketHooks } from 'crossws'
 import type { WebSocketMessage, WebSocketPeer } from 'h3'
 
@@ -89,19 +90,7 @@ export interface LumiNetworkServerOptions {
     }>
     observationBatchSize?: number
     stickerLibrary?: LumiStickerLibrary
-    observeGroup?: (input: {
-      eventId: string
-      messageId: string
-      sourceId: string
-      platform: string
-      platformInstanceId: string
-      groupId: string
-      senderId: string
-      senderName: string
-      text: string
-      timestamp: number
-      batchSize: number
-    }) => Promise<void>
+    observeGroup?: (input: GroupObservationEnvelope) => Promise<GroupObservationReceipt>
   }
   /** Reports an accepted turn that failed during asynchronous generation. */
   onGenerationError?: (error: Error, context: LumiReplyContext) => void
@@ -283,8 +272,6 @@ export async function createLumiNetworkServer(options: LumiNetworkServerOptions)
       return Response.json({ error: 'AstrBot integration is disabled' }, { status: 404 })
     if (!hasIntegrationToken(event.req.headers, options.astrbot!.apiToken))
       return Response.json({ error: 'Authentication required' }, { status: 401 })
-    if (options.astrbot!.privateReplyEnabled === false)
-      return Response.json({ error: 'Lumi private replies are disabled', code: 'invalid_event' }, { status: 409 })
     if (!(options.astrbot!.groupObservationEnabled ?? false))
       return Response.json({ error: 'Lumi group observation is disabled', code: 'invalid_event' }, { status: 409 })
     try {
@@ -317,21 +304,26 @@ export async function createLumiNetworkServer(options: LumiNetworkServerOptions)
         .filter((segment): segment is { type: 'text', text: unknown } => (segment as { type?: unknown }).type === 'text')
         .map(segment => requiredNetworkText(segment.text, 'observation text', 4_000))
         .join('\n')
-      if (text && options.astrbot!.observeGroup) {
-        await options.astrbot!.observeGroup({
-          eventId,
-          messageId,
-          sourceId: source.id,
-          platform: requiredNetworkText(body.platform, 'platform', 160),
-          platformInstanceId,
-          groupId,
-          senderId: requiredNetworkText(body.sender_id, 'sender id', 240),
-          senderName,
-          text,
-          timestamp,
-          batchSize: options.astrbot!.observationBatchSize ?? 20,
-        })
-      }
+      const observationReceipt = text && options.astrbot!.observeGroup
+        ? await options.astrbot!.observeGroup({
+            eventId,
+            messageId,
+            sourceId: source.id,
+            platform: requiredNetworkText(body.platform, 'platform', 160),
+            platformInstanceId,
+            groupId,
+            senderId: requiredNetworkText(body.sender_id, 'sender id', 240),
+            senderName,
+            authorVerified: true,
+            isLumi: false,
+            sourceKind: 'human_message',
+            text,
+            images: [],
+            segments: [{ type: 'text', text }],
+            timestamp,
+            conversationType: 'group_observation',
+          })
+        : undefined
       if (text)
         await options.astrbot!.stickerLibrary?.observeContext(source.id, text, timestamp)
       for (const segment of segments) {
@@ -349,7 +341,14 @@ export async function createLumiNetworkServer(options: LumiNetworkServerOptions)
       }
       if (!options.astrbot!.observeGroup && !options.astrbot!.stickerLibrary)
         return Response.json({ error: 'Lumi group observation runtime is unavailable', code: 'unavailable' }, { status: 503 })
-      return Response.json({ accepted: true, reply_suppressed: true }, { status: 202 })
+      return Response.json({
+        accepted: observationReceipt?.accepted ?? true,
+        reply_suppressed: true,
+        source_id: observationReceipt?.sourceId ?? source.id,
+        pending_in_source: observationReceipt?.pendingInSource,
+        batch_queued: observationReceipt?.batchQueued,
+        reason: observationReceipt?.reason,
+      }, { status: 202 })
     }
     catch (error) {
       return Response.json({ error: errorMessageFrom(error) ?? 'Invalid group observation', code: 'invalid_event' }, { status: 400 })

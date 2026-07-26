@@ -1,3 +1,4 @@
+import type { LanguageModelPurpose } from '@proj-airi/lumi-agent-runtime'
 import type { LumiOnlineMessage } from '@proj-airi/lumi-online'
 import type {
   LanguageLearningConfig,
@@ -76,7 +77,7 @@ export interface LumiConsciousnessModel {
   /** Runs a one-step, tool-free language task for Replyer and selector. */
   generateLanguageText: (
     messages: LumiLanguageModelMessage[],
-    purpose: 'replyer' | 'replyer_retry' | 'expression_selector' | 'feedback' | 'sticker_classifier' | 'sticker_selector' | 'context_summary',
+    purpose: LanguageModelPurpose,
   ) => Promise<string>
   /** Runs post-reply memory, person-state, and language curation. */
   curateTurn?: (

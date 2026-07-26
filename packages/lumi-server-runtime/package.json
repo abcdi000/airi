@@ -27,6 +27,7 @@
     "@modelcontextprotocol/sdk": "catalog:",
     "@moeru/eventa": "catalog:",
     "@moeru/std": "catalog:",
+    "@proj-airi/lumi-agent-runtime": "workspace:*",
     "@proj-airi/lumi-online": "workspace:*",
     "@proj-airi/lumi-runtime": "workspace:*",
     "@xsai/generate-text": "catalog:",

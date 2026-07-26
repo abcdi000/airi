@@ -27,8 +27,11 @@ function observation(overrides: Partial<GroupObservationEnvelope> = {}): GroupOb
   }
 }
 
-function runtime(consume?: (batch: GroupObservationBatch) => Promise<void>) {
-  const events = new Set<string>()
+function runtime(
+  consume?: (batch: GroupObservationBatch) => Promise<void>,
+  restored: readonly GroupObservationEnvelope[] = [],
+) {
+  const events = new Set(restored.map(item => item.eventId))
   const consumeMock = vi.fn(consume ?? (async (_batch: GroupObservationBatch) => undefined))
   return {
     consume: consumeMock,
@@ -54,6 +57,7 @@ function runtime(consume?: (batch: GroupObservationBatch) => Promise<void>) {
       },
       persistence: {
         hasEvent: async eventId => events.has(eventId),
+        loadPending: async () => restored,
         append: async (item) => {
           events.add(item.eventId)
         },
@@ -186,5 +190,57 @@ describe('groupObservationRuntime', () => {
       batchQueued: true,
     })
     await expect(instance.drain()).resolves.toBeUndefined()
+  })
+
+  /**
+   * @example
+   * A host restart resumes persisted evidence without requiring a new message.
+   */
+  it('restores complete pending batches after restart', async () => {
+    const restored = [
+      observation({ eventId: 'restored-1', messageId: 'restored-1', timestamp: 10 }),
+      observation({ eventId: 'restored-2', messageId: 'restored-2', timestamp: 20 }),
+    ]
+    const { consume, instance } = runtime(undefined, restored)
+
+    await instance.resume()
+    await instance.drain()
+
+    expect(consume).toHaveBeenCalledTimes(1)
+    expect(consume.mock.calls[0]?.[0].observations.map(item => item.eventId)).toEqual([
+      'restored-1',
+      'restored-2',
+    ])
+  })
+
+  /**
+   * @example
+   * A failed oldest batch remains ahead of later evidence until explicitly retried.
+   */
+  it('requeues a failed batch without processing newer same-source evidence first', async () => {
+    let attempt = 0
+    const consume = vi.fn(async (_batch: GroupObservationBatch) => {
+      attempt += 1
+      if (attempt === 1)
+        throw new Error('curator offline')
+    })
+    const restored = [
+      observation({ eventId: 'old-1', messageId: 'old-1', timestamp: 10 }),
+      observation({ eventId: 'old-2', messageId: 'old-2', timestamp: 20 }),
+      observation({ eventId: 'new-1', messageId: 'new-1', timestamp: 30 }),
+      observation({ eventId: 'new-2', messageId: 'new-2', timestamp: 40 }),
+    ]
+    const { instance } = runtime(consume, restored)
+
+    await instance.resume()
+    await instance.drain()
+    expect(consume).toHaveBeenCalledTimes(1)
+    expect(consume.mock.calls[0]?.[0].observations.map(item => item.eventId)).toEqual(['old-1', 'old-2'])
+
+    await instance.resume()
+    await instance.drain()
+    expect(consume).toHaveBeenCalledTimes(3)
+    expect(consume.mock.calls[1]?.[0].observations.map(item => item.eventId)).toEqual(['old-1', 'old-2'])
+    expect(consume.mock.calls[2]?.[0].observations.map(item => item.eventId)).toEqual(['new-1', 'new-2'])
   })
 })

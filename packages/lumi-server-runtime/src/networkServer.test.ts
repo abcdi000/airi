@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { DOGGY_PERSON_ID } from './database'
 import { createLumiNetworkServer } from './networkServer'
@@ -298,6 +298,7 @@ describe('createLumiNetworkServer', () => {
       expect(await observation.json()).toEqual({
         accepted: true,
         reply_suppressed: true,
+        source_id: 'friends',
       })
       expect(await stickerLibrary.snapshot()).toMatchObject({ stats: { owned: 1 } })
 
@@ -329,6 +330,99 @@ describe('createLumiNetworkServer', () => {
           { type: 'image', mime_type: 'image/png' },
         ],
       })
+    }
+    finally {
+      await server.stop()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * @example
+   * Group observation remains available while private replies are disabled,
+   * and its response exposes acknowledgement metadata only.
+   */
+  it('keeps group observation independent from private replies and returns no reply payload', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'lumi-network-observation-'))
+    const token = 'test-astrbot-token-with-at-least-thirty-two-characters'
+    const observeGroup = vi.fn(async () => ({
+      accepted: true,
+      replySuppressed: true as const,
+      sourceId: 'friends',
+      pendingInSource: 1,
+      batchQueued: false,
+    }))
+    const server = await createLumiNetworkServer({
+      databasePath: join(directory, 'server.sqlite3'),
+      authSecret: 'test-only-secret-with-at-least-thirty-two-characters',
+      publicBaseURL: 'http://127.0.0.1:6130',
+      serverVersion: 'test',
+      astrbot: {
+        apiToken: token,
+        identityBindings: [],
+        privateReplyEnabled: false,
+        groupObservationEnabled: true,
+        studyGroups: [{
+          id: 'friends',
+          platformInstanceId: 'qq-bot-1',
+          groupId: '20001',
+          displayName: 'Friends',
+          enabled: true,
+          priority: 'high',
+        }],
+        observeGroup,
+      },
+      createReplyGenerator: () => ({
+        async generate() {
+          throw new Error('Group observation must not invoke the reply generator')
+        },
+      }),
+    })
+    try {
+      const response = await server.app.request('/api/lumi/integrations/astrbot/observe', {
+        method: 'POST',
+        headers: {
+          'authorization': `Bearer ${token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          event_id: 'group-event-1',
+          message_id: 'group-message-1',
+          platform: 'aiocqhttp',
+          platform_instance_id: 'qq-bot-1',
+          group_id: '20001',
+          sender_id: '30001',
+          sender_name: 'Friend',
+          author_verified: true,
+          is_lumi: false,
+          source_kind: 'human_message',
+          conversation_type: 'group_observation',
+          timestamp: 1_700_000_000,
+          segments: [{ type: 'text', text: '不是哥们' }],
+        }),
+      })
+
+      expect(response.status).toBe(202)
+      const payload = await response.json() as Record<string, unknown>
+      expect(payload).toEqual({
+        accepted: true,
+        reply_suppressed: true,
+        source_id: 'friends',
+        pending_in_source: 1,
+        batch_queued: false,
+      })
+      expect(payload).not.toHaveProperty('text')
+      expect(payload).not.toHaveProperty('segments')
+      expect(payload).not.toHaveProperty('speech')
+      expect(payload).not.toHaveProperty('reply_id')
+      expect(observeGroup).toHaveBeenCalledTimes(1)
+      expect(observeGroup).toHaveBeenCalledWith(expect.objectContaining({
+        conversationType: 'group_observation',
+        sourceId: 'friends',
+        authorVerified: true,
+        isLumi: false,
+        sourceKind: 'human_message',
+      }))
     }
     finally {
       await server.stop()

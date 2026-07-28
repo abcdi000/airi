@@ -563,6 +563,10 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
   const lastVisionInputImageDataUrl = ref('')
   const lastMessageAt = ref<number | null>(null)
   const lastScheduledDelayMs = ref<number | null>(null)
+  const nextScheduledAt = ref<number | null>(null)
+  const lastTickStartedAt = ref<number | null>(null)
+  const lastTickFinishedAt = ref<number | null>(null)
+  const lastSkipReason = ref('')
   const tickCount = ref(0)
   const skippedCount = ref(0)
   const captureFailureCount = ref(0)
@@ -573,6 +577,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
   const lastObservationSignature = ref('')
   const visionFailureBackoffUntil = ref<number | null>(null)
   const applyingAutonomousSettingsPatch = ref(false)
+  const runtimeStatusPublishingEnabled = ref(false)
   let lastObservedSettingsSnapshot = ''
 
   const captureImageChannel = new BroadcastChannel(CAPTURE_IMAGE_CHANNEL_NAME)
@@ -702,10 +707,10 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
   }
 
   function clearScheduledTick() {
-    if (!timeoutHandle)
-      return
-    clearTimeout(timeoutHandle)
+    if (timeoutHandle)
+      clearTimeout(timeoutHandle)
     timeoutHandle = undefined
+    nextScheduledAt.value = null
   }
 
   function scheduleNextTick() {
@@ -715,8 +720,10 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     clearScheduledTick()
     const delay = sampleHumanLikeDelayMs()
     lastScheduledDelayMs.value = delay
+    nextScheduledAt.value = Date.now() + delay
     timeoutHandle = setTimeout(() => {
       timeoutHandle = undefined
+      nextScheduledAt.value = null
       void runTick().finally(() => scheduleNextTick())
     }, delay)
   }
@@ -726,23 +733,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
       scheduleNextTick()
   })
 
-  watch([
-    running,
-    processing,
-    enabled,
-    configured,
-    currentActivity,
-    lastSalience,
-    lastDecision,
-    quietMode,
-    summaryMode,
-    ignoredProactiveStreak,
-    lowChangeStreak,
-    lastCaptureAt,
-    lastScheduledDelayMs,
-    lastError,
-    visionFailureBackoffUntil,
-  ], () => {
+  function publishRuntimeStatus() {
     writeRuntimeStatus({
       running: running.value,
       processing: processing.value,
@@ -758,10 +749,56 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
       lowChangeStreak: lowChangeStreak.value,
       lastCaptureAt: lastCaptureAt.value,
       lastScheduledDelayMs: lastScheduledDelayMs.value,
+      nextScheduledAt: nextScheduledAt.value,
+      lastTickStartedAt: lastTickStartedAt.value,
+      lastTickFinishedAt: lastTickFinishedAt.value,
+      lastSkipReason: lastSkipReason.value,
+      tickCount: tickCount.value,
+      skippedCount: skippedCount.value,
       lastError: lastError.value,
       visionFailureBackoffUntil: visionFailureBackoffUntil.value,
     })
+  }
+
+  watch([
+    running,
+    processing,
+    enabled,
+    configured,
+    currentActivity,
+    lastSalience,
+    lastDecision,
+    quietMode,
+    summaryMode,
+    ignoredProactiveStreak,
+    lowChangeStreak,
+    lastCaptureAt,
+    lastScheduledDelayMs,
+    nextScheduledAt,
+    lastTickStartedAt,
+    lastTickFinishedAt,
+    lastSkipReason,
+    tickCount,
+    skippedCount,
+    lastError,
+    visionFailureBackoffUntil,
+    runtimeStatusPublishingEnabled,
+  ], () => {
+    if (runtimeStatusPublishingEnabled.value)
+      publishRuntimeStatus()
   }, { immediate: true })
+
+  function setRuntimeStatusPublishingEnabled(nextEnabled: boolean) {
+    if (!nextEnabled && runtimeStatusPublishingEnabled.value)
+      publishRuntimeStatus()
+    runtimeStatusPublishingEnabled.value = nextEnabled
+  }
+
+  function recordSkippedTick(reason: string) {
+    skippedCount.value += 1
+    lastSkipReason.value = reason
+    lastTickFinishedAt.value = Date.now()
+  }
 
   function currentLocalDateKey() {
     const date = new Date()
@@ -1709,24 +1746,32 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
   }
 
   async function runTick(options: { force?: boolean } = {}) {
-    if ((!enabled.value && !options.force) || processing.value)
+    if (!enabled.value && !options.force) {
+      recordSkippedTick('disabled')
       return
+    }
+    if (processing.value) {
+      recordSkippedTick('already_processing')
+      return
+    }
+    lastTickStartedAt.value = Date.now()
+    lastSkipReason.value = ''
     if (!options.force && visionFailureBackoffUntil.value && Date.now() < visionFailureBackoffUntil.value) {
-      skippedCount.value += 1
+      recordSkippedTick('vision_failure_backoff')
       return
     }
     cardStore.initialize()
     if (publishOnlyWhenLumiActive.value && cardStore.activeCardId !== LUMI_AIRI_CARD_ID) {
-      skippedCount.value += 1
+      recordSkippedTick('lumi_card_inactive')
       return
     }
     if (!configured.value) {
       lastError.value = 'Vision or consciousness model is not configured.'
-      skippedCount.value += 1
+      recordSkippedTick('model_not_configured')
       return
     }
     if (lastMessageAt.value && Date.now() - lastMessageAt.value < cooldownMs.value) {
-      skippedCount.value += 1
+      recordSkippedTick('proactive_message_cooldown')
       return
     }
 
@@ -1756,7 +1801,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
       updateVisionFailureBackoff(message)
       setLastDecision({
         action: 'error',
-        reason: error instanceof Error ? error.message : String(error),
+        reason: message,
         result: 'failed',
       })
       const sessionId = chatSession.activeSessionId
@@ -1767,6 +1812,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     }
     finally {
       processing.value = false
+      lastTickFinishedAt.value = Date.now()
     }
   }
 
@@ -1940,12 +1986,18 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
   async function start() {
     if (running.value)
       return
-    await refreshSources()
     running.value = true
     enabled.value = true
+    lastSkipReason.value = ''
     lastScheduledDelayMs.value = 0
+    nextScheduledAt.value = Date.now() + 1500
+    void refreshSources().catch((error) => {
+      lastError.value = `Failed to refresh capture sources during startup: ${errorMessageFrom(error) ?? String(error)}`
+      recordRuntimeLog('runtimeLog', 'Proactive vision source refresh failed during startup.', lastError.value)
+    })
     timeoutHandle = setTimeout(() => {
       timeoutHandle = undefined
+      nextScheduledAt.value = null
       void runTick().finally(() => scheduleNextTick())
     }, 1500)
   }
@@ -2072,6 +2124,10 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     lastVisionInputImageDataUrl,
     lastMessageAt,
     lastScheduledDelayMs,
+    nextScheduledAt,
+    lastTickStartedAt,
+    lastTickFinishedAt,
+    lastSkipReason,
     tickCount,
     skippedCount,
     captureFailureCount,
@@ -2092,6 +2148,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     runTick,
     registerObserveScreenTool,
     clearObserveScreenTool,
+    setRuntimeStatusPublishingEnabled,
     start,
     stop,
     resetState,

@@ -320,6 +320,7 @@ pages:
     edit_card: 卡片编辑
     creation:
       identity: 身份
+      basic_persona: 基本人设
       name: 名字
       nickname: 昵称
       description: 描述
@@ -328,6 +329,11 @@ pages:
       settings: 人格核心
       version: 版本
       create: 创建
+      editor_subtitle: 这里只定义离线 Lumi 的基本身份；具体对话、学习、工具和记忆规则由最新版 Agent Runtime 管理。
+      managed_version: 兼容版本
+      offline_scope_notice: 此角色卡作用于本机离线 Lumi。在线 Lumi 的人格由 Lumi Server Manager 管理，两者不会自动覆盖。
+      basic_identity: 基本身份
+      core_personality: 核心性格
       defaults:
         name: 名字
         personality: 你是一个普通人，对一切都充满好奇。
@@ -351,6 +357,8 @@ pages:
         greetings_field: 问候语
         greetings: 您的角色应该如何说“你好”？
         persona_editor: 这里保存的是 Lumi 最核心的人格与表达边界。修改会直接影响她如何理解自己、与你相处和组织回答；保存前请仔细确认。
+        basic_identity: 用几句话说明 Lumi 是谁。不要在这里加入 Planner、Replyer、工具、记忆或学习规则。
+        core_personality: 只保留稳定、简短的人格特征。具体表达会由社会语言学习与最新版 Replyer 决定。
         systemprompt: 描述 Lumi 是谁、她的性格、关系、表达习惯和不可改变的边界。
         posthistoryinstructions: 填写每次对话末尾都要提醒 Lumi 遵守的简短规则，例如保持记忆一致、回复自然简洁。
         version: >-

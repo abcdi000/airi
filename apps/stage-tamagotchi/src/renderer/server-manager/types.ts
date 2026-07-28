@@ -26,6 +26,29 @@ export interface ManagerState {
       reasoningEffort: 'auto' | 'high' | 'max'
       providerOptions: Record<string, unknown>
     }
+    agentRuntime: {
+      promptDirectory?: string
+      mode: 'legacy' | 'shadow' | 'maisaka'
+      plannerMaxRounds: number
+      plannerFinalizationMode: 'maibot' | 'stop_after_successful_reply'
+      mergeWindowMs: number
+      toolMaxConcurrency: number
+      toolStepTimeoutMs: number
+      deferredToolsEnabled: boolean
+      expressionSelectorEnabled: boolean
+      directLanguageFeedbackEnabled: boolean
+      promptLoggingEnabled: boolean
+      plannerHistoryBudgetTokens: number
+      contextCompactionThresholdTokens: number
+      contextRecentTokens: number
+    }
+    languageLearning: {
+      directLanguageCandidateLearningEnabled: boolean
+      groupExpressionLearningEnabled: boolean
+      groupJargonLearningEnabled: boolean
+      groupBehaviorLearningEnabled: boolean
+      groupPublicKnowledgeLearningEnabled: boolean
+    }
     vector: { enabled: boolean, model: string, device: string }
     transcription: { providerId: string, enabled: boolean, baseURL: string, model: string, language?: string, prompt?: string, maxVoiceBytes: number, apiKeySet: boolean }
     tls: { enabled: boolean, certPath?: string, keyPath?: string }

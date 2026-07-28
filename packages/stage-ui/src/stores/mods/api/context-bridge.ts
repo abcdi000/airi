@@ -15,7 +15,9 @@ import { defineStore, storeToRefs } from 'pinia'
 import { ref, toRaw, watch } from 'vue'
 
 import { lumiRoomLedgerRepo } from '../../../database/repos/lumi-room-ledger.repo'
+import { stripInternalLumiOutput } from '../../../libs/chat-sync'
 import { getEventSourceKey } from '../../../utils/event-source'
+import { toStructuredCloneSnapshot } from '../../../utils/structured-clone'
 import { useCharacterOrchestratorStore } from '../../character'
 import { useChatOrchestratorStore } from '../../chat'
 import { CHAT_STREAM_CHANNEL_NAME, CONTEXT_CHANNEL_NAME } from '../../chat/constants'
@@ -46,18 +48,17 @@ class ExternalPerceptionProcessingError extends Error {
   }
 }
 
-export function normalizeContextSnapshot<C extends Pick<ChatStreamEventContext, 'contexts'>>(contexts: C): C {
-  return {
-    ...contexts,
-    contexts: Object.fromEntries(
-      Object
-        .entries(toRaw(contexts.contexts))
-        .map(([key, ctx]) => [
-          key,
-          ctx.map(c => toRaw(c)),
-        ]),
-    ),
-  }
+/**
+ * Normalizes a renderer chat context for BroadcastChannel transport.
+ *
+ * Before:
+ * - A context whose messages, input, or context entries may be Vue proxies.
+ *
+ * After:
+ * - A detached data-only snapshot that can cross the structured-clone boundary.
+ */
+export function normalizeContextSnapshot<C extends Pick<ChatStreamEventContext, 'contexts'>>(context: C): C {
+  return toStructuredCloneSnapshot(context)
 }
 
 function decodeExternalMedia(encoded: string, declaredSize: number, maximum: number) {
@@ -1369,6 +1370,23 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
                   metadata: event.metadata,
                 },
                 interaction,
+                ...(event.data.perception
+                  ? {
+                      onAgentToolProgress: async (progress) => {
+                        const route = roomReplyRoute(sourceInstanceId)
+                        if (!route)
+                          return
+                        serverChannelStore.send({
+                          type: 'lumi:external:agent-progress',
+                          route,
+                          data: {
+                            eventId: event.data.perception!.eventId,
+                            ...progress,
+                          },
+                        })
+                      },
+                    }
+                  : {}),
               }, targetSessionId)
             }
             catch (err) {
@@ -1649,12 +1667,18 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
         }),
 
         chatOrchestrator.onAssistantMessage(async (message, _messageText, context) => {
+          const outputText = stripInternalLumiOutput(_messageText)
+          if (!outputText)
+            return
           serverChannelStore.send({
             type: 'output:gen-ai:chat:message',
             route: roomOutputRoute(context),
             data: {
               ...context.input?.data,
-              message,
+              'message': {
+                ...message,
+                content: outputText,
+              },
               'stage-web': isStageWeb(),
               'stage-tamagotchi': isStageTamagotchi(),
               'gen-ai:chat': {
@@ -1668,6 +1692,9 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
         }),
 
         chatOrchestrator.onChatTurnComplete(async (chat, context) => {
+          const outputText = stripInternalLumiOutput(chat.outputText)
+          if (!outputText)
+            return
           const roomDelivery = context.input?.data.room
           const conversationId = context.input?.data.overrides?.sessionId
           const sourceInstanceId = context.input?.metadata?.source?.id
@@ -1680,7 +1707,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
                   messageId: chat.output.id ?? `${roomDelivery.messageId}:assistant`,
                   actorId: chat.output.actorId ?? 'lumi',
                   actorDisplayName: chat.output.actorDisplayName ?? 'Lumi',
-                  content: chat.outputText,
+                  content: outputText,
                   createdAt: chat.output.createdAt ?? Date.now(),
                 })
               })
@@ -1705,8 +1732,11 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
             route: roomOutputRoute(context),
             data: {
               ...context.input?.data,
-              'message': chat.output,
-              'outputText': chat.outputText,
+              'message': {
+                ...chat.output,
+                content: outputText,
+              },
+              'outputText': outputText,
               // TODO: tool calls should be captured properly
               'toolCalls': [],
               'stage-web': isStageWeb(),

@@ -104,6 +104,7 @@ from astrbot_plugin_lumi.lumi_bridge.models import (  # noqa: E402
     LumiLearningPolicy,
     LumiOutputSegment,
     LumiPerceptionEvent,
+    LumiProgress,
     LumiResponse,
     LumiSpeech,
     LumiStudyGroup,
@@ -198,6 +199,7 @@ class FakeClient:
         response: LumiResponse | None = None,
         learning_policy: LumiLearningPolicy | None = None,
         learning_policy_error: Exception | None = None,
+        emit_progress: bool = False,
     ) -> None:
         self.error = error
         self.response = response or LumiResponse("reply-1", "Lumi reply")
@@ -207,13 +209,28 @@ class FakeClient:
             groups=(),
         )
         self.learning_policy_error = learning_policy_error
+        self.emit_progress = emit_progress
         self.calls = 0
         self.speech_calls: list[str] = []
 
-    async def perceive_and_respond(self, _event: LumiPerceptionEvent) -> LumiResponse:
+    async def perceive_and_respond(
+        self,
+        _event: LumiPerceptionEvent,
+        on_progress=None,
+    ) -> LumiResponse:
         self.calls += 1
         if self.error:
             raise self.error
+        if on_progress is not None and self.emit_progress:
+            await on_progress(
+                LumiProgress(
+                    sequence=1,
+                    tool_name="browser_navigate",
+                    status="started",
+                    message="我先打开网页看看",
+                    timestamp=1,
+                )
+            )
         return self.response
 
     async def health_check(self) -> LumiHealth:
@@ -250,6 +267,8 @@ class FakeService:
         group_observation_enabled: bool = True,
         learning_policy: LumiLearningPolicy | None = None,
         learning_policy_error: Exception | None = None,
+        emit_progress: bool = False,
+        send_tool_progress: bool = True,
     ) -> None:
         self.config = LumiPluginConfig.from_mapping(
             {
@@ -257,6 +276,7 @@ class FakeService:
                 "voice_reply_mode": voice_reply_mode,
                 "private_reply_enabled": private_reply_enabled,
                 "group_observation_enabled": group_observation_enabled,
+                "send_tool_progress": send_tool_progress,
             }
         )
         self.adapter = FakeAdapter(routing_facts)
@@ -266,6 +286,7 @@ class FakeService:
             response,
             learning_policy,
             learning_policy_error,
+            emit_progress,
         )
         self.speech_client = self.client
         self._temporary = tempfile.TemporaryDirectory()
@@ -305,6 +326,34 @@ class PluginHandlerTests(unittest.IsolatedAsyncioTestCase):
         await plugin.bridge_message(event)
 
         self.assertEqual(event.call_llm_values, [True])
+        self.assertEqual(len(event.sent), 1)
+        self.assertEqual(event.sent[0][0].text, "Lumi reply")
+        self.assertTrue(event.stopped)
+
+    async def test_tool_progress_is_sent_before_the_final_lumi_reply(self) -> None:
+        plugin = Main.__new__(Main)
+        plugin._service = FakeService(emit_progress=True)
+        event = FakeEvent()
+
+        await plugin.bridge_message(event)
+
+        self.assertEqual(len(event.sent), 2)
+        self.assertEqual(event.sent[0], "我先打开网页看看")
+        self.assertEqual(event.sent[1][0].text, "Lumi reply")
+        self.assertTrue(event.stopped)
+
+    async def test_tool_progress_can_be_disabled_without_affecting_final_reply(
+        self,
+    ) -> None:
+        plugin = Main.__new__(Main)
+        plugin._service = FakeService(
+            emit_progress=True,
+            send_tool_progress=False,
+        )
+        event = FakeEvent()
+
+        await plugin.bridge_message(event)
+
         self.assertEqual(len(event.sent), 1)
         self.assertEqual(event.sent[0][0].text, "Lumi reply")
         self.assertTrue(event.stopped)

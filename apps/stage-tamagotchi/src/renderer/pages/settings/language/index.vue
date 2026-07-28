@@ -6,12 +6,13 @@ import { FieldCheckbox, FieldRange, SelectTab } from '@proj-airi/ui'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, shallowRef } from 'vue'
 
+import AgentRuntimeSettingsPanel from './components/AgentRuntimeSettingsPanel.vue'
 import ContextContinuityPanel from './components/ContextContinuityPanel.vue'
 import LanguageAssetsPanel from './components/LanguageAssetsPanel.vue'
 import PromptInspector from './components/PromptInspector.vue'
 import StickerLibraryManager from './components/StickerLibraryManager.vue'
 
-type PageTab = 'assets' | 'stickers' | 'prompt' | 'context' | 'settings'
+type PageTab = 'assets' | 'stickers' | 'prompt' | 'context' | 'runtime' | 'settings'
 
 const store = useLumiSocialLanguageStore()
 const { config, snapshot } = storeToRefs(store)
@@ -29,6 +30,7 @@ const tabs = [
   { label: '表情包', value: 'stickers', icon: 'i-solar:sticker-smile-circle-2-bold-duotone' },
   { label: 'Prompt', value: 'prompt', icon: 'i-solar:code-square-bold-duotone' },
   { label: '上下文', value: 'context', icon: 'i-solar:layers-minimalistic-bold-duotone' },
+  { label: '运行时', value: 'runtime', icon: 'i-solar:branching-paths-up-bold-duotone' },
   { label: '学习设置', value: 'settings', icon: 'i-solar:tuning-square-2-bold-duotone' },
 ]
 
@@ -40,6 +42,11 @@ function setting<K extends keyof LanguageLearningConfig>(key: K) {
 }
 
 const enabled = setting('enabled')
+const directLanguageCandidateLearningEnabled = setting('directLanguageCandidateLearningEnabled')
+const groupExpressionLearningEnabled = setting('groupExpressionLearningEnabled')
+const groupJargonLearningEnabled = setting('groupJargonLearningEnabled')
+const groupBehaviorLearningEnabled = setting('groupBehaviorLearningEnabled')
+const groupPublicKnowledgeLearningEnabled = setting('groupPublicKnowledgeLearningEnabled')
 const expressionLearningEnabled = setting('expressionLearningEnabled')
 const behaviorLearningEnabled = setting('behaviorLearningEnabled')
 const jargonLearningEnabled = setting('jargonLearningEnabled')
@@ -109,6 +116,7 @@ onMounted(() => {
       <StickerLibraryManager v-else-if="activeTab === 'stickers'" key="stickers" />
       <PromptInspector v-else-if="activeTab === 'prompt'" key="prompt" />
       <ContextContinuityPanel v-else-if="activeTab === 'context'" key="context" />
+      <AgentRuntimeSettingsPanel v-else-if="activeTab === 'runtime'" key="runtime" />
       <div v-else key="settings" :class="['flex flex-col gap-8']">
         <section :class="['flex flex-col gap-5 border-b border-neutral-200 pb-8 dark:border-neutral-800']">
           <div>
@@ -120,6 +128,24 @@ onMounted(() => {
             </p>
           </div>
           <FieldCheckbox v-model="enabled" label="启用语言学习与独立回复器" description="关闭后不再学习新表达，当前对话回到原有生成链路。" />
+          <FieldCheckbox
+            v-model="directLanguageCandidateLearningEnabled"
+            :disabled="!enabled"
+            label="允许私聊创建新的语言候选（兼容模式）"
+            description="默认关闭。私聊仍会反馈和调整已有候选；新的口癖、黑话与互动行为只从已授权学习群获得。"
+          />
+          <div :class="['mt-2 border-l-2 border-cyan-400/45 pl-4']">
+            <h3 :class="['text-sm font-semibold']">
+              授权学习群的独立归纳器
+            </h3>
+            <p :class="['mt-1 text-xs text-neutral-500']">
+              四类知识独立归纳和重试。关闭其中一类不会阻塞或清除其他学习成果。
+            </p>
+          </div>
+          <FieldCheckbox v-model="groupExpressionLearningEnabled" :disabled="!enabled" label="归纳群聊表达" description="学习口癖、短句、标点和自然的多消息节奏。" />
+          <FieldCheckbox v-model="groupJargonLearningEnabled" :disabled="!enabled" label="归纳群聊黑话" description="理解网络用语在当前语境里的实际含义。" />
+          <FieldCheckbox v-model="groupBehaviorLearningEnabled" :disabled="!enabled" label="归纳群聊互动行为" description="学习何时接话、追问、吐槽或保持沉默。" />
+          <FieldCheckbox v-model="groupPublicKnowledgeLearningEnabled" :disabled="!enabled" label="归纳群聊公共知识" description="仅保存可公开分享且有当前批次消息证据的群体知识。" />
           <FieldCheckbox v-model="expressionLearningEnabled" :disabled="!enabled" label="学习口语与表达节奏" description="从确认作者的真实聊天中学习口癖、短句、标点和多消息节奏。" />
           <FieldCheckbox v-model="jargonLearningEnabled" :disabled="!enabled" label="理解黑话和网络用语" description="语用含义保存在独立语言知识中，不混入事实记忆。" />
           <FieldCheckbox v-model="behaviorLearningEnabled" :disabled="!enabled" label="学习互动行为" description="学习何时简短回应、追问、吐槽或保持沉默。" />

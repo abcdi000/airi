@@ -2,8 +2,6 @@
 import type { Card } from '@proj-airi/ccc'
 import type { AiriExtension } from '@proj-airi/stage-ui/stores/modules/airi-card'
 
-import kebabcase from '@stdlib/string-base-kebabcase'
-
 import { LUMI_AIRI_CARD_ID } from '@proj-airi/stage-ui/constants/lumi-card'
 import { DEFAULT_ARTISTRY_WIDGET_INSTRUCTION } from '@proj-airi/stage-ui/constants/prompts/artistry-instruction'
 import { useDisplayModelsStore } from '@proj-airi/stage-ui/stores/display-models'
@@ -13,7 +11,7 @@ import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consci
 import { useSpeechStore } from '@proj-airi/stage-ui/stores/modules/speech'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
 import { useSettingsStageModel } from '@proj-airi/stage-ui/stores/settings/stage-model'
-import { Button, FieldInput, FieldValues } from '@proj-airi/ui'
+import { Button, FieldInput } from '@proj-airi/ui'
 import { ComboboxSelect } from '@proj-airi/ui/components/form'
 import { storeToRefs } from 'pinia'
 import {
@@ -73,6 +71,7 @@ const { activeProvider: defaultArtistryProvider } = storeToRefs(artistryStore)
 
 // Determine if we're in edit mode
 const isEditMode = computed(() => !!props.cardId)
+const isBuiltInLumiCard = computed(() => props.cardId === LUMI_AIRI_CARD_ID)
 
 // Modules configuration
 const selectedConsciousnessProvider = ref<string>('')
@@ -224,11 +223,9 @@ const activeTabId = ref('')
 
 // Tabs for card details
 const tabs: Tab[] = [
-  { id: 'identity', label: t('settings.pages.card.creation.identity'), icon: 'i-solar:emoji-funny-square-bold-duotone' },
-  { id: 'behavior', label: t('settings.pages.card.creation.behavior'), icon: 'i-solar:chat-round-line-bold-duotone' },
+  { id: 'identity', label: t('settings.pages.card.creation.basic_persona'), icon: 'i-solar:user-id-bold-duotone' },
   { id: 'modules', label: t('settings.pages.card.modules'), icon: 'i-solar:widget-4-bold-duotone' },
   { id: 'artistry', label: t('settings.pages.modules.artistry.title'), icon: 'i-solar:gallery-bold-duotone' },
-  { id: 'settings', label: t('settings.pages.card.creation.settings'), icon: 'i-solar:settings-bold-duotone' },
 ]
 
 // Active tab state - set to first available tab by default
@@ -266,43 +263,24 @@ function saveCard(card: Card): boolean {
   // Before saving, let's validate what the user entered :
   const rawCard: Card = toRaw(card)
 
-  if (!((rawCard.name?.length ?? 0) > 0)) {
+  if (!rawCard.name?.trim()) {
     // No name
     showError.value = true
     errorMessage.value = t('settings.pages.card.creation.errors.name')
     return false
   }
-  else if (!((rawCard.description?.length ?? 0) > 0)) {
+  else if (!rawCard.description?.trim()) {
     // No description
     showError.value = true
     errorMessage.value = t('settings.pages.card.creation.errors.description')
     return false
   }
-  else if (!((rawCard.personality?.length ?? 0) > 0)) {
+  else if (!rawCard.personality?.trim()) {
     // No personality
     showError.value = true
     errorMessage.value = t('settings.pages.card.creation.errors.personality')
     return false
   }
-  else if (!((rawCard.scenario?.length ?? 0) > 0)) {
-    // No Scenario
-    showError.value = true
-    errorMessage.value = t('settings.pages.card.creation.errors.scenario')
-    return false
-  }
-  else if (!((rawCard.systemPrompt?.length ?? 0) > 0)) {
-    // No sys prompt
-    showError.value = true
-    errorMessage.value = t('settings.pages.card.creation.errors.systemprompt')
-    return false
-  }
-  else if (!((rawCard.postHistoryInstructions?.length ?? 0) > 0)) {
-    // No post history prompt
-    showError.value = true
-    errorMessage.value = t('settings.pages.card.creation.errors.posthistoryinstructions')
-    return false
-  }
-
   // Validate Artistry JSON if provided
   if (selectedArtistryConfigStr.value.trim()) {
     try {
@@ -433,13 +411,13 @@ function initializeCard(): Card {
   return {
     name: t('settings.pages.card.creation.defaults.name'),
     nickname: undefined,
-    version: '1.0',
+    version: '1.0.0',
     description: '',
     notes: undefined,
     personality: t('settings.pages.card.creation.defaults.personality'),
-    scenario: t('settings.pages.card.creation.defaults.scenario'),
-    systemPrompt: t('settings.pages.card.creation.defaults.systemprompt'),
-    postHistoryInstructions: t('settings.pages.card.creation.defaults.posthistoryinstructions'),
+    scenario: '',
+    systemPrompt: '',
+    postHistoryInstructions: '',
     greetings: [],
     messageExample: [],
   }
@@ -466,30 +444,16 @@ function makeComputed<T extends keyof Card>(
       return card.value[key] ?? ''
     },
     set: (val: string) => { // Set,
-      const input = val.trim() // We first trim the value
-      card.value[key] = (input.length > 0
-        ? (transform ? transform(input) : input) // then potentially transform it
-        : '') as Card[T]// or default to empty string value if nothing was given
+      card.value[key] = (transform ? transform(val) : val) as Card[T]
     },
   })
 }
 
-const cardName = makeComputed('name', input => kebabcase(input))
+const cardName = makeComputed('name')
 const cardNickname = makeComputed('nickname')
 const cardDescription = makeComputed('description')
-const cardNotes = makeComputed('notes')
 
 const cardPersonality = makeComputed('personality')
-const cardScenario = makeComputed('scenario')
-const cardGreetings = computed({
-  get: () => card.value.greetings ?? [],
-  set: (val: string[]) => {
-    card.value.greetings = val || []
-  },
-})
-
-const cardSystemPrompt = makeComputed('systemPrompt')
-const cardPostHistoryInstructions = makeComputed('postHistoryInstructions')
 
 // Helper function to generate placeholder text for default values
 function getDefaultPlaceholder(defaultValue: string | undefined): string {
@@ -507,26 +471,43 @@ function getDefaultPlaceholder(defaultValue: string | undefined): string {
         :class="[
           'fixed left-1/2 top-1/2 z-100 m-0',
           'max-h-[90vh] w-[min(94vw,960px)] max-w-[960px]',
-          'flex flex-col overflow-y-auto border border-neutral-200 rounded-lg',
+          'flex flex-col overflow-hidden border border-neutral-200 rounded-lg',
           'bg-white p-5 shadow-xl dark:border-neutral-700 dark:bg-neutral-800 sm:p-7',
           '-translate-x-1/2 -translate-y-1/2',
           'data-[state=closed]:animate-contentHide data-[state=open]:animate-contentShow',
         ]"
         @interact-outside.prevent
       >
-        <div class="w-full flex flex-col gap-5">
-          <DialogTitle text-2xl font-normal class="from-primary-500 to-primary-400 bg-gradient-to-r bg-clip-text text-transparent">
-            {{ isEditMode ? t("settings.pages.card.edit_card") : t("settings.pages.card.create_card") }}
-          </DialogTitle>
+        <div class="min-h-0 w-full flex flex-1 flex-col gap-5">
+          <div :class="['flex flex-wrap items-start justify-between gap-3']">
+            <div>
+              <DialogTitle text-2xl font-normal class="from-primary-500 to-primary-400 bg-gradient-to-r bg-clip-text text-transparent">
+                {{ isEditMode ? t("settings.pages.card.edit_card") : t("settings.pages.card.create_card") }}
+              </DialogTitle>
+              <p :class="['mt-1 text-sm text-neutral-500 dark:text-neutral-400']">
+                {{ t('settings.pages.card.creation.editor_subtitle') }}
+              </p>
+            </div>
+            <div
+              v-if="isEditMode"
+              :class="[
+                'flex items-center gap-2 rounded-md px-3 py-2',
+                'bg-neutral-100 text-xs text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300',
+              ]"
+            >
+              <div class="i-solar:branching-paths-up-bold-duotone text-base" />
+              {{ t('settings.pages.card.creation.managed_version') }} {{ card.version }}
+            </div>
+          </div>
 
           <!-- Dialog tabs -->
-          <div class="mt-4">
+          <div>
             <div class="border-b border-neutral-200 dark:border-neutral-700">
               <div :class="['flex justify-start gap-1 overflow-x-auto -mb-px']">
                 <button
                   v-for="tab in tabs"
                   :key="tab.id"
-                  class="px-4 py-2 text-sm font-medium"
+                  class="shrink-0 px-3 py-2 text-sm font-medium"
                   :class="[
                     activeTab === tab.id
                       ? 'text-primary-600 dark:text-primary-400 border-b-2 border-primary-500 dark:border-primary-400'
@@ -551,164 +532,166 @@ function getDefaultPlaceholder(defaultValue: string | undefined): string {
             </p>
           </div>
 
-          <!-- Actual content -->
-          <!-- Identity details -->
-          <div v-if="activeTab === 'identity'" class="tab-content ml-auto mr-auto w-95%">
-            <p class="mb-3">
-              {{ t('settings.pages.card.creation.fields_info.subtitle') }}
-            </p>
+          <div :class="['min-h-0 flex-1 overflow-y-auto pr-1']">
+            <Transition name="card-tab" mode="out-in">
+              <div :key="activeTab" :class="['mx-auto w-full max-w-[820px] pb-2']">
+                <!-- Identity details -->
+                <div v-if="activeTab === 'identity'" :class="['flex flex-col gap-6']">
+                  <div
+                    v-if="isBuiltInLumiCard"
+                    :class="[
+                      'flex items-start gap-3 border-l-4 border-primary-400 bg-primary-50 px-4 py-3',
+                      'text-sm text-neutral-700 dark:bg-primary-950/30 dark:text-neutral-200',
+                    ]"
+                  >
+                    <div class="i-solar:info-circle-bold-duotone mt-0.5 shrink-0 text-lg text-primary-500" />
+                    <p>{{ t('settings.pages.card.creation.offline_scope_notice') }}</p>
+                  </div>
 
-            <div class="input-list ml-auto mr-auto w-90% flex flex-row flex-wrap justify-center gap-8">
-              <FieldInput v-model="cardName" :label="t('settings.pages.card.creation.name')" :description="t('settings.pages.card.creation.fields_info.name')" :required="true" />
-              <FieldInput v-model="cardNickname" :label="t('settings.pages.card.creation.nickname')" :description="t('settings.pages.card.creation.fields_info.nickname')" />
-              <FieldInput v-model="cardDescription" :label="t('settings.pages.card.creation.description')" :single-line="false" :required="true" :description="t('settings.pages.card.creation.fields_info.description')" />
-              <FieldInput v-model="cardNotes" :label="t('settings.pages.card.creator_notes')" :single-line="false" :description="t('settings.pages.card.creation.fields_info.notes')" />
-            </div>
+                  <div :class="['grid grid-cols-1 gap-5 sm:grid-cols-2']">
+                    <FieldInput
+                      v-model="cardName"
+                      :label="t('settings.pages.card.creation.name')"
+                      :description="t('settings.pages.card.creation.fields_info.name')"
+                      :required="true"
+                    />
+                    <FieldInput
+                      v-model="cardNickname"
+                      :label="t('settings.pages.card.creation.nickname')"
+                      :description="t('settings.pages.card.creation.fields_info.nickname')"
+                    />
+                  </div>
+                  <FieldInput
+                    v-model="cardDescription"
+                    :label="t('settings.pages.card.creation.basic_identity')"
+                    :single-line="false"
+                    :required="true"
+                    :description="t('settings.pages.card.creation.fields_info.basic_identity')"
+                    input-class="min-h-32 resize-y px-4 py-3 text-[15px] leading-6"
+                  />
+                  <FieldInput
+                    v-model="cardPersonality"
+                    :label="t('settings.pages.card.creation.core_personality')"
+                    :single-line="false"
+                    :required="true"
+                    :description="t('settings.pages.card.creation.fields_info.core_personality')"
+                    input-class="min-h-40 resize-y px-4 py-3 text-[15px] leading-6"
+                  />
+                </div>
+                <!-- Modules -->
+                <div v-else-if="activeTab === 'modules'" :class="['w-full']">
+                  <p class="mb-3">
+                    {{ t('settings.pages.card.creation.modules_info') }}
+                  </p>
+
+                  <div :class="['grid grid-cols-1 gap-5 sm:grid-cols-2']">
+                    <!-- Consciousness Provider -->
+                    <div :class="['flex', 'flex-col', 'gap-2']">
+                      <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
+                        <div i-lucide:brain />
+                        {{ t('settings.pages.card.chat.provider') }}
+                      </label>
+                      <ComboboxSelect
+                        v-model="selectedConsciousnessProvider"
+                        :options="consciousnessProviderOptions"
+                        :placeholder="getDefaultPlaceholder(consciousnessProvider)"
+                        class="w-full"
+                      />
+                    </div>
+
+                    <!-- Consciousness Model -->
+                    <div :class="['flex', 'flex-col', 'gap-2']">
+                      <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
+                        <div i-lucide:ghost />
+                        {{ t('settings.pages.card.consciousness.model') }}
+                      </label>
+                      <ComboboxSelect
+                        v-model="selectedConsciousnessModel"
+                        :options="consciousnessModelOptions"
+                        :placeholder="getDefaultPlaceholder(defaultConsciousnessModel)"
+                        :disabled="!selectedConsciousnessProvider && !consciousnessProvider"
+                        class="w-full"
+                      />
+                    </div>
+
+                    <!-- Speech Provider -->
+                    <div :class="['flex', 'flex-col', 'gap-2']">
+                      <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
+                        <div i-lucide:radio />
+                        {{ t('settings.pages.card.speech.provider') }}
+                      </label>
+                      <ComboboxSelect
+                        v-model="selectedSpeechProvider"
+                        :options="speechProviderOptions"
+                        :placeholder="getDefaultPlaceholder(speechProvider)"
+                        class="w-full"
+                      />
+                    </div>
+
+                    <!-- Speech Model -->
+                    <div :class="['flex', 'flex-col', 'gap-2']">
+                      <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
+                        <div i-lucide:mic />
+                        {{ t('settings.pages.card.speech.model') }}
+                      </label>
+                      <ComboboxSelect
+                        v-model="selectedSpeechModel"
+                        :options="speechModelOptions"
+                        :placeholder="getDefaultPlaceholder(defaultSpeechModel)"
+                        :disabled="!selectedSpeechProvider && !speechProvider"
+                        class="w-full"
+                      />
+                    </div>
+
+                    <!-- Speech Voice -->
+                    <div :class="['flex', 'flex-col', 'gap-2']">
+                      <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
+                        <div i-lucide:music />
+                        {{ t('settings.pages.card.speech.voice') }}
+                      </label>
+                      <ComboboxSelect
+                        v-model="selectedSpeechVoiceId"
+                        :options="speechVoiceOptions"
+                        :placeholder="getDefaultPlaceholder(defaultSpeechVoiceId)"
+                        :disabled="!selectedSpeechProvider && !speechProvider"
+                        class="w-full"
+                      />
+                    </div>
+
+                    <!-- Display Model (Body) -->
+                    <div :class="['flex', 'flex-col', 'gap-2', 'sm:col-span-2']">
+                      <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
+                        <div i-solar:ghost-bold-duotone />
+                        {{ t('settings.pages.card.body-model') }}
+                      </label>
+                      <ComboboxSelect
+                        v-model="selectedDisplayModelId"
+                        :options="displayModelOptions"
+                        :placeholder="getDefaultPlaceholder(defaultDisplayModelId)"
+                        class="w-full"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <!-- Artistry -->
+                <CardCreationTabArtistry
+                  v-else-if="activeTab === 'artistry'"
+                  v-model:selected-artistry-provider="selectedArtistryProvider"
+                  v-model:selected-artistry-model="selectedArtistryModel"
+                  v-model:selected-artistry-prompt-prefix="selectedArtistryPromptPrefix"
+                  v-model:selected-artistry-widget-instruction="selectedArtistryWidgetInstruction"
+                  v-model:selected-artistry-autonomous-enabled="selectedArtistryAutonomousEnabled"
+                  v-model:selected-artistry-autonomous-threshold="selectedArtistryAutonomousThreshold"
+                  v-model:selected-artistry-spawn-mode="selectedArtistrySpawnMode"
+                  v-model:selected-artistry-config-str="selectedArtistryConfigStr"
+                  :artistry-provider-options="artistryProviderOptions"
+                  :default-artistry-provider-placeholder="getDefaultPlaceholder(defaultArtistryProvider)"
+                />
+              </div>
+            </Transition>
           </div>
-          <!-- Behavior -->
-          <div v-else-if="activeTab === 'behavior'" class="tab-content ml-auto mr-auto w-95%">
-            <div class="input-list ml-auto mr-auto w-90% flex flex-row flex-wrap justify-center gap-8">
-              <FieldInput v-model="cardPersonality" :label="t('settings.pages.card.personality')" :single-line="false" :required="true" :description="t('settings.pages.card.creation.fields_info.personality')" />
-              <FieldInput v-model="cardScenario" :label="t('settings.pages.card.scenario')" :single-line="false" :required="true" :description="t('settings.pages.card.creation.fields_info.scenario')" />
-              <FieldValues v-model="cardGreetings" :label="t('settings.pages.card.creation.greetings')" :description="t('settings.pages.card.creation.fields_info.greetings')" />
-            </div>
-          </div>
-          <!-- Modules -->
-          <div v-else-if="activeTab === 'modules'" class="tab-content ml-auto mr-auto w-95%">
-            <p class="mb-3">
-              {{ t('settings.pages.card.creation.modules_info') }}
-            </p>
 
-            <div :class="['grid', 'grid-cols-1', 'sm:grid-cols-2', 'gap-4', 'ml-auto', 'mr-auto', 'w-90%']">
-              <!-- Consciousness Provider -->
-              <div :class="['flex', 'flex-col', 'gap-2']">
-                <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
-                  <div i-lucide:brain />
-                  {{ t('settings.pages.card.chat.provider') }}
-                </label>
-                <ComboboxSelect
-                  v-model="selectedConsciousnessProvider"
-                  :options="consciousnessProviderOptions"
-                  :placeholder="getDefaultPlaceholder(consciousnessProvider)"
-                  class="w-full"
-                />
-              </div>
-
-              <!-- Consciousness Model -->
-              <div :class="['flex', 'flex-col', 'gap-2']">
-                <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
-                  <div i-lucide:ghost />
-                  {{ t('settings.pages.card.consciousness.model') }}
-                </label>
-                <ComboboxSelect
-                  v-model="selectedConsciousnessModel"
-                  :options="consciousnessModelOptions"
-                  :placeholder="getDefaultPlaceholder(defaultConsciousnessModel)"
-                  :disabled="!selectedConsciousnessProvider && !consciousnessProvider"
-                  class="w-full"
-                />
-              </div>
-
-              <!-- Speech Provider -->
-              <div :class="['flex', 'flex-col', 'gap-2']">
-                <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
-                  <div i-lucide:radio />
-                  {{ t('settings.pages.card.speech.provider') }}
-                </label>
-                <ComboboxSelect
-                  v-model="selectedSpeechProvider"
-                  :options="speechProviderOptions"
-                  :placeholder="getDefaultPlaceholder(speechProvider)"
-                  class="w-full"
-                />
-              </div>
-
-              <!-- Speech Model -->
-              <div :class="['flex', 'flex-col', 'gap-2']">
-                <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
-                  <div i-lucide:mic />
-                  {{ t('settings.pages.card.speech.model') }}
-                </label>
-                <ComboboxSelect
-                  v-model="selectedSpeechModel"
-                  :options="speechModelOptions"
-                  :placeholder="getDefaultPlaceholder(defaultSpeechModel)"
-                  :disabled="!selectedSpeechProvider && !speechProvider"
-                  class="w-full"
-                />
-              </div>
-
-              <!-- Speech Voice -->
-              <div :class="['flex', 'flex-col', 'gap-2']">
-                <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
-                  <div i-lucide:music />
-                  {{ t('settings.pages.card.speech.voice') }}
-                </label>
-                <ComboboxSelect
-                  v-model="selectedSpeechVoiceId"
-                  :options="speechVoiceOptions"
-                  :placeholder="getDefaultPlaceholder(defaultSpeechVoiceId)"
-                  :disabled="!selectedSpeechProvider && !speechProvider"
-                  class="w-full"
-                />
-              </div>
-
-              <!-- Display Model (Body) -->
-              <div :class="['flex', 'flex-col', 'gap-2', 'sm:col-span-2']">
-                <label :class="['flex', 'flex-row', 'items-center', 'gap-2', 'text-sm', 'text-neutral-500', 'dark:text-neutral-400']">
-                  <div i-solar:ghost-bold-duotone />
-                  {{ t('settings.pages.card.body-model') }}
-                </label>
-                <ComboboxSelect
-                  v-model="selectedDisplayModelId"
-                  :options="displayModelOptions"
-                  :placeholder="getDefaultPlaceholder(defaultDisplayModelId)"
-                  class="w-full"
-                />
-              </div>
-            </div>
-          </div>
-          <!-- Settings -->
-          <div v-else-if="activeTab === 'settings'" :class="['tab-content mx-auto w-full max-w-[820px]']">
-            <div :class="['mb-6 flex items-start gap-3 rounded-lg bg-primary-50 p-4 text-sm text-neutral-700 dark:bg-primary-950/30 dark:text-neutral-200']">
-              <div :class="['i-solar:shield-user-bold-duotone mt-0.5 shrink-0 text-xl text-primary-500']" />
-              <p>{{ t('settings.pages.card.creation.fields_info.persona_editor') }}</p>
-            </div>
-            <div :class="['flex w-full flex-col gap-7']">
-              <FieldInput
-                v-model="cardSystemPrompt"
-                :label="t('settings.pages.card.systemprompt')"
-                :single-line="false"
-                :required="true"
-                :description="t('settings.pages.card.creation.fields_info.systemprompt')"
-                input-class="min-h-64 resize-y px-4 py-3 text-[15px] leading-6"
-              />
-              <FieldInput
-                v-model="cardPostHistoryInstructions"
-                :label="t('settings.pages.card.posthistoryinstructions')"
-                :single-line="false"
-                :required="true"
-                :description="t('settings.pages.card.creation.fields_info.posthistoryinstructions')"
-                input-class="min-h-40 resize-y px-4 py-3 text-[15px] leading-6"
-              />
-            </div>
-          </div>
-          <!-- Artistry -->
-          <CardCreationTabArtistry
-            v-else-if="activeTab === 'artistry'"
-            v-model:selected-artistry-provider="selectedArtistryProvider"
-            v-model:selected-artistry-model="selectedArtistryModel"
-            v-model:selected-artistry-prompt-prefix="selectedArtistryPromptPrefix"
-            v-model:selected-artistry-widget-instruction="selectedArtistryWidgetInstruction"
-            v-model:selected-artistry-autonomous-enabled="selectedArtistryAutonomousEnabled"
-            v-model:selected-artistry-autonomous-threshold="selectedArtistryAutonomousThreshold"
-            v-model:selected-artistry-spawn-mode="selectedArtistrySpawnMode"
-            v-model:selected-artistry-config-str="selectedArtistryConfigStr"
-            :artistry-provider-options="artistryProviderOptions"
-            :default-artistry-provider-placeholder="getDefaultPlaceholder(defaultArtistryProvider)"
-          />
-
-          <div :class="['ml-auto mr-1 flex flex-row gap-2 pt-2']">
+          <div :class="['ml-auto flex shrink-0 flex-row gap-2 border-t border-neutral-200 pt-4 dark:border-neutral-700']">
             <Button
               variant="secondary"
               icon="i-solar:undo-left-bold-duotone"
@@ -731,15 +714,20 @@ function getDefaultPlaceholder(defaultValue: string | undefined): string {
 </template>
 
 <style scoped>
-.input-list > * {
-  flex: 1 1 20rem;
-  min-width: min(100%, 20rem);
+.card-tab-enter-active,
+.card-tab-leave-active {
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
 }
 
-@media (max-width: 641px) {
-  .input-list > * {
-    min-width: unset;
-    width: 100%;
-  }
+.card-tab-enter-from {
+  opacity: 0;
+  transform: translateX(8px);
+}
+
+.card-tab-leave-to {
+  opacity: 0;
+  transform: translateX(-8px);
 }
 </style>

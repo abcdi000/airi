@@ -18,6 +18,7 @@ function settings() {
 }
 
 function backendHarness(importFailure?: Error) {
+  let contextCloseListener: (() => void) | undefined
   const contextClose = vi.fn(async () => undefined)
   const context = {
     browser: () => ({ version: () => 'Chrome 140', close: vi.fn() }),
@@ -25,7 +26,10 @@ function backendHarness(importFailure?: Error) {
     newPage: vi.fn(),
     pages: () => [],
     on: vi.fn(),
-    once: vi.fn(),
+    once: vi.fn((_event: 'close', listener: () => void) => {
+      contextCloseListener = listener
+      return context
+    }),
     addInitScript: vi.fn(),
   } as BrowserContextLike
   const launchPersistentContext = vi.fn(async () => context)
@@ -50,6 +54,7 @@ function backendHarness(importFailure?: Error) {
     dependencies,
     launchPersistentContext,
     release,
+    triggerExternalContextClose: () => contextCloseListener?.(),
   }
 }
 
@@ -79,6 +84,23 @@ describe('patchrightBackend lifecycle', () => {
     await harness.backend.close()
 
     expect(harness.contextClose).toHaveBeenCalledOnce()
+    expect(harness.release).toHaveBeenCalledOnce()
+  })
+
+  it('restarts Patchright after the headed persistent context is closed externally', async () => {
+    // ROOT CAUSE:
+    //
+    // Closing Chrome or invoking the MCP browser_close tool closes BrowserContext directly.
+    // BaseBrowserBackend previously retained that object, so every later tool call failed with
+    // "Target page, context or browser has been closed" without attempting a restart.
+    const harness = backendHarness()
+    await harness.backend.start()
+
+    harness.triggerExternalContextClose()
+    await harness.backend.getContext()
+
+    expect(harness.launchPersistentContext).toHaveBeenCalledTimes(2)
+    expect(harness.dependencies.acquireProfileLease).toHaveBeenCalledTimes(2)
     expect(harness.release).toHaveBeenCalledOnce()
   })
 

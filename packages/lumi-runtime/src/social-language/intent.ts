@@ -133,6 +133,7 @@ export function normalizeLumiReplyIntent(intent: LumiReplyIntent): LumiReplyInte
   return {
     ...intent,
     shouldReply,
+    replyAct: refusalRequired ? 'refuse' : intent.replyAct,
     semanticGoal: intent.semanticGoal.trim().slice(0, 8_000),
     keyPoints: intent.keyPoints.map(item => item.trim().slice(0, 2_000)).filter(Boolean).slice(0, 32),
     referenceInfo: intent.referenceInfo.map(item => item.trim().slice(0, 2_000)).filter(Boolean).slice(0, 32),

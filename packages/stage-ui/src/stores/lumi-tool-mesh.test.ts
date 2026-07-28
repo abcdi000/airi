@@ -6,6 +6,7 @@ import { setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
+import { useLumiMemoryStore } from './lumi-memory'
 import {
   bindLumiToolMeshToolsForTurn,
   orderToolPlanSteps,
@@ -190,6 +191,55 @@ describe('lumi tool mesh', () => {
 
     expect(result.status).toBe('success')
     expect(readUserProfile).toHaveBeenCalledOnce()
+  })
+
+  it('keeps long-term memory search available to the Agent Runtime in direct chat', () => {
+    const store = useLumiToolMeshStore()
+    store.initializeCoreTools()
+
+    const definition = store.definitionById('search_long_memory')
+
+    expect(definition).toBeDefined()
+    expect(definition?.accessScopes).toContain('chat')
+    expect(definition?.executionMode).toBe('auto')
+  })
+
+  it('passes the immutable Agent Runtime identity into long-term memory retrieval', async () => {
+    const store = useLumiToolMeshStore()
+    const memory = useLumiMemoryStore()
+    const retrieveSemantic = vi.spyOn(memory, 'retrieveSemantic').mockResolvedValue({
+      route: {
+        preferredTypes: [],
+        queryIntent: 'memory_recall',
+        reason: 'test',
+      },
+      rankedMemories: [],
+      vectorUsed: false,
+      vectorSource: 'disabled',
+      vectorScores: {},
+    })
+    store.initializeCoreTools()
+
+    const result = await store.executeTool('search_long_memory', {
+      query: 'Lumi 的生日',
+    }, {
+      scope: 'chat',
+      source: 'shared_agent_runtime',
+      conversationId: 'direct-moussy',
+      conversationType: 'direct',
+      actorId: 'moussy',
+      participantIds: ['moussy'],
+    })
+
+    expect(result.status).toBe('success')
+    expect(retrieveSemantic).toHaveBeenCalledWith(expect.objectContaining({
+      query: 'Lumi 的生日',
+      userId: 'moussy',
+      viewerUserId: 'moussy',
+      conversationType: 'direct',
+      conversationId: 'direct-moussy',
+      participantUserIds: ['moussy'],
+    }))
   })
 
   it('blocks Lumi-private records even in a direct user chat', async () => {

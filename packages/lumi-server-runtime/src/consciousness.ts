@@ -383,6 +383,7 @@ export function createLumiNodeConsciousness(options: LumiNodeConsciousnessOption
           authorVerified: true,
         },
         config: languageConfig,
+        ingress: 'direct_turn',
         modelOutput: curation.socialLanguageLearningOutput,
       })
       languageSnapshot = observeServerLanguageEvidence({
@@ -399,6 +400,7 @@ export function createLumiNodeConsciousness(options: LumiNodeConsciousnessOption
           authorVerified: true,
         },
         config: languageConfig,
+        ingress: 'direct_turn',
       })
       options.database.replaceSocialLanguageSnapshot(languageSnapshot)
       return {

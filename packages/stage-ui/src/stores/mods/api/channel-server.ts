@@ -89,6 +89,7 @@ export const useModsServerChannelStore = defineStore('mods:channels:proj-airi:se
     'lumi:room:sync:request',
     'lumi:room:voice:cancel',
     'lumi:external:perception:failed',
+    'lumi:external:agent-progress',
     'lumi:external:assistant-sticker',
     'lumi:external:runtime:status:request',
     'lumi:external:sticker-intelligence:request',

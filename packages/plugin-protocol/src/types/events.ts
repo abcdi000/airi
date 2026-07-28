@@ -584,6 +584,16 @@ export interface LumiExternalPerceptionFailedEvent {
   message: string
 }
 
+/** Privacy-safe tool activity correlated to one external perception turn. */
+export interface LumiExternalAgentProgressEvent {
+  eventId: string
+  toolName: string
+  status: 'started' | 'succeeded' | 'failed' | 'skipped'
+  timestamp: number
+  durationMs?: number
+  errorCode?: string
+}
+
 /** Sticker selected by the local Lumi runtime for display in its desktop conversation. */
 export interface LumiExternalAssistantStickerEvent {
   eventId: string
@@ -1431,6 +1441,7 @@ export const lumiRoomAck = defineProtocolEventa<LumiRoomAckEvent>('lumi:room:ack
 export const lumiRoomSync = defineProtocolEventa<LumiRoomSyncEvent>('lumi:room:sync')
 export const lumiRoomAccessRevoked = defineProtocolEventa<LumiRoomAccessRevokedEvent>('lumi:room:access-revoked')
 export const lumiExternalPerceptionFailed = defineProtocolEventa<LumiExternalPerceptionFailedEvent>('lumi:external:perception:failed')
+export const lumiExternalAgentProgress = defineProtocolEventa<LumiExternalAgentProgressEvent>('lumi:external:agent-progress')
 export const lumiExternalAssistantSticker = defineProtocolEventa<LumiExternalAssistantStickerEvent>('lumi:external:assistant-sticker', {
   metadata: {
     delivery: {
@@ -1671,6 +1682,7 @@ export interface ProtocolEvents<C = undefined> {
   'lumi:room:sync': LumiRoomSyncEvent
   'lumi:room:access-revoked': LumiRoomAccessRevokedEvent
   'lumi:external:perception:failed': LumiExternalPerceptionFailedEvent
+  'lumi:external:agent-progress': LumiExternalAgentProgressEvent
   'lumi:external:assistant-sticker': LumiExternalAssistantStickerEvent
   'lumi:external:runtime:status:request': LumiExternalRuntimeStatusRequestEvent
   'lumi:external:runtime:status': LumiExternalRuntimeStatusEvent

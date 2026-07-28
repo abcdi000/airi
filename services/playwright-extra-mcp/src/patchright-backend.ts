@@ -63,7 +63,7 @@ export class PatchrightBackend extends BaseBrowserBackend {
 
     await this.acquireProfile()
     try {
-      this.context = await this.openContext(module.chromium)
+      this.attachContext(await this.openContext(module.chromium))
     }
     catch (error) {
       const message = String(error)

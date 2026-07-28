@@ -65,8 +65,43 @@ const ServerConfigSchema = v.object({
     reasoningEffort: v.optional(v.picklist(['auto', 'high', 'max']), 'auto'),
     providerOptions: v.optional(v.record(v.string(), v.unknown()), {}),
   }),
+  agentRuntime: v.optional(v.object({
+    promptDirectory: v.optional(v.string()),
+    mode: v.optional(v.picklist(['legacy', 'shadow', 'maisaka']), 'maisaka'),
+    plannerMaxRounds: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(32)), 10),
+    plannerFinalizationMode: v.optional(v.picklist(['maibot', 'stop_after_successful_reply']), 'stop_after_successful_reply'),
+    mergeWindowMs: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(5_000)), 80),
+    toolMaxConcurrency: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(32)), 4),
+    toolStepTimeoutMs: v.optional(v.pipe(v.number(), v.integer(), v.minValue(10), v.maxValue(600_000)), 30_000),
+    deferredToolsEnabled: v.optional(v.boolean(), true),
+    expressionSelectorEnabled: v.optional(v.boolean(), true),
+    directLanguageFeedbackEnabled: v.optional(v.boolean(), true),
+    promptLoggingEnabled: v.optional(v.boolean(), false),
+    plannerHistoryBudgetTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(1_000_000)), 700_000),
+    contextCompactionThresholdTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(2_000), v.maxValue(1_000_000)), 760_000),
+    contextRecentTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(900_000)), 160_000),
+  }), {
+    mode: 'maisaka',
+    plannerMaxRounds: 10,
+    plannerFinalizationMode: 'stop_after_successful_reply',
+    mergeWindowMs: 80,
+    toolMaxConcurrency: 4,
+    toolStepTimeoutMs: 30_000,
+    deferredToolsEnabled: true,
+    expressionSelectorEnabled: true,
+    directLanguageFeedbackEnabled: true,
+    promptLoggingEnabled: false,
+    plannerHistoryBudgetTokens: 700_000,
+    contextCompactionThresholdTokens: 760_000,
+    contextRecentTokens: 160_000,
+  }),
   languageLearning: v.optional(v.object({
     enabled: v.optional(v.boolean(), true),
+    directLanguageCandidateLearningEnabled: v.optional(v.boolean(), false),
+    groupExpressionLearningEnabled: v.optional(v.boolean(), true),
+    groupJargonLearningEnabled: v.optional(v.boolean(), true),
+    groupBehaviorLearningEnabled: v.optional(v.boolean(), true),
+    groupPublicKnowledgeLearningEnabled: v.optional(v.boolean(), true),
     expressionLearningEnabled: v.optional(v.boolean(), true),
     behaviorLearningEnabled: v.optional(v.boolean(), true),
     jargonLearningEnabled: v.optional(v.boolean(), true),
@@ -80,6 +115,11 @@ const ServerConfigSchema = v.object({
     multiMessageReplyEnabled: v.optional(v.boolean(), true),
   }), {
     enabled: true,
+    directLanguageCandidateLearningEnabled: false,
+    groupExpressionLearningEnabled: true,
+    groupJargonLearningEnabled: true,
+    groupBehaviorLearningEnabled: true,
+    groupPublicKnowledgeLearningEnabled: true,
     expressionLearningEnabled: true,
     behaviorLearningEnabled: true,
     jargonLearningEnabled: true,
@@ -118,7 +158,7 @@ const ServerConfigSchema = v.object({
     })), []),
     maxImageBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100 * 1024 * 1024)), 10 * 1024 * 1024),
     maxAudioBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100 * 1024 * 1024)), 25 * 1024 * 1024),
-    responseTimeoutMs: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(600_000)), 120_000),
+    responseTimeoutMs: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(600_000)), 300_000),
     maxRequestBytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_024), v.maxValue(200 * 1024 * 1024)), 50 * 1024 * 1024),
     privateReplyEnabled: v.optional(v.boolean()),
     groupObservationEnabled: v.optional(v.boolean()),
@@ -236,6 +276,12 @@ export async function loadLumiServerConfig(path: string): Promise<LumiServerProc
     ...config,
     astrbot,
     dataDirectory: resolve(dirname(configPath), config.dataDirectory),
+    agentRuntime: {
+      ...config.agentRuntime,
+      promptDirectory: config.agentRuntime.promptDirectory
+        ? resolve(dirname(configPath), config.agentRuntime.promptDirectory)
+        : undefined,
+    },
     vector: {
       ...vector,
       pythonPath: vector.pythonPath ? resolve(dirname(configPath), vector.pythonPath) : undefined,
@@ -288,7 +334,7 @@ export async function upgradeLumiServerConfig(path: string): Promise<boolean> {
       identityBindings: defaultAstrBotIdentityBindings(),
       maxImageBytes: 10 * 1024 * 1024,
       maxAudioBytes: 25 * 1024 * 1024,
-      responseTimeoutMs: 120_000,
+      responseTimeoutMs: 300_000,
       maxRequestBytes: 50 * 1024 * 1024,
       privateReplyEnabled: true,
       groupObservationEnabled: false,
@@ -328,6 +374,11 @@ export async function upgradeLumiServerConfig(path: string): Promise<boolean> {
   if (!raw.languageLearning) {
     raw.languageLearning = {
       enabled: true,
+      directLanguageCandidateLearningEnabled: false,
+      groupExpressionLearningEnabled: true,
+      groupJargonLearningEnabled: true,
+      groupBehaviorLearningEnabled: true,
+      groupPublicKnowledgeLearningEnabled: true,
       expressionLearningEnabled: true,
       behaviorLearningEnabled: true,
       jargonLearningEnabled: true,
@@ -342,6 +393,23 @@ export async function upgradeLumiServerConfig(path: string): Promise<boolean> {
     }
     changed = true
   }
+  if (!migrations.directLanguageCandidateBoundaryV1) {
+    const languageLearning = raw.languageLearning as Record<string, unknown>
+    languageLearning.directLanguageCandidateLearningEnabled ??= false
+    migrations.directLanguageCandidateBoundaryV1 = true
+    raw._managerMigrations = migrations
+    changed = true
+  }
+  if (!migrations.independentGroupCuratorsV1) {
+    const languageLearning = raw.languageLearning as Record<string, unknown>
+    languageLearning.groupExpressionLearningEnabled ??= true
+    languageLearning.groupJargonLearningEnabled ??= true
+    languageLearning.groupBehaviorLearningEnabled ??= true
+    languageLearning.groupPublicKnowledgeLearningEnabled ??= true
+    migrations.independentGroupCuratorsV1 = true
+    raw._managerMigrations = migrations
+    changed = true
+  }
   if (!migrations.consciousnessContextAndExpressionTrialV1) {
     const model = raw.model as Record<string, unknown>
     model.maxContextTokens ??= 1_000_000
@@ -351,6 +419,34 @@ export async function upgradeLumiServerConfig(path: string): Promise<boolean> {
     if (languageLearning)
       languageLearning.preciseSelectorEnabled = true
     migrations.consciousnessContextAndExpressionTrialV1 = true
+    raw._managerMigrations = migrations
+    changed = true
+  }
+  if (!migrations.sharedAgentRuntimeV1) {
+    raw.agentRuntime ??= {
+      promptDirectory: './prompts',
+      mode: 'shadow',
+      plannerMaxRounds: 10,
+      plannerFinalizationMode: 'stop_after_successful_reply',
+      mergeWindowMs: 80,
+      toolMaxConcurrency: 4,
+      toolStepTimeoutMs: 30_000,
+      deferredToolsEnabled: true,
+      expressionSelectorEnabled: true,
+      directLanguageFeedbackEnabled: true,
+      promptLoggingEnabled: false,
+      plannerHistoryBudgetTokens: 700_000,
+      contextCompactionThresholdTokens: 760_000,
+      contextRecentTokens: 160_000,
+    }
+    migrations.sharedAgentRuntimeV1 = true
+    raw._managerMigrations = migrations
+    changed = true
+  }
+  if (!migrations.agentPromptOverridesV1) {
+    const agentRuntime = raw.agentRuntime as Record<string, unknown>
+    agentRuntime.promptDirectory ??= './prompts'
+    migrations.agentPromptOverridesV1 = true
     raw._managerMigrations = migrations
     changed = true
   }
@@ -394,8 +490,29 @@ export async function initializeLumiServerConfig(path: string): Promise<string> 
       reasoningEffort: 'auto',
       providerOptions: {},
     },
+    agentRuntime: {
+      promptDirectory: './prompts',
+      mode: 'maisaka',
+      plannerMaxRounds: 10,
+      plannerFinalizationMode: 'stop_after_successful_reply',
+      mergeWindowMs: 80,
+      toolMaxConcurrency: 4,
+      toolStepTimeoutMs: 30_000,
+      deferredToolsEnabled: true,
+      expressionSelectorEnabled: true,
+      directLanguageFeedbackEnabled: true,
+      promptLoggingEnabled: false,
+      plannerHistoryBudgetTokens: 700_000,
+      contextCompactionThresholdTokens: 760_000,
+      contextRecentTokens: 160_000,
+    },
     languageLearning: {
       enabled: true,
+      directLanguageCandidateLearningEnabled: false,
+      groupExpressionLearningEnabled: true,
+      groupJargonLearningEnabled: true,
+      groupBehaviorLearningEnabled: true,
+      groupPublicKnowledgeLearningEnabled: true,
       expressionLearningEnabled: true,
       behaviorLearningEnabled: true,
       jargonLearningEnabled: true,
@@ -429,7 +546,7 @@ export async function initializeLumiServerConfig(path: string): Promise<string> 
       identityBindings: defaultAstrBotIdentityBindings(),
       maxImageBytes: 10 * 1024 * 1024,
       maxAudioBytes: 25 * 1024 * 1024,
-      responseTimeoutMs: 120_000,
+      responseTimeoutMs: 300_000,
       maxRequestBytes: 50 * 1024 * 1024,
       privateReplyEnabled: true,
       groupObservationEnabled: false,

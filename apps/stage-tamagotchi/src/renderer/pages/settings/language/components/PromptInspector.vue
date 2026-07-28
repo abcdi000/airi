@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { LanguageDecisionLog } from '@proj-airi/stage-ui/stores/lumi-social-language'
 
+import { useLumiAgentRuntimeSettingsStore } from '@proj-airi/stage-ui/stores/lumi-agent-runtime-settings'
 import { useLumiSocialLanguageStore } from '@proj-airi/stage-ui/stores/lumi-social-language'
 import { Button, DoubleCheckButton, SelectTab } from '@proj-airi/ui'
 import { useIntervalFn } from '@vueuse/core'
@@ -20,14 +21,20 @@ interface PromptMessage {
 
 const store = useLumiSocialLanguageStore()
 const { config, snapshot } = storeToRefs(store)
+const runtimeSettingsStore = useLumiAgentRuntimeSettingsStore()
+const { promptLoggingEnabled: runtimePromptLoggingEnabled } = storeToRefs(runtimeSettingsStore)
 const inspectorMode = shallowRef<InspectorMode>('requests')
 const decisionTab = shallowRef<DecisionTab>('final')
 const selectedDecisionId = shallowRef('')
 const copied = shallowRef(false)
+const promptLoggingEnabled = computed(() =>
+  config.value.promptLoggingEnabled || runtimePromptLoggingEnabled.value,
+)
 
+const visibleDecisionLimit = 120
+const totalDecisionCount = computed(() => snapshot.value.decisions.length)
 const loggedDecisions = computed(() => snapshot.value.decisions
-  .filter(decision => isPromptMessages(decision.replyerPromptSnapshot))
-  .slice()
+  .slice(-visibleDecisionLimit)
   .reverse())
 const selectedDecision = computed(() =>
   loggedDecisions.value.find(decision => decision.id === selectedDecisionId.value) ?? loggedDecisions.value[0],
@@ -44,6 +51,9 @@ const realizedExpressionIds = computed(() => new Set(selectedDecision.value?.rea
 const selectedBehaviors = computed(() => selectedDecision.value?.selectedBehaviors
   .map(id => snapshot.value.behaviors.find(item => item.id === id))
   .filter(item => item !== undefined) ?? [])
+const selectedJargon = computed(() => (selectedDecision.value?.selectedJargon ?? [])
+  .map(id => snapshot.value.jargon.find(item => item.id === id))
+  .filter(item => item !== undefined))
 
 useIntervalFn(() => {
   void store.refreshFromPersistence()
@@ -70,6 +80,11 @@ function formatDecision(decision: LanguageDecisionLog) {
   return `${new Date(decision.timestamp).toLocaleString()} · ${reply || '静默'}`
 }
 
+function setPromptLogging(enabled: boolean) {
+  store.updateConfig({ promptLoggingEnabled: enabled })
+  runtimePromptLoggingEnabled.value = enabled
+}
+
 async function copyCurrent() {
   const value = decisionTab.value === 'final'
     ? JSON.stringify(promptMessages.value, null, 2)
@@ -79,6 +94,7 @@ async function copyCurrent() {
           selectedExpressions: selectedExpressions.value,
           realizedExpressionIds: [...realizedExpressionIds.value],
           selectedBehaviors: selectedBehaviors.value,
+          selectedJargon: selectedJargon.value,
           reasons: selectedDecision.value?.selectedExpressionReasons ?? {},
         }, null, 2)
   await navigator.clipboard.writeText(value)
@@ -101,10 +117,10 @@ async function copyCurrent() {
         </p>
       </div>
       <Button
-        v-if="!config.promptLoggingEnabled"
+        v-if="!promptLoggingEnabled"
         size="sm"
         icon="i-solar:record-circle-bold-duotone"
-        @click="store.updateConfig({ promptLoggingEnabled: true })"
+        @click="setPromptLogging(true)"
       >
         开始记录
       </Button>
@@ -113,7 +129,7 @@ async function copyCurrent() {
         size="sm"
         variant="secondary"
         icon="i-solar:stop-circle-bold-duotone"
-        @click="store.updateConfig({ promptLoggingEnabled: false })"
+        @click="setPromptLogging(false)"
       >
         停止记录
       </Button>
@@ -137,8 +153,27 @@ async function copyCurrent() {
       <ConsciousnessRequestTimeline v-if="inspectorMode === 'requests'" key="requests" />
 
       <section v-else key="decision" :class="['flex flex-col gap-5']">
+        <div v-if="totalDecisionCount" :class="['flex flex-wrap items-center justify-between gap-3']">
+          <p :class="['text-xs text-neutral-500']">
+            共 {{ totalDecisionCount }} 条决策，列表仅展示最近 {{ Math.min(totalDecisionCount, visibleDecisionLimit) }} 条
+          </p>
+          <DoubleCheckButton
+            size="sm"
+            variant="danger"
+            @confirm="store.clearDecisions()"
+          >
+            清空全部
+            <template #confirm>
+              确认清空
+            </template>
+            <template #cancel>
+              取消
+            </template>
+          </DoubleCheckButton>
+        </div>
+
         <div v-if="!loggedDecisions.length" :class="['py-14 text-center text-sm text-neutral-500']">
-          暂无完整回复决策。开启记录后和 Lumi 聊一轮，这里会出现 Replyer 的最终输入。
+          暂无回复决策。开启记录后和 Lumi 聊一轮，这里会出现本轮意图、学习资产和 Replyer 输入。
         </div>
 
         <template v-else>
@@ -192,6 +227,12 @@ async function copyCurrent() {
           </div>
 
           <div v-if="decisionTab === 'final'" :class="['flex flex-col gap-3']">
+            <div
+              v-if="!promptMessages.length"
+              :class="['border-l-3 border-amber-500 bg-amber-500/8 px-4 py-3 text-sm text-amber-700 dark:text-amber-300']"
+            >
+              这条决策已保存，但当时没有开启完整 Prompt 记录。它仍可在“Planner 意图”和“学习项注入”中检查。
+            </div>
             <article
               v-for="(message, index) in promptMessages"
               :key="`${index}-${message.role}`"
@@ -208,50 +249,69 @@ async function copyCurrent() {
             v-else-if="decisionTab === 'planner'"
             :class="['max-h-[620px] overflow-auto whitespace-pre-wrap rounded-lg border border-neutral-200 p-4 text-xs leading-5 font-mono dark:border-neutral-800']"
           >{{ JSON.stringify(selectedDecision?.plannerIntent ?? {}, null, 2) }}</pre>
-          <div v-else :class="['grid gap-5 md:grid-cols-2']">
-            <section :class="['border-y border-neutral-200 py-4 dark:border-neutral-800']">
-              <h3 :class="['text-sm font-semibold']">
-                注入的表达
-              </h3>
-              <div v-if="!selectedExpressions.length" :class="['mt-3 text-sm text-neutral-500']">
-                本轮没有注入表达
-              </div>
-              <div v-for="expression in selectedExpressions" :key="expression.id" :class="['mt-3']">
-                <div :class="['flex flex-wrap items-center gap-2']">
-                  <strong :class="['text-sm']">{{ expression.phrase || expression.pragmaticFunction }}</strong>
-                  <span
-                    :class="[
-                      'rounded px-2 py-0.5 text-xs',
-                      realizedExpressionIds.has(expression.id)
-                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
-                        : 'bg-neutral-500/10 text-neutral-500',
-                    ]"
-                  >
-                    {{ realizedExpressionIds.has(expression.id) ? '实际采用' : '仅注入' }}
-                  </span>
+          <div v-else :class="['flex flex-col gap-4']">
+            <div :class="['border-l-3 border-sky-500 bg-sky-500/8 px-4 py-3 text-sm text-sky-700 dark:text-sky-300']">
+              动态学习资产不会写入稳定的 system 提示词。行为会作为 Planner 授权参考，表达、行为和黑话会写入 Replyer 最后一条可信用户载荷。
+            </div>
+            <div :class="['grid gap-5 md:grid-cols-3']">
+              <section :class="['border-y border-neutral-200 py-4 dark:border-neutral-800']">
+                <h3 :class="['text-sm font-semibold']">
+                  注入的表达
+                </h3>
+                <div v-if="!selectedExpressions.length" :class="['mt-3 text-sm text-neutral-500']">
+                  本轮没有注入表达
                 </div>
-                <p :class="['mt-1 text-xs text-neutral-500']">
-                  {{ expression.situation }}
-                </p>
-                <p :class="['mt-1 text-xs text-neutral-500']">
-                  {{ selectedDecision?.selectedExpressionReasons[expression.id]?.join(' · ') }}
-                </p>
-              </div>
-            </section>
-            <section :class="['border-y border-neutral-200 py-4 dark:border-neutral-800']">
-              <h3 :class="['text-sm font-semibold']">
-                注入的行为
-              </h3>
-              <div v-if="!selectedBehaviors.length" :class="['mt-3 text-sm text-neutral-500']">
-                本轮没有注入行为
-              </div>
-              <div v-for="behavior in selectedBehaviors" :key="behavior.id" :class="['mt-3']">
-                <strong :class="['text-sm']">{{ behavior.situation }}</strong>
-                <p :class="['mt-1 text-xs text-neutral-500']">
-                  {{ behavior.action }}
-                </p>
-              </div>
-            </section>
+                <div v-for="expression in selectedExpressions" :key="expression.id" :class="['mt-3']">
+                  <div :class="['flex flex-wrap items-center gap-2']">
+                    <strong :class="['text-sm']">{{ expression.phrase || expression.pragmaticFunction }}</strong>
+                    <span
+                      :class="[
+                        'rounded px-2 py-0.5 text-xs',
+                        realizedExpressionIds.has(expression.id)
+                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+                          : 'bg-neutral-500/10 text-neutral-500',
+                      ]"
+                    >
+                      {{ realizedExpressionIds.has(expression.id) ? '实际采用' : '仅注入' }}
+                    </span>
+                  </div>
+                  <p :class="['mt-1 text-xs text-neutral-500']">
+                    {{ expression.situation }}
+                  </p>
+                  <p :class="['mt-1 text-xs text-neutral-500']">
+                    {{ selectedDecision?.selectedExpressionReasons[expression.id]?.join(' · ') }}
+                  </p>
+                </div>
+              </section>
+              <section :class="['border-y border-neutral-200 py-4 dark:border-neutral-800']">
+                <h3 :class="['text-sm font-semibold']">
+                  注入的行为
+                </h3>
+                <div v-if="!selectedBehaviors.length" :class="['mt-3 text-sm text-neutral-500']">
+                  本轮没有注入行为
+                </div>
+                <div v-for="behavior in selectedBehaviors" :key="behavior.id" :class="['mt-3']">
+                  <strong :class="['text-sm']">{{ behavior.situation }}</strong>
+                  <p :class="['mt-1 text-xs text-neutral-500']">
+                    {{ behavior.action }}
+                  </p>
+                </div>
+              </section>
+              <section :class="['border-y border-neutral-200 py-4 dark:border-neutral-800']">
+                <h3 :class="['text-sm font-semibold']">
+                  注入的黑话
+                </h3>
+                <div v-if="!selectedJargon.length" :class="['mt-3 text-sm text-neutral-500']">
+                  本轮没有注入黑话
+                </div>
+                <div v-for="jargon in selectedJargon" :key="jargon.id" :class="['mt-3']">
+                  <strong :class="['text-sm']">{{ jargon.term }}</strong>
+                  <p :class="['mt-1 text-xs text-neutral-500']">
+                    {{ jargon.meanings.map(item => item.meaning).join(' / ') }}
+                  </p>
+                </div>
+              </section>
+            </div>
           </div>
 
           <div

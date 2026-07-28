@@ -68,6 +68,7 @@ components.d.ts
 
 # Cache
 .eslintcache
+.pytest_cache/
 **/.cache/
 **/.vitepress/cache/
 **/*.tsbuildinfo

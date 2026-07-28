@@ -6,6 +6,7 @@ import type { Message, Tool } from '@xsai/shared-chat'
 
 import { errorMessageFrom } from '@moeru/std'
 import { LUMI_AIRI_CARD_ID } from '@proj-airi/stage-ui/constants/lumi-card'
+import { stripInternalLumiOutput } from '@proj-airi/stage-ui/libs/chat-sync'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatMaintenanceStore } from '@proj-airi/stage-ui/stores/chat/maintenance'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
@@ -163,7 +164,7 @@ function sanitizeLumiCuratorHistory(text: string): string {
 }
 
 function sanitizeLumiAssistantHistoryText(text: string): string {
-  return sanitizeLumiSpeechText(text)
+  return sanitizeLumiSpeechText(stripInternalLumiOutput(text))
 }
 
 function isLumiMemoryDebugText(text: string): boolean {
@@ -189,7 +190,11 @@ function stripLumiVisiblePreamble(text: string): string {
 }
 
 function sanitizeLumiSpeechText(text: string): string {
-  const sanitized = sanitizeLumiCuratorHistory(normalizeLumiReplySeparators(stripLumiVisiblePreamble(text)))
+  const visibleText = stripInternalLumiOutput(text)
+  if (!visibleText)
+    return ''
+
+  const sanitized = sanitizeLumiCuratorHistory(normalizeLumiReplySeparators(stripLumiVisiblePreamble(visibleText)))
     .replace(/(?:\u4f60\u60f3|\u4f60\u8981|\u4f60\u5148\u544a\u8bc9\u6211)[^\n\u3002\uff01\uff1f!?]{0,48}(?:\u6211\u542c\u7740|\u6211\u542c\u89c1\u4e86)[\u3002\uff01\uff1f!?]?/g, '')
     .replace(/^\s*\u6211\u8fd8\u5728[\u3002.!\uff01]?\s*$/gm, '')
     .replace(/^\s*\u53ea\u662f[^\n\u3002\uff01\uff1f!?]{0,24}\u5047\u88c5\u6ca1\u4e8b[^\n\u3002\uff01\uff1f!?]{0,16}[\u3002.!\uff01]?\s*$/gm, '')
@@ -302,7 +307,7 @@ function splitLumiAssistantMessage(message: StreamingAssistantMessage): Streamin
 
 function sanitizeLumiProviderHistoryMessages(messages: Message[]): Message[] {
   return messages.flatMap((message) => {
-    if (message.role === 'assistant' && typeof message.content === 'string' && isLumiMemoryDebugText(message.content))
+    if (typeof message.content === 'string' && isLumiMemoryDebugText(message.content))
       return []
     if (message.role !== 'assistant' || typeof message.content !== 'string')
       return [message]

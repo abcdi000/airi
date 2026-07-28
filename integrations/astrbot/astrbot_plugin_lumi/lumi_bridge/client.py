@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 import httpx
@@ -22,6 +24,7 @@ from .models import (
     LumiLearningPolicy,
     LumiOutputSegment,
     LumiPerceptionEvent,
+    LumiProgress,
     LumiResponse,
     LumiSpeech,
     LumiStudyGroup,
@@ -30,7 +33,9 @@ from .models import (
 
 class LumiRuntimeClient(Protocol):
     async def perceive_and_respond(
-        self, event: LumiPerceptionEvent
+        self,
+        event: LumiPerceptionEvent,
+        on_progress: Callable[[LumiProgress], Awaitable[None]] | None = None,
     ) -> LumiResponse: ...
 
     async def health_check(self) -> LumiHealth: ...
@@ -64,9 +69,21 @@ class HttpLumiRuntimeClient:
             transport=transport,
         )
 
-    async def perceive_and_respond(self, event: LumiPerceptionEvent) -> LumiResponse:
+    async def perceive_and_respond(
+        self,
+        event: LumiPerceptionEvent,
+        on_progress: Callable[[LumiProgress], Awaitable[None]] | None = None,
+    ) -> LumiResponse:
         if not self._api_token:
             raise LumiAuthenticationError("Lumi integration token is not configured")
+        progress_stopped = asyncio.Event()
+        progress_task = (
+            asyncio.create_task(
+                self._poll_progress(event.event_id, on_progress, progress_stopped)
+            )
+            if on_progress is not None
+            else None
+        )
         try:
             response = await self._client.post(
                 f"{self._endpoint}/api/lumi/integrations/astrbot/perceive",
@@ -77,6 +94,10 @@ class HttpLumiRuntimeClient:
             raise LumiTimeoutError("Lumi did not finish the turn in time") from error
         except httpx.HTTPError as error:
             raise LumiUnavailableError("Lumi runtime is unavailable") from error
+        finally:
+            progress_stopped.set()
+            if progress_task is not None:
+                await progress_task
         self._raise_for_response(response)
         try:
             payload = response.json()
@@ -102,6 +123,76 @@ class HttpLumiRuntimeClient:
             )
         except (KeyError, TypeError, ValueError) as error:
             raise LumiProtocolError("Lumi returned an invalid response") from error
+
+    async def _poll_progress(
+        self,
+        event_id: str,
+        on_progress: Callable[[LumiProgress], Awaitable[None]],
+        stopped: asyncio.Event,
+    ) -> None:
+        cursor = 0
+        emitted_messages: set[str] = set()
+        while True:
+            try:
+                response = await self._client.get(
+                    f"{self._endpoint}/api/lumi/integrations/astrbot/progress",
+                    params={"event_id": event_id, "after": cursor},
+                    headers={"Authorization": f"Bearer {self._api_token}"},
+                )
+            except httpx.HTTPError:
+                return
+            # Older Lumi Server versions do not expose progress. Final reply
+            # delivery must remain compatible and continue normally.
+            if response.status_code == 404:
+                return
+            if response.status_code != 200:
+                return
+            try:
+                payload = response.json()
+                events = payload.get("events", [])
+                if not isinstance(events, list):
+                    return
+                for item in events:
+                    progress = LumiProgress(
+                        sequence=int(item["sequence"]),
+                        tool_name=str(item["tool_name"]),
+                        status=item["status"],
+                        message=str(item["message"]),
+                        timestamp=int(item["timestamp"]),
+                        duration_ms=(
+                            int(item["duration_ms"])
+                            if item.get("duration_ms") is not None
+                            else None
+                        ),
+                        error_code=_optional_text(item.get("error_code")),
+                    )
+                    if progress.sequence <= cursor:
+                        continue
+                    cursor = progress.sequence
+                    message = progress.message.strip()
+                    if (
+                        progress.status != "started"
+                        or not message
+                        or message in emitted_messages
+                    ):
+                        continue
+                    emitted_messages.add(message)
+                    try:
+                        await on_progress(progress)
+                    except Exception:
+                        # Progress delivery is best-effort. A platform rejection
+                        # must never discard Lumi's completed final response.
+                        return
+                if payload.get("complete"):
+                    return
+            except (KeyError, TypeError, ValueError):
+                return
+            if stopped.is_set():
+                return
+            try:
+                await asyncio.wait_for(stopped.wait(), timeout=0.5)
+            except TimeoutError:
+                pass
 
     async def health_check(self) -> LumiHealth:
         try:

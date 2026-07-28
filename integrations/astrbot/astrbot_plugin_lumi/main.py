@@ -27,7 +27,7 @@ from .lumi_bridge.exceptions import (
     LumiProtocolError,
 )
 from .lumi_bridge.media import cleanup_temporary_files
-from .lumi_bridge.models import LumiLearningPolicy, LumiResponse
+from .lumi_bridge.models import LumiLearningPolicy, LumiProgress, LumiResponse
 from .lumi_bridge.routing import decide_routing
 from .lumi_bridge.service import LumiBridgeService
 
@@ -115,7 +115,19 @@ class Main(Star):
                     )
 
             async def invoke_lumi() -> LumiResponse:
-                return await self._service.client.perceive_and_respond(perception)
+                async def send_progress(progress: LumiProgress) -> None:
+                    if not self._service.config.send_tool_progress:
+                        return
+                    await _send_without_escaping(
+                        event,
+                        event.plain_result(progress.message),
+                        event_id,
+                    )
+
+                return await self._service.client.perceive_and_respond(
+                    perception,
+                    send_progress if self._service.config.send_tool_progress else None,
+                )
 
             response = await self._service.sessions.run(
                 perception.conversation_id,

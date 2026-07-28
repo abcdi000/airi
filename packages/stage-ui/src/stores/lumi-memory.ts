@@ -27,7 +27,10 @@ const MIGRATION_SEED_ID = `${migratedLumiContextManifest.generatedAt}:${migrated
 const LUMI_MEMORY_EMBEDDING_MODEL = 'BAAI/bge-small-zh-v1.5'
 const LUMI_MEMORY_PERSISTENCE_TIMEOUT_MS = 60_000
 const LUMI_SEMANTIC_SEARCH_TIMEOUT_MS = 4500
-const LUMI_SEMANTIC_COLD_SEARCH_TIMEOUT_MS = 30_000
+// A cold CUDA worker takes about 12 seconds on the supported Windows bundle.
+// Interactive chat must fall back to lexical retrieval before that startup can
+// consume the whole reply budget; the worker continues loading for later turns.
+const LUMI_SEMANTIC_COLD_SEARCH_TIMEOUT_MS = 8_000
 const LUMI_SEMANTIC_PREWARM_TIMEOUT_MS = 1_800_000
 const LUMI_SEMANTIC_MEMORY_LIMIT = 800
 const LUMI_SEMANTIC_INTERACTIVE_MEMORY_LIMIT = 160
@@ -397,8 +400,18 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
         const timeoutMs = semanticIndexReady.value
           ? LUMI_SEMANTIC_SEARCH_TIMEOUT_MS
           : LUMI_SEMANTIC_COLD_SEARCH_TIMEOUT_MS
+        const backendSearch = bridge.searchVectors({
+          userId: viewerUserId,
+          query: request.query,
+          limit: searchLimit,
+        })
+        if (!semanticIndexReady.value) {
+          void backendSearch
+            .then(result => applyBackendVectorStatus(result.status))
+            .catch(() => {})
+        }
         const backendResult = await withTimeout(
-          bridge.searchVectors({ userId: viewerUserId, query: request.query, limit: searchLimit }),
+          backendSearch,
           timeoutMs,
           'Lumi backend semantic memory search',
         )
@@ -425,8 +438,18 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       return retrieve(request)
     }
     catch (error) {
+      const message = errorMessageFrom(error) ?? String(error)
+      if (
+        !semanticIndexReady.value
+        && message === `Lumi backend semantic memory search timed out after ${LUMI_SEMANTIC_COLD_SEARCH_TIMEOUT_MS}ms`
+      ) {
+        semanticIndexStatus.value = 'loading'
+        semanticIndexError.value = ''
+        semanticIndexProgress.value = '向量模型正在后台冷启动，本轮已立即改用词法记忆'
+        return retrieve(request)
+      }
       semanticIndexStatus.value = 'fallback'
-      semanticIndexError.value = errorMessageFrom(error) ?? String(error)
+      semanticIndexError.value = message
       console.warn('[lumi-memory] semantic vector search unavailable, falling back to lexical retrieval', error)
       return retrieve(request)
     }

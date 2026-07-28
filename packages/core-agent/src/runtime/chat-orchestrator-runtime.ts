@@ -229,6 +229,20 @@ export interface ChatOrchestratorSendOptions {
     status: 'completed' | 'error'
     error?: string
   }) => void
+  /**
+   * Receives privacy-safe progress from a host-managed Agent Runtime.
+   *
+   * Hidden reasoning, tool arguments, and tool results must never cross this
+   * callback. It is intended for remote chat transports that need to show
+   * which user-visible action Lumi is currently performing.
+   */
+  onAgentToolProgress?: (progress: {
+    toolName: string
+    status: 'started' | 'succeeded' | 'failed' | 'skipped'
+    timestamp: number
+    durationMs?: number
+    errorCode?: string
+  }) => void | Promise<void>
   /** Optional final assistant speech cleanup hook. Does not affect provider reasoning content. */
   assistantSpeechTransform?: (speech: string) => string
   /**

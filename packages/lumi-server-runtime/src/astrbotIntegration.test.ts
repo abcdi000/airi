@@ -206,6 +206,76 @@ describe('lumiAstrBotIntegration', () => {
       database.close()
     }
   })
+
+  it('returns each structured Lumi message as one ordered AstrBot text segment', async () => {
+    const database = LumiServerDatabase.open(':memory:')
+    const server = new LumiOnlineServer({
+      database,
+      serverVersion: 'test',
+      replyGenerator: {
+        async generate() {
+          return {
+            messages: [
+              { content: 'first' },
+              { content: 'second' },
+            ],
+          }
+        },
+      },
+    })
+    const integration = new LumiAstrBotIntegration({
+      database,
+      onlineServer: server,
+      identityBindings: [{
+        platformInstanceId: 'qq-bot-1',
+        externalUserId: '10001',
+        personId: DOGGY_PERSON_ID,
+      }],
+    })
+    try {
+      const response = await integration.perceiveAndRespond(event())
+      expect(response.text).toBe('first\nsecond')
+      expect(response.segments).toHaveLength(2)
+      expect(response.segments.map(segment => segment.type)).toEqual(['text', 'text'])
+      expect(response.segments.map(segment => 'text' in segment ? segment.text : undefined)).toEqual(['first', 'second'])
+      expect(response.metadata.message_count).toBe(2)
+    }
+    finally {
+      database.close()
+    }
+  })
+
+  it('completes an intentional empty turn without timing out or sending blank text', async () => {
+    const database = LumiServerDatabase.open(':memory:')
+    const server = new LumiOnlineServer({
+      database,
+      serverVersion: 'test',
+      replyGenerator: {
+        async generate() {
+          return { messages: [] }
+        },
+      },
+    })
+    const integration = new LumiAstrBotIntegration({
+      database,
+      onlineServer: server,
+      identityBindings: [{
+        platformInstanceId: 'qq-bot-1',
+        externalUserId: '10001',
+        personId: DOGGY_PERSON_ID,
+      }],
+      responseTimeoutMs: 100,
+    })
+    try {
+      const response = await integration.perceiveAndRespond(event())
+      expect(response.text).toBeNull()
+      expect(response.segments).toEqual([])
+      expect(response.metadata.message_count).toBe(0)
+    }
+    finally {
+      database.close()
+    }
+  })
 })
 
 function event(overrides: Record<string, unknown> = {}) {

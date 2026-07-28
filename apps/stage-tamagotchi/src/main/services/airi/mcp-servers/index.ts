@@ -36,13 +36,13 @@ import {
   electronMcpGetComputerUseChatTurn,
   electronMcpGetRuntimeStatus,
   electronMcpInterruptComputerUse,
-  electronMcpListTools,
   electronMcpListResourceLeases,
+  electronMcpListTools,
   electronMcpOpenConfigFile,
   electronMcpReadConfigText,
   electronMcpSetComputerUseChatActive,
-  electronMcpTestServer,
   electronMcpTerminateResourceLease,
+  electronMcpTestServer,
   electronMcpWriteConfigText,
 } from '../../../../shared/eventa'
 import { parseElectronMcpConfigText } from '../../../../shared/mcp-config'
@@ -478,13 +478,31 @@ function expandMcpStringRecord(record: Record<string, string> | undefined) {
 }
 
 function resolveMcpServerConfig(config: ElectronMcpStdioServerConfig): ElectronMcpStdioServerConfig {
-  return {
+  const resolved = {
     ...config,
     command: config.command ? expandMcpRuntimePlaceholders(config.command) : undefined,
     args: config.args?.map(arg => expandMcpRuntimePlaceholders(arg)),
     cwd: config.cwd ? expandMcpRuntimePlaceholders(config.cwd) : undefined,
     env: expandMcpStringRecord(config.env),
     headers: expandMcpStringRecord(config.headers),
+  }
+
+  if (resolved.command?.toLowerCase() !== 'node')
+    return resolved
+
+  // NOTICE:
+  // Saved MCP entries from the command-line development era used a bare
+  // `node` executable. Electron does not inherit a reliable PATH on every
+  // Windows launch, so those entries fail with `spawn node ENOENT`.
+  // Electron itself can execute Node entrypoints when ELECTRON_RUN_AS_NODE is
+  // set. Remove this compatibility path once saved MCP configs are migrated.
+  return {
+    ...resolved,
+    command: process.execPath,
+    env: {
+      ...resolved.env,
+      ELECTRON_RUN_AS_NODE: '1',
+    },
   }
 }
 
@@ -902,7 +920,13 @@ export function createMcpStdioManager(): McpStdioManager {
       }
     }))
 
-    return listResult.flat()
+    const tools = listResult.flat()
+    log.withFields({
+      toolCount: tools.length,
+      servers: [...new Set(tools.map(tool => tool.serverName))],
+      tools: tools.map(tool => tool.name),
+    }).log('listed mcp tools')
+    return tools
   }
 
   function beginMcpMutation(payload: ElectronMcpCallToolPayload): { duplicate: boolean, key: string, duplicateSensitive: boolean } {

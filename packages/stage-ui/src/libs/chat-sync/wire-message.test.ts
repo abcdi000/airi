@@ -3,7 +3,7 @@ import type { WireMessage } from '@proj-airi/server-sdk-shared'
 
 import { describe, expect, it } from 'vitest'
 
-import { extractMessageText, isCloudSyncableMessage, mergeCloudMessagesIntoLocal, wireMessageToLocal } from './wire-message'
+import { extractMessageText, isCloudSyncableMessage, mergeCloudMessagesIntoLocal, stripInternalLumiOutput, wireMessageToLocal } from './wire-message'
 
 function makeWire(partial: Partial<WireMessage> & Pick<WireMessage, 'id' | 'seq'>): WireMessage {
   return {
@@ -61,6 +61,31 @@ describe('extractMessageText', () => {
   })
 })
 
+describe('stripInternalLumiOutput', () => {
+  /**
+   * @example
+   * A runtime reply followed by memory and profile diagnostics keeps only the
+   * speech that belongs to Lumi.
+   */
+  it('removes diagnostics appended after a visible reply', () => {
+    expect(stripInternalLumiOutput([
+      '嗯，满血复活了。',
+      '[memory_write]',
+      'status: checking',
+      '[system_notice]',
+      'title: 用户画像更新',
+    ].join('\n'))).toBe('嗯，满血复活了。')
+  })
+
+  /**
+   * @example
+   * A diagnostic-only event has no user-visible output.
+   */
+  it('returns an empty string for diagnostic-only output', () => {
+    expect(stripInternalLumiOutput('[memory_write]\nstatus: no candidate')).toBe('')
+  })
+})
+
 describe('isCloudSyncableMessage', () => {
   /**
    * @example
@@ -89,6 +114,12 @@ describe('isCloudSyncableMessage', () => {
       role: 'assistant',
       content: '[memory_write]\nstored: 1',
       slices: [{ type: 'text', text: '[memory_write]\nstored: 1' }],
+      tool_results: [],
+    })).toBe(false)
+    expect(isCloudSyncableMessage({
+      role: 'assistant',
+      content: '[system_notice]\nstatus: checking',
+      slices: [{ type: 'text', text: '[system_notice]\nstatus: checking' }],
       tool_results: [],
     })).toBe(false)
   })

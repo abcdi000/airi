@@ -334,6 +334,7 @@ pages:
     edit_card: Edit Card
     creation:
       identity: Identity
+      basic_persona: Basic Persona
       name: Name
       nickname: Nickname
       description: Description
@@ -342,6 +343,11 @@ pages:
       settings: Persona
       version: Version
       create: Create
+      editor_subtitle: This page defines only offline Lumi's basic identity. Current Agent Runtime owns conversation, learning, tool, and memory policies.
+      managed_version: Compatibility version
+      offline_scope_notice: This card applies to offline Lumi on this device. Online Lumi's persona is managed by Lumi Server Manager and neither configuration overwrites the other automatically.
+      basic_identity: Basic Identity
+      core_personality: Core Personality
       defaults:
         name: Name
         personality: You are a regular human, curious about everything.
@@ -369,6 +375,8 @@ pages:
         greetings_field: Greetings
         greetings: How your character should say "hello" ?
         persona_editor: This is Lumi's core identity and expression boundary. Changes directly affect how she understands herself, relates to you, and responds.
+        basic_identity: Describe who Lumi is in a few sentences. Do not add Planner, Replyer, tool, memory, or learning policies here.
+        core_personality: Keep only stable and concise personality traits. Social-language learning and the current Replyer own detailed expression.
         systemprompt: Describe who Lumi is, her personality, relationships, speaking style, and boundaries that must not change.
         posthistoryinstructions: Add a short reminder applied after each conversation history, such as keeping memories consistent and replies natural.
         version: >-

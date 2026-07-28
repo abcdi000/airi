@@ -111,6 +111,21 @@ describe('streamFrom step budget', () => {
     expect(stepCountAtLeast).toHaveBeenCalledWith(200)
   })
 
+  it('forwards a per-request output token ceiling to the provider', async () => {
+    streamTextMock.mockReturnValueOnce(createMockStreamResult())
+
+    await streamFrom({
+      model: 'model-a',
+      chatProvider: provider,
+      messages: [{ role: 'user', content: 'summarize briefly' }] as Message[],
+      options: {
+        maxOutputTokens: 2_048,
+      },
+    })
+
+    expect(streamTextMock.mock.calls[0]?.[0].maxTokens).toBe(2_048)
+  })
+
   it('reports cache usage from every completed provider step', async () => {
     const onUsage = vi.fn()
     const usage = {

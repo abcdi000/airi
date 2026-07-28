@@ -48,6 +48,7 @@ describe('group observation queue', () => {
       expressionIds: [],
       jargonIds: [],
       behaviorIds: [],
+      publicKnowledgeIds: [],
     })
     expect(snapshot.observationBuffer).toEqual([])
     expect(snapshot.observationHistory.map(item => item.messageId)).toEqual(['1', '2'])

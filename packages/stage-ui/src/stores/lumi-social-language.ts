@@ -7,6 +7,7 @@ import type {
   LearnedExpressionProposal,
   LearnedSocialBehavior,
   LumiLanguageFeedback,
+  SocialLanguageCandidateIngress,
   SocialLanguageEvidence,
   SocialLanguageGroupObservation,
   SocialLanguageSnapshot,
@@ -20,6 +21,7 @@ import { computed, ref, shallowRef } from 'vue'
 import {
   applyExpressionFeedback,
   behaviorSemanticKey,
+  canCreateSocialLanguageCandidates,
   completeGroupObservationBatch,
   createEmptySocialLanguageSnapshot,
   decayLearnedExpression,
@@ -171,9 +173,18 @@ export const useLumiSocialLanguageStore = defineStore('lumi-social-language', ()
   async function observeEvidence(
     evidence: SocialLanguageEvidence,
     modelOutput?: string,
+    ingress: SocialLanguageCandidateIngress = 'direct_turn',
   ) {
-    if (!config.value.enabled || !isTrustedSocialLanguageEvidence(evidence))
+    if (
+      !isTrustedSocialLanguageEvidence(evidence)
+      || !canCreateSocialLanguageCandidates({
+        config: config.value,
+        evidence,
+        ingress,
+      })
+    ) {
       return
+    }
 
     const parsed = modelOutput
       ? parseSocialLanguageLearningOutput(modelOutput)
@@ -280,7 +291,7 @@ export const useLumiSocialLanguageStore = defineStore('lumi-social-language', ()
         sourceKind: 'group_chat',
         authorVerified: true,
       }
-      await observeEvidence(combinedEvidence, input.modelOutput)
+      await observeEvidence(combinedEvidence, input.modelOutput, 'group_observation')
     }
     const expressionIds = snapshot.value.expressions
       .filter(item => previousExpressions.get(item.id) !== expressionMonitorSignature(item))
@@ -307,6 +318,7 @@ export const useLumiSocialLanguageStore = defineStore('lumi-social-language', ()
       expressionIds,
       jargonIds,
       behaviorIds,
+      publicKnowledgeIds: [],
       warning: successful ? undefined : warning,
     }
     if (input.consume === false) {
@@ -508,6 +520,12 @@ export const useLumiSocialLanguageStore = defineStore('lumi-social-language', ()
     await schedulePersist()
   }
 
+  async function clearDecisions() {
+    snapshot.value.decisions = []
+    touch()
+    await schedulePersist()
+  }
+
   async function replaceSnapshot(next: unknown) {
     snapshot.value = migrateSocialLanguageSnapshot(next)
     persistedSnapshot.value = snapshot.value
@@ -596,6 +614,7 @@ export const useLumiSocialLanguageStore = defineStore('lumi-social-language', ()
     updateBehavior,
     deleteBehavior,
     deleteDecision,
+    clearDecisions,
     replaceSnapshot,
     reset,
   }

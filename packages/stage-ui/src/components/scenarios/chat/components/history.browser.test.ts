@@ -167,6 +167,32 @@ describe('chatHistory retry actions', () => {
     expect(nodes.at(-1)?.getAttribute('data-chat-message-index')).toBe('199')
   })
 
+  /**
+   * @example
+   * it('renders internal runtime notices as green assistant diagnostics', async () => {
+   *   expect(document.body.textContent).toContain('status: started')
+   * })
+   */
+  it('renders internal runtime notices as green assistant diagnostics', async () => {
+    const messages: ChatHistoryItem[] = [
+      {
+        id: 'notice-1',
+        role: 'system',
+        content: '[system_notice]\ntitle: 工具调用\nstatus: started\nactivity: 打开浏览器',
+        createdAt: 1,
+      },
+    ]
+
+    const screen = await render(createHarness(messages), {
+      global: {
+        plugins: [createTestI18n()],
+      },
+    })
+
+    await expect.element(screen.getByText('status: started', { exact: false })).toBeVisible()
+    expect(document.querySelector('[data-chat-message-role="assistant"]')).not.toBeNull()
+  })
+
   it('renders short assistant lines as separate visual bubbles with custom assistant label', async () => {
     const messages: ChatHistoryItem[] = [
       {

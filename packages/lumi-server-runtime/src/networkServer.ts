@@ -72,7 +72,7 @@ export interface LumiNetworkServerOptions {
     maxImageBytes?: number
     /** @default 26214400 */
     maxAudioBytes?: number
-    /** @default 120000 */
+    /** @default 300000 */
     responseTimeoutMs?: number
     /** Maximum base64 JSON request size. @default 52428800 */
     maxRequestBytes?: number

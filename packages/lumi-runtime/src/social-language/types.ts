@@ -26,6 +26,22 @@ export interface LanguageLearningConfig {
   preciseSelectorEnabled: boolean
   /** Updates affinity, ownership, and lifecycle from later interaction signals. @default true */
   feedbackLearningEnabled: boolean
+  /** Enables expression curation from authorized group observations. @default true */
+  groupExpressionLearningEnabled: boolean
+  /** Enables jargon curation from authorized group observations. @default true */
+  groupJargonLearningEnabled: boolean
+  /** Enables social-behavior curation from authorized group observations. @default true */
+  groupBehaviorLearningEnabled: boolean
+  /** Enables public group-knowledge curation from authorized group observations. @default true */
+  groupPublicKnowledgeLearningEnabled: boolean
+  /**
+   * Allows direct-chat turns to create new expression, jargon, or behavior candidates.
+   *
+   * Keep disabled for Lumi's normal private-chat mode. Direct chat may still
+   * provide feedback for candidates learned from authorized group observations.
+   * @default false
+   */
+  directLanguageCandidateLearningEnabled: boolean
   /** Persists prompt snapshots in decision logs. Keep disabled for privacy. @default false */
   promptLoggingEnabled: boolean
   /** Allows a reply to contain a bounded sequence of visible messages. @default true */
@@ -270,6 +286,8 @@ export interface LanguageDecisionLog {
   realizedExpressions?: string[]
   selectedExpressionReasons: Record<string, string[]>
   selectedBehaviors: string[]
+  /** Jargon references injected into the final Replyer request. */
+  selectedJargon?: string[]
   replyerPromptSnapshot?: unknown
   /** Stage-specific projection used for the final wording request. */
   contextProjection?: {
@@ -298,6 +316,8 @@ export interface SocialLanguageSnapshot {
   expressions: LearnedExpression[]
   jargon: JargonKnowledge[]
   behaviors: LearnedSocialBehavior[]
+  /** Public group knowledge stays source-scoped and separate from private profiles. */
+  publicKnowledge: PublicGroupKnowledge[]
   decisions: LanguageDecisionLog[]
   /** Bounded, unprocessed read-only group observations. */
   observationBuffer: SocialLanguageGroupObservation[]
@@ -340,6 +360,8 @@ export interface SocialLanguageTurnContext {
 /** Trusted source metadata for one expression-learning observation. */
 export interface SocialLanguageEvidence {
   messageId: string
+  /** Verified source message IDs when one curator candidate spans a batch. */
+  sourceMessageIds?: string[]
   text: string
   personId?: string
   conversationId?: string
@@ -392,6 +414,29 @@ export interface SocialLanguageGroupObservation {
   timestamp: number
 }
 
+export type GroupLearningCuratorKind = 'expression' | 'jargon' | 'behavior' | 'public_knowledge'
+
+export interface GroupLearningCuratorProgress {
+  status: 'pending' | 'completed' | 'failed'
+  attempts: number
+  updatedAt: number
+  outputIds: string[]
+  warning?: string
+}
+
+/** Public, group-scoped knowledge that never mutates a private person profile. */
+export interface PublicGroupKnowledge {
+  id: string
+  sourceId: string
+  content: string
+  sourceMessageIds: string[]
+  confidence: number
+  observationCount: number
+  firstSeenAt: number
+  lastSeenAt: number
+  status: 'candidate' | 'active' | 'rejected' | 'archived'
+}
+
 /** Auditable summary of one consumed observation batch. */
 export interface SocialLanguageObservationBatch {
   id: string
@@ -406,6 +451,10 @@ export interface SocialLanguageObservationBatch {
   jargonIds: string[]
   /** Social behaviors created or updated while consuming this batch. */
   behaviorIds: string[]
+  /** Public group-knowledge candidates created or updated while consuming this batch. */
+  publicKnowledgeIds: string[]
+  /** Independent status for each curator participating in this batch. */
+  curators?: Partial<Record<GroupLearningCuratorKind, GroupLearningCuratorProgress>>
   /** Safe operational warning, such as model curation falling back. */
   warning?: string
   /** Timestamp at which a later recovery batch successfully covered this batch. */

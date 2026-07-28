@@ -1,3 +1,5 @@
+import type { PersistedSessionState } from '@proj-airi/lumi-agent-runtime'
+
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -130,6 +132,63 @@ describe('lumiServerDatabase', () => {
     }
     finally {
       database.close()
+    }
+  })
+
+  it('persists and restores the host-managed Agent Runtime ledger', () => {
+    const source = LumiServerDatabase.open(':memory:')
+    const restored = LumiServerDatabase.open(':memory:')
+    try {
+      const state: PersistedSessionState = {
+        conversationId: doggyDirectId,
+        contextEpoch: 2,
+        summaryVersion: 1,
+        stablePrefixHash: 'fnv1a32:test',
+        dialogueSegmentId: 'dialogue:2',
+        generation: 7,
+        history: [{
+          id: 'user:message-7',
+          kind: 'dialogue_user',
+          messageId: 'message-7',
+          personId: DOGGY_PERSON_ID,
+          text: '继续',
+          segments: [{ type: 'text', text: '继续' }],
+          attachments: [],
+          timestamp: 7,
+          countInContext: true,
+          remainingUses: null,
+          source: 'lumi-online',
+          visibility: 'both',
+          provenance: {
+            origin: 'direct_perception',
+            sourceIds: ['event-7', 'message-7'],
+          },
+        }],
+        completedEvents: [{
+          eventId: 'event-6',
+          sourceMessageId: 'message-6',
+          completedAt: 6,
+          result: {
+            turnId: 'event-6:g6',
+            conversationId: doggyDirectId,
+            generation: 6,
+            endReason: 'reply_sent',
+            sentMessageIds: ['assistant-6'],
+          },
+        }],
+      }
+      source.saveAgentSession(state)
+
+      expect(source.loadAgentSession(doggyDirectId)).toEqual(state)
+      const backup = source.exportBackup()
+      expect(backup.sections.agentSessions).toHaveLength(1)
+
+      restored.restoreBackup(backup)
+      expect(restored.loadAgentSession(doggyDirectId)).toEqual(state)
+    }
+    finally {
+      source.close()
+      restored.close()
     }
   })
 

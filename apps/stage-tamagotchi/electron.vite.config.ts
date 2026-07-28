@@ -125,6 +125,12 @@ export default defineConfig({
         '@proj-airi/drizzle-duckdb-wasm',
         '@proj-airi/drizzle-duckdb-wasm/*',
         '@proj-airi/electron-screen-capture',
+        // Lumi runtimes are rebuilt before desktop dev/build. Keeping them out
+        // of Vite's dependency cache ensures runtime edits take effect after a
+        // restart instead of silently reusing an older pre-bundled dist.
+        '@proj-airi/lumi-runtime',
+        '@proj-airi/lumi-agent-runtime',
+        '@proj-airi/lumi-server-runtime',
 
         // Static Assets: Models, Images, etc.
         'src/renderer/public/assets/*',

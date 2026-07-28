@@ -259,15 +259,23 @@ function def(input: Omit<LumiToolDefinition, keyof ReturnType<typeof boolFlags>>
   }
 }
 
-async function searchLongMemoryForToolMesh(store: ReturnType<typeof useLumiMemoryStore>, input: Record<string, unknown>) {
+async function searchLongMemoryForToolMesh(
+  store: ReturnType<typeof useLumiMemoryStore>,
+  input: Record<string, unknown>,
+  context: LumiToolExecutionContext,
+) {
   const query = String(input.query ?? '')
   const limit = Math.max(1, Math.min(10, Number(input.limit) || 5))
+  const viewerUserId = context.actorId ?? 'local'
   const semantic = await store.retrieveSemantic({
     query,
-    userId: 'local',
+    userId: viewerUserId,
+    viewerUserId,
     personaId: LUMI_AIRI_CARD_ID,
     limit,
-    conversationType: 'direct',
+    conversationType: context.conversationType ?? 'direct',
+    conversationId: context.conversationId,
+    participantUserIds: context.participantIds,
   })
   const rankedMemories = semantic.rankedMemories.slice(0, limit)
   const bestEvidence = rankedMemories[0]?.memory
@@ -320,7 +328,7 @@ const CORE_TOOL_DEFINITIONS: LumiToolDefinition[] = [
     inputSchema: { query: 'string', limit: 'number?' },
     outputSchema: { memories: 'array', status: 'string' },
     riskLevel: 'low',
-    accessScopes: ['autonomous_life', 'proactive_vision'],
+    accessScopes: ['chat', 'autonomous_life', 'proactive_vision'],
     executionMode: 'auto',
     status: 'implemented',
     implementationPath: 'packages/stage-ui/src/stores/lumi-memory.ts',
@@ -906,10 +914,10 @@ export const useLumiToolMeshStore = defineStore('lumi-tool-mesh', () => {
 
   function initializeCoreTools() {
     registerToolDefinitions('lumi-tool-mesh-core', [...PLACEHOLDER_TOOL_DEFINITIONS, ...CORE_TOOL_DEFINITIONS], {
-      search_long_memory: async (input) => {
+      search_long_memory: async (input, context) => {
         const store = useLumiMemoryStore()
         store.initialize()
-        return await searchLongMemoryForToolMesh(store, input)
+        return await searchLongMemoryForToolMesh(store, input, context)
       },
       write_long_memory_candidate: (input) => {
         const store = useLumiMemoryStore()

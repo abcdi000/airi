@@ -17,8 +17,31 @@ import { LUMI_ONLINE_PROTOCOL_VERSION } from '@proj-airi/lumi-online'
 
 import { LumiConversationScheduler } from './scheduler'
 
-export interface LumiReply {
+/** One independently persisted message produced by a structured Replyer. */
+export interface LumiReplyMessage {
   content: string
+  /** Host-assigned id retained by Agent Runtime idempotency. */
+  messageId?: string
+  /** Device-rendered expression hint for this message. */
+  expression?: string
+  /** Device-rendered motion hint for this message. */
+  motion?: string
+  /** Optional conversational pacing delay already applied by the runtime. */
+  delayMs?: number
+  /** Optional source message selected by the Planner for platform quoting. */
+  quoteMessageId?: string
+}
+
+export interface LumiReply {
+  /**
+   * Legacy single-message result.
+   *
+   * New Agent Runtime generators should return {@link messages}. This field
+   * remains accepted while the desktop and server migration runs in shadow.
+   */
+  content?: string
+  /** Ordered visible messages already authorized by the explicit reply tool. */
+  messages?: readonly LumiReplyMessage[]
   expression?: string
   motion?: string
 }
@@ -185,19 +208,25 @@ export class LumiOnlineServer {
           context,
           delta => this.deliverGeneration(conversation, input, { state: 'delta', delta }),
         )
-        const message = this.options.database.appendAssistantMessage({
+        const replyMessages = normalizeReplyMessages(reply)
+        if (replyMessages.length === 0) {
+          this.deliverGeneration(conversation, input, { state: 'completed' })
+          return
+        }
+        const messages = replyMessages.map(message => this.options.database.appendAssistantMessage({
           conversationId: conversation.id,
-          content: reply.content,
-          expression: reply.expression,
-          motion: reply.motion,
-        })
+          messageId: message.messageId,
+          content: message.content,
+          expression: message.expression,
+          motion: message.motion,
+        }))
         this.deliver({
           type: 'messages',
           personIds: conversation.participantPersonIds,
           conversationId: conversation.id,
-          messages: [message],
+          messages,
         })
-        this.deliverGeneration(conversation, input, { state: 'completed', message })
+        this.deliverGeneration(conversation, input, { state: 'completed', message: messages.at(-1) })
       }
       catch (error) {
         const generationError = error instanceof Error
@@ -232,6 +261,25 @@ export class LumiOnlineServer {
     for (const listener of this.deliveryListeners)
       listener(delivery)
   }
+}
+
+function normalizeReplyMessages(reply: LumiReply): readonly LumiReplyMessage[] {
+  if (reply.messages) {
+    return reply.messages
+      .filter(message => message.content.trim())
+      .map(message => ({
+        ...message,
+        content: message.content.trim(),
+      }))
+  }
+  const content = reply.content?.trim()
+  return content
+    ? [{
+        content,
+        expression: reply.expression,
+        motion: reply.motion,
+      }]
+    : []
 }
 
 function requiredText(value: string, name: string, maxLength: number) {

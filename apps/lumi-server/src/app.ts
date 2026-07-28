@@ -12,15 +12,20 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
+import { errorMessageFrom } from '@moeru/std'
 import {
   buildLumiStickerClassificationMessages,
   buildLumiStickerSelectionMessages,
   createLumiNetworkServer,
   createLumiNodeConsciousness,
+  createLumiServerAgentReplyGenerator,
   createLumiServerGroupObservationRuntime,
+  createOpenAICompatibleAgentModels,
   createOpenAICompatibleConsciousnessModel,
   createOpenAICompatibleTranscriber,
   createOpenAICompatibleVisionAnalyzer,
+  createServerAgentToolsPort,
+  loadLumiPromptOverrides,
   LumiBackgroundLife,
   LumiServerJobWorker,
   LumiServerMcpRegistry,
@@ -36,6 +41,7 @@ import {
 
 /** Starts the standalone server from an already validated configuration. */
 export async function startLumiServerProcess(config: LumiServerProcessConfig) {
+  const promptTemplates = await loadLumiPromptOverrides(config.agentRuntime.promptDirectory)
   const mcp = new LumiServerMcpRegistry(config.serverVersion)
   await mcp.apply(config.mcp)
   const plugins = new LumiServerPluginRegistry()
@@ -108,7 +114,7 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
               : undefined,
             maxImageBytes: config.astrbot.maxImageBytes,
             maxAudioBytes: config.astrbot.maxAudioBytes,
-            responseTimeoutMs: config.astrbot.responseTimeoutMs,
+            responseTimeoutMs: Math.max(config.astrbot.responseTimeoutMs, 300_000),
             maxRequestBytes: config.astrbot.maxRequestBytes,
             privateReplyEnabled: config.astrbot.privateReplyEnabled,
             groupObservationEnabled: config.astrbot.groupObservationEnabled,
@@ -154,6 +160,7 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
         migrationService = new LumiServerMigrationService(database, join(config.dataDirectory, 'migration-staging'))
         const model = createOpenAICompatibleConsciousnessModel({
           ...config.model,
+          directLanguageCandidateLearningEnabled: config.languageLearning.directLanguageCandidateLearningEnabled,
           toolProvider: {
             toolsFor: async request => [
               ...await mcp.toolsFor(request),
@@ -175,6 +182,7 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
               enabled: group.enabled,
             })),
             languageLearning: config.languageLearning,
+            promptTemplates,
           })
           void groupObservationRuntime.resume().catch((error) => {
             console.error('[group-observation] Failed to resume persisted learning batches', error)
@@ -204,7 +212,7 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
           jobWorker.start()
         }
         backgroundLife.scheduleInitialJobs()
-        return createLumiNodeConsciousness({
+        const legacyReplyGenerator = createLumiNodeConsciousness({
           database,
           personaPrompt: config.personaPrompt,
           maxContextTokens: config.model.maxContextTokens,
@@ -219,6 +227,56 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
             : undefined,
           model,
         })
+        if (config.agentRuntime.mode === 'legacy')
+          return legacyReplyGenerator
+
+        const agentModels = createOpenAICompatibleAgentModels(config.model)
+        const agentReplyGenerator = createLumiServerAgentReplyGenerator({
+          database,
+          ...agentModels,
+          personaPrompt: config.personaPrompt,
+          runtime: {
+            runtimeMode: config.agentRuntime.mode,
+            plannerMaxRounds: config.agentRuntime.plannerMaxRounds,
+            plannerFinalizationMode: config.agentRuntime.plannerFinalizationMode,
+            mergeWindowMs: config.agentRuntime.mergeWindowMs,
+            toolMaxConcurrency: config.agentRuntime.toolMaxConcurrency,
+            toolStepTimeoutMs: config.agentRuntime.toolStepTimeoutMs,
+            deferredToolsEnabled: config.agentRuntime.deferredToolsEnabled,
+            expressionSelectorEnabled: config.agentRuntime.expressionSelectorEnabled,
+            directLanguageFeedbackEnabled: config.agentRuntime.directLanguageFeedbackEnabled,
+            promptLoggingEnabled: config.agentRuntime.promptLoggingEnabled,
+            multiMessageReplyEnabled: config.languageLearning.multiMessageReplyEnabled,
+            plannerHistoryBudgetTokens: config.agentRuntime.plannerHistoryBudgetTokens,
+            contextCompactionThresholdTokens: config.agentRuntime.contextCompactionThresholdTokens,
+            contextRecentTokens: config.agentRuntime.contextRecentTokens,
+          },
+          tools: createServerAgentToolsPort({
+            toolsFor: async request => [
+              ...await mcp.toolsFor(request),
+              ...await plugins.toolsFor(request),
+            ],
+          }),
+          languageLearning: config.languageLearning,
+          promptTemplates,
+          semanticMemorySearch: vectorService
+            ? (request, limit) => vectorService!.search(request, limit)
+            : undefined,
+        })
+        if (config.agentRuntime.mode === 'maisaka')
+          return agentReplyGenerator
+
+        return {
+          async generate(context, emitDelta) {
+            const reply = await legacyReplyGenerator.generate(context, emitDelta)
+            void agentReplyGenerator.generate(context, () => {}).catch((error) => {
+              console.warn(
+                `[agent-runtime:shadow] conversation=${context.conversation.id} input=${context.input.id}: ${errorMessageFrom(error) ?? 'unknown error'}`,
+              )
+            })
+            return reply
+          },
+        }
       },
       async beforeDatabaseClose() {
         await groupObservationRuntime?.drain()

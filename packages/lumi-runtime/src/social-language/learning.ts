@@ -103,6 +103,9 @@ export function observeLearnedExpression(
   evidence: SocialLanguageEvidence,
   id: string,
 ): LearnedExpression {
+  const sourceMessageIds = evidence.sourceMessageIds?.length
+    ? evidence.sourceMessageIds
+    : [evidence.messageId]
   const affinity = existing?.affinity ?? createAffinity()
   const localBoost = evidence.source === 'human' ? 0.12 : 0.04
   if (evidence.personId)
@@ -128,7 +131,7 @@ export function observeLearnedExpression(
       personId: existing?.origin.personId ?? evidence.personId,
       conversationId: existing?.origin.conversationId ?? evidence.conversationId,
       platform: existing?.origin.platform ?? evidence.platform,
-      messageIds: [...new Set([...(existing?.origin.messageIds ?? []), evidence.messageId])].slice(-64),
+      messageIds: [...new Set([...(existing?.origin.messageIds ?? []), ...sourceMessageIds])].slice(-64),
       source: existing?.origin.source ?? evidence.source,
     },
     affinity,
@@ -162,6 +165,9 @@ export function observeJargonKnowledge(
   evidence: SocialLanguageEvidence,
   id: string,
 ): JargonKnowledge {
+  const sourceMessageIds = evidence.sourceMessageIds?.length
+    ? evidence.sourceMessageIds
+    : [evidence.messageId]
   const matching = existing?.meanings.find(item =>
     normalizeKey(item.meaning) === normalizeKey(proposal.meaning)
     && normalizeKey(item.context) === normalizeKey(proposal.context),
@@ -170,7 +176,7 @@ export function observeJargonKnowledge(
     meaning: proposal.meaning,
     context: proposal.context,
     confidence: clamp01(Math.max(matching?.confidence ?? 0, proposal.confidence)),
-    evidenceMessageIds: [...new Set([...(matching?.evidenceMessageIds ?? []), evidence.messageId])].slice(-64),
+    evidenceMessageIds: [...new Set([...(matching?.evidenceMessageIds ?? []), ...sourceMessageIds])].slice(-64),
   }
   return {
     id: existing?.id ?? id,
@@ -194,6 +200,9 @@ export function observeSocialBehavior(
   evidence: SocialLanguageEvidence,
   id: string,
 ): LearnedSocialBehavior {
+  const sourceMessageIds = evidence.sourceMessageIds?.length
+    ? evidence.sourceMessageIds
+    : [evidence.messageId]
   const affinity = existing?.affinity ?? createAffinity()
   if (evidence.personId)
     affinity.byPerson[evidence.personId] = clamp01((affinity.byPerson[evidence.personId] ?? 0) + 0.08)
@@ -206,7 +215,7 @@ export function observeSocialBehavior(
     situation: proposal.situation,
     action: proposal.action,
     expectedEffect: proposal.expectedEffect ?? existing?.expectedEffect,
-    originEvidenceIds: [...new Set([...(existing?.originEvidenceIds ?? []), evidence.messageId])].slice(-64),
+    originEvidenceIds: [...new Set([...(existing?.originEvidenceIds ?? []), ...sourceMessageIds])].slice(-64),
     confidence: clamp01(Math.max(existing?.confidence ?? 0, proposal.confidence) + 0.01),
     affinity,
     successCount: existing?.successCount ?? 0,

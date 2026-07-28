@@ -65,6 +65,16 @@ function withDeepSeekRequestOptions(body: Record<string, unknown>, config: DeepS
   const reasoningEffort = config.reasoningEffort || 'auto'
   const maxOutputTokens = Number(config.maxOutputTokens || 0)
 
+  // NOTICE:
+  // DeepSeek V4 supports tool calls in thinking mode, but rejects the
+  // OpenAI-compatible `tool_choice` control field while thinking is active.
+  // Source/context: `https://api-docs.deepseek.com/zh-cn/guides/thinking_mode`
+  // and `https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/oh_my_pi`.
+  // Removal condition: DeepSeek documents and accepts `tool_choice` in V4
+  // thinking requests.
+  if (thinkingMode !== 'disabled')
+    delete nextBody.tool_choice
+
   if (thinkingMode !== 'auto') {
     nextBody.extra_body = {
       ...(typeof body.extra_body === 'object' && body.extra_body != null ? body.extra_body as Record<string, unknown> : {}),

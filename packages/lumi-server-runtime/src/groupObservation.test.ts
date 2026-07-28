@@ -1,5 +1,7 @@
 import type { GroupObservationEnvelope } from '@proj-airi/lumi-agent-runtime'
 
+import type { LumiServerGroupObservationOptions } from './groupObservation'
+
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -42,17 +44,32 @@ function observation(index: number, text: string): GroupObservationEnvelope {
   }
 }
 
-const learnedExpression = JSON.stringify({
-  expressions: [{
-    phrase: '不是哥们',
-    situation: '朋友间对意外情况作出反应',
-    pragmaticFunction: '用短句表达意外',
-    patternType: 'reaction',
-    confidence: 0.9,
-  }],
-  jargon: [],
-  behaviors: [],
-})
+function curatorResponse(
+  purpose: Parameters<LumiServerGroupObservationOptions['model']['generateLanguageText']>[1],
+) {
+  if (purpose === 'expression_learning') {
+    return JSON.stringify({
+      candidates: [{
+        sourceMessageIds: ['message-1', 'message-2'],
+        phrase: '不是哥们',
+        situation: '朋友间对意外情况作出反应',
+        pragmaticFunction: '用短句表达意外',
+        patternType: 'reaction',
+        confidence: 0.9,
+      }],
+    })
+  }
+  if (purpose === 'public_knowledge_learning') {
+    return JSON.stringify({
+      candidates: [{
+        sourceMessageIds: ['message-1', 'message-2'],
+        content: '这个群通常在晚上讨论游戏',
+        confidence: 0.85,
+      }],
+    })
+  }
+  return JSON.stringify({ candidates: [] })
+}
 
 describe('createLumiServerGroupObservationRuntime', () => {
   /**
@@ -61,7 +78,10 @@ describe('createLumiServerGroupObservationRuntime', () => {
    */
   it('persists, curates, and completes one source-local batch', async () => {
     const database = LumiServerDatabase.open(':memory:')
-    const generateLanguageText = vi.fn(async () => learnedExpression)
+    const generateLanguageText = vi.fn(async (
+      _messages: Parameters<LumiServerGroupObservationOptions['model']['generateLanguageText']>[0],
+      _purpose: Parameters<LumiServerGroupObservationOptions['model']['generateLanguageText']>[1],
+    ) => curatorResponse(_purpose))
     try {
       const runtime = createLumiServerGroupObservationRuntime({
         database,
@@ -77,8 +97,13 @@ describe('createLumiServerGroupObservationRuntime', () => {
       await runtime.drain()
 
       const snapshot = database.getSocialLanguageSnapshot()
-      expect(generateLanguageText).toHaveBeenCalledTimes(1)
-      expect(generateLanguageText.mock.calls[0]?.[1]).toBe('expression_learning')
+      expect(generateLanguageText).toHaveBeenCalledTimes(4)
+      expect(new Set(generateLanguageText.mock.calls.map(call => call[1]))).toEqual(new Set([
+        'expression_learning',
+        'jargon_learning',
+        'behavior_learning',
+        'public_knowledge_learning',
+      ]))
       expect(snapshot.observationBuffer).toEqual([])
       expect(snapshot.observationHistory.map(item => item.messageId)).toEqual([
         'message-1',
@@ -88,6 +113,9 @@ describe('createLumiServerGroupObservationRuntime', () => {
       expect(snapshot.observationBatches[0]?.sourceId).toBe('friends')
       expect(snapshot.expressions).toHaveLength(1)
       expect(snapshot.expressions[0]?.phrase).toBe('不是哥们')
+      expect(snapshot.publicKnowledge).toHaveLength(1)
+      expect(snapshot.observationBatches[0]?.curators?.expression?.status).toBe('completed')
+      expect(snapshot.observationBatches[0]?.curators?.public_knowledge?.status).toBe('completed')
     }
     finally {
       database.close()
@@ -116,13 +144,64 @@ describe('createLumiServerGroupObservationRuntime', () => {
       await runtime.drain()
 
       const snapshot = database.getSocialLanguageSnapshot()
-      expect(generateLanguageText).toHaveBeenCalledTimes(1)
+      expect(generateLanguageText).toHaveBeenCalledTimes(4)
       expect(snapshot.observationBuffer.map(item => item.messageId)).toEqual([
         'message-1',
         'message-2',
       ])
-      expect(snapshot.observationBatches).toEqual([])
+      expect(snapshot.observationBatches).toHaveLength(1)
+      expect(snapshot.observationBatches[0]?.curator).toBe('pending')
+      expect(snapshot.observationBatches[0]?.curators?.expression?.status).toBe('failed')
       expect(snapshot.expressions).toEqual([])
+    }
+    finally {
+      database.close()
+    }
+  })
+
+  it('retries only the failed curator while preserving completed curator writes', async () => {
+    const database = LumiServerDatabase.open(':memory:')
+    const firstGenerate = vi.fn(async (_messages, purpose) =>
+      purpose === 'behavior_learning' ? 'invalid behavior output' : curatorResponse(purpose))
+    try {
+      const firstRuntime = createLumiServerGroupObservationRuntime({
+        database,
+        model: { generateLanguageText: firstGenerate },
+        enabled: true,
+        batchSize: 2,
+        studyGroups,
+        languageLearning: DEFAULT_LANGUAGE_LEARNING_CONFIG,
+      })
+      await firstRuntime.observe(observation(1, '不是哥们'))
+      await firstRuntime.observe(observation(2, '不是哥们，这也能行'))
+      await firstRuntime.drain()
+
+      const partial = database.getSocialLanguageSnapshot()
+      expect(firstGenerate).toHaveBeenCalledTimes(4)
+      expect(partial.expressions).toHaveLength(1)
+      expect(partial.publicKnowledge).toHaveLength(1)
+      expect(partial.observationBatches[0]?.curators?.behavior?.status).toBe('failed')
+      expect(partial.observationBatches[0]?.curators?.expression?.status).toBe('completed')
+
+      const retryGenerate = vi.fn(async (_messages, purpose) => curatorResponse(purpose))
+      const retryRuntime = createLumiServerGroupObservationRuntime({
+        database,
+        model: { generateLanguageText: retryGenerate },
+        enabled: true,
+        batchSize: 2,
+        studyGroups,
+        languageLearning: DEFAULT_LANGUAGE_LEARNING_CONFIG,
+      })
+      await retryRuntime.resume()
+      await retryRuntime.drain()
+
+      const completed = database.getSocialLanguageSnapshot()
+      expect(retryGenerate).toHaveBeenCalledTimes(1)
+      expect(retryGenerate.mock.calls[0]?.[1]).toBe('behavior_learning')
+      expect(completed.observationBuffer).toEqual([])
+      expect(completed.expressions).toHaveLength(1)
+      expect(completed.publicKnowledge).toHaveLength(1)
+      expect(completed.observationBatches[0]?.curators?.behavior?.attempts).toBe(2)
     }
     finally {
       database.close()
@@ -140,7 +219,7 @@ describe('createLumiServerGroupObservationRuntime', () => {
       const firstDatabase = LumiServerDatabase.open(databasePath)
       const firstRuntime = createLumiServerGroupObservationRuntime({
         database: firstDatabase,
-        model: { generateLanguageText: async () => learnedExpression },
+        model: { generateLanguageText: async (_messages, purpose) => curatorResponse(purpose) },
         enabled: true,
         batchSize: 3,
         studyGroups,
@@ -154,7 +233,7 @@ describe('createLumiServerGroupObservationRuntime', () => {
 
       const secondDatabase = LumiServerDatabase.open(databasePath)
       try {
-        const generateLanguageText = vi.fn(async () => learnedExpression)
+        const generateLanguageText = vi.fn(async (_messages, purpose) => curatorResponse(purpose))
         const secondRuntime = createLumiServerGroupObservationRuntime({
           database: secondDatabase,
           model: { generateLanguageText },
@@ -168,7 +247,7 @@ describe('createLumiServerGroupObservationRuntime', () => {
         await secondRuntime.drain()
 
         const snapshot = secondDatabase.getSocialLanguageSnapshot()
-        expect(generateLanguageText).toHaveBeenCalledTimes(1)
+        expect(generateLanguageText).toHaveBeenCalledTimes(4)
         expect(snapshot.observationBuffer).toEqual([])
         expect(snapshot.observationBatches[0]?.messageIds).toEqual([
           'message-1',

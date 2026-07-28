@@ -44,6 +44,29 @@ export interface LumiServerManagerState {
       reasoningEffort: 'auto' | 'high' | 'max'
       providerOptions: Record<string, unknown>
     }
+    agentRuntime: {
+      promptDirectory?: string
+      mode: 'legacy' | 'shadow' | 'maisaka'
+      plannerMaxRounds: number
+      plannerFinalizationMode: 'maibot' | 'stop_after_successful_reply'
+      mergeWindowMs: number
+      toolMaxConcurrency: number
+      toolStepTimeoutMs: number
+      deferredToolsEnabled: boolean
+      expressionSelectorEnabled: boolean
+      directLanguageFeedbackEnabled: boolean
+      promptLoggingEnabled: boolean
+      plannerHistoryBudgetTokens: number
+      contextCompactionThresholdTokens: number
+      contextRecentTokens: number
+    }
+    languageLearning: {
+      directLanguageCandidateLearningEnabled: boolean
+      groupExpressionLearningEnabled: boolean
+      groupJargonLearningEnabled: boolean
+      groupBehaviorLearningEnabled: boolean
+      groupPublicKnowledgeLearningEnabled: boolean
+    }
     vector: { enabled: boolean, model: string, device: string }
     transcription: { providerId: string, enabled: boolean, baseURL: string, model: string, language?: string, prompt?: string, maxVoiceBytes: number, apiKeySet: boolean }
     tls: { enabled: boolean, certPath?: string, keyPath?: string }
@@ -139,6 +162,14 @@ export async function setupLumiServerManager() {
           thinkingMode: config.model.thinkingMode,
           reasoningEffort: config.model.reasoningEffort,
           providerOptions: config.model.providerOptions,
+        },
+        agentRuntime: { ...config.agentRuntime },
+        languageLearning: {
+          directLanguageCandidateLearningEnabled: config.languageLearning.directLanguageCandidateLearningEnabled,
+          groupExpressionLearningEnabled: config.languageLearning.groupExpressionLearningEnabled,
+          groupJargonLearningEnabled: config.languageLearning.groupJargonLearningEnabled,
+          groupBehaviorLearningEnabled: config.languageLearning.groupBehaviorLearningEnabled,
+          groupPublicKnowledgeLearningEnabled: config.languageLearning.groupPublicKnowledgeLearningEnabled,
         },
         vector: { enabled: config.vector.enabled, model: config.vector.model, device: config.vector.device },
         transcription: {
@@ -441,6 +472,41 @@ export async function setupLumiServerManager() {
         ...(typeof patch.modelThinkingMode === 'string' ? { thinkingMode: patch.modelThinkingMode } : {}),
         ...(typeof patch.modelReasoningEffort === 'string' ? { reasoningEffort: patch.modelReasoningEffort } : {}),
         ...(patch.modelProviderOptions && typeof patch.modelProviderOptions === 'object' && !Array.isArray(patch.modelProviderOptions) ? { providerOptions: patch.modelProviderOptions } : {}),
+      },
+      agentRuntime: {
+        ...raw.agentRuntime,
+        ...(typeof patch.agentPromptDirectory === 'string' ? { promptDirectory: patch.agentPromptDirectory } : {}),
+        ...(typeof patch.agentRuntimeMode === 'string' ? { mode: patch.agentRuntimeMode } : {}),
+        ...(typeof patch.agentPlannerMaxRounds === 'number' ? { plannerMaxRounds: patch.agentPlannerMaxRounds } : {}),
+        ...(typeof patch.agentPlannerFinalizationMode === 'string' ? { plannerFinalizationMode: patch.agentPlannerFinalizationMode } : {}),
+        ...(typeof patch.agentMergeWindowMs === 'number' ? { mergeWindowMs: patch.agentMergeWindowMs } : {}),
+        ...(typeof patch.agentToolMaxConcurrency === 'number' ? { toolMaxConcurrency: patch.agentToolMaxConcurrency } : {}),
+        ...(typeof patch.agentToolStepTimeoutMs === 'number' ? { toolStepTimeoutMs: patch.agentToolStepTimeoutMs } : {}),
+        ...(typeof patch.agentDeferredToolsEnabled === 'boolean' ? { deferredToolsEnabled: patch.agentDeferredToolsEnabled } : {}),
+        ...(typeof patch.agentExpressionSelectorEnabled === 'boolean' ? { expressionSelectorEnabled: patch.agentExpressionSelectorEnabled } : {}),
+        ...(typeof patch.agentDirectLanguageFeedbackEnabled === 'boolean' ? { directLanguageFeedbackEnabled: patch.agentDirectLanguageFeedbackEnabled } : {}),
+        ...(typeof patch.agentPromptLoggingEnabled === 'boolean' ? { promptLoggingEnabled: patch.agentPromptLoggingEnabled } : {}),
+        ...(typeof patch.agentPlannerHistoryBudgetTokens === 'number' ? { plannerHistoryBudgetTokens: patch.agentPlannerHistoryBudgetTokens } : {}),
+        ...(typeof patch.agentContextCompactionThresholdTokens === 'number' ? { contextCompactionThresholdTokens: patch.agentContextCompactionThresholdTokens } : {}),
+        ...(typeof patch.agentContextRecentTokens === 'number' ? { contextRecentTokens: patch.agentContextRecentTokens } : {}),
+      },
+      languageLearning: {
+        ...raw.languageLearning,
+        ...(typeof patch.directLanguageCandidateLearningEnabled === 'boolean'
+          ? { directLanguageCandidateLearningEnabled: patch.directLanguageCandidateLearningEnabled }
+          : {}),
+        ...(typeof patch.groupExpressionLearningEnabled === 'boolean'
+          ? { groupExpressionLearningEnabled: patch.groupExpressionLearningEnabled }
+          : {}),
+        ...(typeof patch.groupJargonLearningEnabled === 'boolean'
+          ? { groupJargonLearningEnabled: patch.groupJargonLearningEnabled }
+          : {}),
+        ...(typeof patch.groupBehaviorLearningEnabled === 'boolean'
+          ? { groupBehaviorLearningEnabled: patch.groupBehaviorLearningEnabled }
+          : {}),
+        ...(typeof patch.groupPublicKnowledgeLearningEnabled === 'boolean'
+          ? { groupPublicKnowledgeLearningEnabled: patch.groupPublicKnowledgeLearningEnabled }
+          : {}),
       },
       vector: {
         ...raw.vector,

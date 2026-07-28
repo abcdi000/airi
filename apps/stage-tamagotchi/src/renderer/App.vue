@@ -511,17 +511,6 @@ onMounted(async () => {
 
   await chatSessionStore.initialize()
   await lumiOnlineStore.initialize()
-  if (chatSyncLifecycle.role === 'authority' && lumiOnlineStore.runtimeMode === 'offline-client' && proactiveVisionStore.enabled) {
-    void proactiveVisionStore.start().catch((error) => {
-      console.warn('[App] Failed to start Lumi proactive vision:', error)
-    })
-  }
-  if (chatSyncLifecycle.role === 'authority' && lumiOnlineStore.runtimeMode === 'offline-client' && diarySchedulerStore.enabled) {
-    diarySchedulerStore.start()
-  }
-  if (chatSyncLifecycle.role === 'authority' && lumiOnlineStore.runtimeMode === 'offline-client' && autonomousLifeStore.enabled) {
-    autonomousLifeStore.start()
-  }
   if (chatSyncLifecycle.role === 'authority' && miniChatEnabled.value) {
     void openMiniChat().catch((error) => {
       console.warn('[App] Failed to open Lumi mini chat:', error)
@@ -529,6 +518,8 @@ onMounted(async () => {
   }
 
   if (chatSyncLifecycle.role === 'authority') {
+    proactiveVisionStore.setRuntimeStatusPublishingEnabled(true)
+
     watch([() => proactiveVisionStore.enabled, () => lumiOnlineStore.runtimeMode], ([enabled, mode]) => {
       if (enabled && mode === 'offline-client') {
         void proactiveVisionStore.start().catch((error) => {
@@ -537,8 +528,10 @@ onMounted(async () => {
         return
       }
 
-      proactiveVisionStore.stop({ disable: true })
-    })
+      // Runtime role changes pause local autonomy without erasing the user's
+      // offline preference. Returning to offline mode must resume the chain.
+      proactiveVisionStore.stop({ disable: false })
+    }, { immediate: true })
 
     watch([() => diarySchedulerStore.enabled, () => lumiOnlineStore.runtimeMode], ([enabled, mode]) => {
       if (enabled && mode === 'offline-client') {
@@ -547,7 +540,7 @@ onMounted(async () => {
       }
 
       diarySchedulerStore.stop()
-    })
+    }, { immediate: true })
 
     watch([() => autonomousLifeStore.enabled, () => lumiOnlineStore.runtimeMode], ([enabled, mode]) => {
       if (enabled && mode === 'offline-client') {
@@ -556,7 +549,7 @@ onMounted(async () => {
       }
 
       autonomousLifeStore.stop()
-    })
+    }, { immediate: true })
   }
   await displayModelsStore.loadDisplayModelsFromIndexedDB()
   await settingsStore.initializeStageModel()
@@ -629,6 +622,7 @@ onUnmounted(() => {
   selfAdjustmentStore.clearTool()
   proactiveVisionStore.clearObserveScreenTool()
   proactiveVisionStore.stop({ disable: false })
+  proactiveVisionStore.setRuntimeStatusPublishingEnabled(false)
   autonomousLifeStore.stop()
   diarySchedulerStore.stop()
   pluginToolsStore.dispose()

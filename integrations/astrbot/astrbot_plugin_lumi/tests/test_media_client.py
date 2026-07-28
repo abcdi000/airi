@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import sys
@@ -241,6 +242,89 @@ class MediaResolverTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HttpLumiClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_progress_is_polled_in_order_while_reply_is_pending(
+        self,
+    ) -> None:
+        progress_requests = 0
+        received: list[tuple[int, str]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal progress_requests
+            if request.url.path.endswith("/progress"):
+                progress_requests += 1
+                if progress_requests == 1:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "events": [
+                                {
+                                    "sequence": 1,
+                                    "tool_name": "query_memory",
+                                    "status": "started",
+                                    "message": "checking memory",
+                                    "timestamp": 1,
+                                },
+                                {
+                                    "sequence": 2,
+                                    "tool_name": "browser_navigate",
+                                    "status": "started",
+                                    "message": "opening page",
+                                    "timestamp": 2,
+                                },
+                                {
+                                    "sequence": 3,
+                                    "tool_name": "browser_navigate",
+                                    "status": "started",
+                                    "message": "opening page",
+                                    "timestamp": 3,
+                                },
+                                {
+                                    "sequence": 4,
+                                    "tool_name": "builtin_mcpCallTool",
+                                    "status": "failed",
+                                    "message": "fixed failure message",
+                                    "timestamp": 4,
+                                },
+                            ],
+                            "complete": False,
+                        },
+                    )
+                return httpx.Response(200, json={"events": [], "complete": True})
+            await asyncio.sleep(0.05)
+            return httpx.Response(
+                200,
+                json={
+                    "response_id": "reply-1",
+                    "text": "查到了",
+                    "segments": [{"type": "text", "text": "查到了"}],
+                    "metadata": {},
+                },
+            )
+
+        async def collect(progress) -> None:
+            received.append((progress.sequence, progress.message))
+
+        client = HttpLumiRuntimeClient(
+            "http://127.0.0.1:6132",
+            "secret-token",
+            1,
+            1,
+            httpx.MockTransport(handler),
+        )
+        try:
+            response = await client.perceive_and_respond(perception(), collect)
+        finally:
+            await client.close()
+
+        self.assertEqual(response.text, "查到了")
+        self.assertEqual(
+            received,
+            [
+                (1, "checking memory"),
+                (2, "opening page"),
+            ],
+        )
+
     async def test_speech_request_returns_complete_audio_bytes(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.url.path, "/api/lumi/integrations/astrbot/speech")

@@ -81,7 +81,7 @@ export interface LumiAstrBotIntegrationOptions {
   maxImageBytes?: number
   /** @default 26214400 */
   maxAudioBytes?: number
-  /** @default 120000 */
+  /** @default 300000 */
   responseTimeoutMs?: number
   stickerLibrary?: LumiStickerLibrary
 }
@@ -211,23 +211,36 @@ export class LumiAstrBotIntegration {
       person,
     }
     const messageId = `astrbot:${normalized.platform_instance_id}:${normalized.message_id}`
-    const response = await this.sendAndWait(session, {
+    const responseMessages = await this.sendAndWait(session, {
       conversationId: conversation.id,
       messageId,
       idempotencyKey: normalized.event_id,
       content,
       createdAt: normalized.timestamp > 0 ? normalized.timestamp * 1000 : Date.now(),
     })
-    const sticker = await this.options.stickerLibrary?.selectForReply({
-      eventId: normalized.event_id,
-      inputText: text,
-      replyText: response.content,
-    })
+    const responseText = responseMessages.map(message => message.content).join('\n')
+    const lastResponse = responseMessages.at(-1)
+    const sticker = responseText
+      ? await this.options.stickerLibrary?.selectForReply({
+          eventId: normalized.event_id,
+          inputText: text,
+          replyText: responseText,
+        })
+      : undefined
     return {
-      response_id: response.id,
-      text: response.content,
+      response_id: lastResponse?.id ?? normalized.event_id,
+      text: responseText || null,
       segments: [
-        { type: 'text', text: response.content },
+        ...responseMessages.map(message => ({
+          type: 'text',
+          text: message.content,
+          metadata: {
+            message_id: message.id,
+            sequence: message.sequence,
+            expression: message.expression,
+            motion: message.motion,
+          },
+        })),
         ...(sticker
           ? [{
               type: 'image',
@@ -240,8 +253,9 @@ export class LumiAstrBotIntegration {
       metadata: {
         conversation_id: conversation.id,
         actor_person_id: person.id,
-        expression: response.expression,
-        motion: response.motion,
+        expression: lastResponse?.expression,
+        motion: lastResponse?.motion,
+        message_count: responseMessages.length,
       },
     }
   }
@@ -249,14 +263,28 @@ export class LumiAstrBotIntegration {
   private async sendAndWait(
     session: LumiAuthenticatedSession,
     request: Parameters<LumiOnlineServer['sendMessage']>[1],
-  ): Promise<LumiOnlineMessage> {
+  ): Promise<readonly LumiOnlineMessage[]> {
     let unsubscribe = () => {}
-    const completion = new Promise<LumiOnlineMessage>((resolve, reject) => {
+    const deliveredMessages: LumiOnlineMessage[] = []
+    const completion = new Promise<readonly LumiOnlineMessage[]>((resolve, reject) => {
       unsubscribe = this.options.onlineServer.onDelivery((delivery) => {
-        if (delivery.type !== 'generation' || delivery.event.inputMessageId !== request.messageId)
+        if (delivery.type === 'messages') {
+          if (delivery.conversationId !== request.conversationId)
+            return
+          deliveredMessages.push(...delivery.messages.filter(message => message.role === 'assistant'))
           return
-        if (delivery.event.state === 'completed' && delivery.event.message)
-          resolve(delivery.event.message)
+        }
+        if (delivery.event.inputMessageId !== request.messageId)
+          return
+        if (delivery.event.state === 'completed') {
+          if (
+            delivery.event.message
+            && !deliveredMessages.some(message => message.id === delivery.event.message!.id)
+          ) {
+            deliveredMessages.push(delivery.event.message)
+          }
+          resolve([...deliveredMessages].sort((left, right) => left.sequence - right.sequence))
+        }
         if (delivery.event.state === 'failed')
           reject(new LumiAstrBotIntegrationError('generation_failed', delivery.event.error || 'Lumi generation failed'))
       })
@@ -265,16 +293,27 @@ export class LumiAstrBotIntegration {
       const accepted = this.options.onlineServer.sendMessage(session, request)
       if (accepted.status === 'duplicate') {
         const replay = this.options.database.replay(request.conversationId, session.person.id, accepted.input.sequence)
-        const existing = replay.messages.find(message => message.role === 'assistant')
-        if (existing)
-          return existing
+        return assistantTurnAfter(replay.messages)
       }
-      return await withTimeout(completion, this.options.responseTimeoutMs ?? 120_000)
+      return await withTimeout(completion, this.options.responseTimeoutMs ?? 300_000)
     }
     finally {
       unsubscribe()
     }
   }
+}
+
+function assistantTurnAfter(messages: readonly LumiOnlineMessage[]): readonly LumiOnlineMessage[] {
+  const turn: LumiOnlineMessage[] = []
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      turn.push(message)
+      continue
+    }
+    if (turn.length > 0)
+      break
+  }
+  return turn
 }
 
 function validateEvent(event: unknown): LumiAstrBotPerceptionEvent {

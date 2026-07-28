@@ -49,6 +49,29 @@ export function extractMessageText(message: ChatHistoryItem): string {
 }
 
 /**
+ * Removes Lumi's reserved runtime diagnostics from user-visible text.
+ *
+ * Before:
+ * - "正常回复\n[memory_write]\nstatus: checking"
+ *
+ * After:
+ * - "正常回复"
+ */
+export function stripInternalLumiOutput(text: string): string {
+  const markerIndexes = ['[memory_search]', '[memory_write]', '[system_notice]']
+    .map(marker => text.indexOf(marker))
+    .filter(index => index >= 0)
+  if (markerIndexes.length === 0)
+    return text.trim()
+
+  return text.slice(0, Math.min(...markerIndexes)).trim()
+}
+
+export function isInternalLumiOutput(text: string): boolean {
+  return stripInternalLumiOutput(text).length === 0
+}
+
+/**
  * Decide whether a local message should be mirrored to the cloud.
  *
  * Use when:
@@ -71,7 +94,7 @@ export function isCloudSyncableMessage(message: ChatHistoryItem): boolean {
     return false
   if (message.role === 'error')
     return false
-  if (message.role === 'assistant' && /^\[(?:memory_search|memory_write)\]/.test(extractMessageText(message).trim()))
+  if (isInternalLumiOutput(extractMessageText(message)))
     return false
   return true
 }

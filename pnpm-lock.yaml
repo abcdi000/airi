@@ -3381,6 +3381,9 @@ importers:
       '@proj-airi/i18n':
         specifier: workspace:^
         version: link:../i18n
+      '@proj-airi/lumi-agent-runtime':
+        specifier: workspace:*
+        version: link:../lumi-agent-runtime
       '@proj-airi/lumi-online':
         specifier: workspace:*
         version: link:../lumi-online

@@ -4,15 +4,17 @@ import type { Message } from '@xsai/shared-chat'
 import type { LumiConversationContextMessage } from '../../../lumi-runtime/src'
 
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, shallowRef } from 'vue'
 
 import { estimateLumiConversationTokens } from '../../../lumi-runtime/src'
 
 const STORAGE_KEY = 'runtime/lumi/consciousness-request-log-v1'
-const MAX_REQUESTS = 120
-const FULL_DETAIL_REQUESTS = 8
+const STORAGE_REVISION_KEY = `${STORAGE_KEY}:revision`
+const STORAGE_CLEARED_AT_KEY = `${STORAGE_KEY}:cleared-at`
+const MAX_REQUESTS = 60
+const FULL_DETAIL_REQUESTS = 12
 const MAX_PROMPT_CHARACTERS = 180_000
-const MAX_RESPONSE_CHARACTERS = 80_000
+const MAX_RESPONSE_CHARACTERS = 40_000
 
 export type LumiConsciousnessRequestPurpose
   = | 'planner'
@@ -55,6 +57,14 @@ export interface LumiConsciousnessRequestTrace {
   model: string
   provider?: string
   conversationId?: string
+  /** Number of function tools offered to the model for this request. */
+  toolCount?: number
+  /** Provider-neutral tool selection requested by Lumi Agent Runtime. */
+  requestedToolChoice?: 'auto' | 'required'
+  /** Tool selection field actually sent after provider capability adaptation. */
+  effectiveToolChoice?: 'auto' | 'required' | 'omitted'
+  /** Thinking policy active at the provider request boundary. */
+  thinkingMode?: 'auto' | 'enabled' | 'disabled' | 'provider-default'
   startedAt: number
   firstTokenAt?: number
   completedAt?: number
@@ -83,14 +93,16 @@ export interface LumiConsciousnessRequestTrace {
 }
 
 /**
- * Records every desktop consciousness request while Prompt logging is enabled.
+ * Records every desktop consciousness request.
  *
- * Recent requests retain their exact prompt and streamed output. Older entries
- * retain timing and token statistics so the inspector stays useful without
- * exhausting browser storage.
+ * Request metadata, timing, usage, and errors are always persisted. Exact
+ * prompts and streamed output are retained only when private Prompt logging is
+ * enabled, so routine diagnostics do not expose conversation content.
  */
 export const useLumiConsciousnessObservabilityStore = defineStore('lumi-consciousness-observability', () => {
-  const requests = ref<LumiConsciousnessRequestTrace[]>(loadRequests())
+  let knownClearedAt = readClearedAt()
+  let knownStorageRevision = readStorageRevision()
+  const requests = shallowRef<LumiConsciousnessRequestTrace[]>(loadRequests(knownClearedAt))
   const activeCount = computed(() => requests.value.filter(request => request.status === 'streaming').length)
   let persistenceTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -100,30 +112,45 @@ export const useLumiConsciousnessObservabilityStore = defineStore('lumi-consciou
     model: string
     provider?: string
     conversationId?: string
-    messages: Message[] | LumiConversationContextMessage[]
+    messages?: Message[] | LumiConversationContextMessage[]
+    toolCount?: number
+    requestedToolChoice?: 'auto' | 'required'
+    effectiveToolChoice?: 'auto' | 'required' | 'omitted'
+    thinkingMode?: 'auto' | 'enabled' | 'disabled' | 'provider-default'
     startedAt?: number
   }) {
-    const requestMessages = normalizeMessages(input.messages)
-    const prefixDiagnostics = findBestPrefixDiagnostics({
-      currentMessages: requestMessages,
-      purpose: input.purpose,
-      model: input.model,
-      provider: input.provider,
-      conversationId: input.conversationId,
-      candidates: requests.value,
-    })
+    synchronizeClearMarker()
+    const requestMessages = input.messages
+      ? normalizeMessages(input.messages)
+      : undefined
+    const prefixDiagnostics = requestMessages
+      ? findBestPrefixDiagnostics({
+          currentMessages: requestMessages,
+          purpose: input.purpose,
+          model: input.model,
+          provider: input.provider,
+          conversationId: input.conversationId,
+          candidates: requests.value,
+        })
+      : undefined
     const trace: LumiConsciousnessRequestTrace = {
       id: input.id,
       purpose: input.purpose,
       model: input.model,
       provider: input.provider,
       conversationId: input.conversationId,
-      startedAt: input.startedAt ?? Date.now(),
+      toolCount: input.toolCount,
+      requestedToolChoice: input.requestedToolChoice,
+      effectiveToolChoice: input.effectiveToolChoice,
+      thinkingMode: input.thinkingMode,
+      startedAt: Math.max(input.startedAt ?? Date.now(), knownClearedAt + 1),
       status: 'streaming',
       requestMessages,
       responseText: '',
       chunkCount: 0,
-      estimatedInputTokens: estimateLumiConversationTokens(requestMessages),
+      estimatedInputTokens: requestMessages
+        ? estimateLumiConversationTokens(requestMessages)
+        : 0,
       estimatedOutputTokens: 0,
       prefixDiagnostics,
     }
@@ -134,7 +161,7 @@ export const useLumiConsciousnessObservabilityStore = defineStore('lumi-consciou
   function appendDelta(id: string, delta: string, receivedAt = Date.now()) {
     if (!delta)
       return
-    update(id, (trace) => {
+    const changed = update(id, (trace) => {
       const available = Math.max(0, MAX_RESPONSE_CHARACTERS - trace.responseText.length)
       const appended = delta.slice(0, available)
       const responseText = trace.responseText + appended
@@ -148,11 +175,12 @@ export const useLumiConsciousnessObservabilityStore = defineStore('lumi-consciou
         estimatedOutputTokens: estimateTextTokens(responseText),
       }
     })
-    schedulePersist()
+    if (changed)
+      schedulePersist()
   }
 
   function recordUsage(id: string, usage: StreamUsage) {
-    update(id, (trace) => {
+    const changed = update(id, (trace) => {
       const promptTokens = finiteUsage(usage.prompt_tokens)
       const completionTokens = finiteUsage(usage.completion_tokens)
       const cacheHitTokens = finiteUsage(usage.prompt_cache_hit_tokens)
@@ -179,7 +207,8 @@ export const useLumiConsciousnessObservabilityStore = defineStore('lumi-consciou
         cacheUsageSamples: (trace.cacheUsageSamples ?? 0) + (hasCacheAccounting ? 1 : 0),
       }
     })
-    schedulePersist()
+    if (changed)
+      schedulePersist()
   }
 
   function complete(id: string, input?: {
@@ -188,14 +217,15 @@ export const useLumiConsciousnessObservabilityStore = defineStore('lumi-consciou
     durationMs?: number
   }) {
     const completedAt = input?.completedAt ?? Date.now()
-    update(id, trace => ({
+    const changed = update(id, trace => ({
       ...trace,
       completedAt,
       status: 'completed',
       firstTokenLatencyMs: input?.firstTokenLatencyMs ?? trace.firstTokenLatencyMs,
       durationMs: input?.durationMs ?? Math.max(0, completedAt - trace.startedAt),
     }))
-    persistNow()
+    if (changed)
+      persistNow()
   }
 
   function fail(id: string, error: string, input?: {
@@ -204,7 +234,7 @@ export const useLumiConsciousnessObservabilityStore = defineStore('lumi-consciou
     durationMs?: number
   }) {
     const completedAt = input?.completedAt ?? Date.now()
-    update(id, trace => ({
+    const changed = update(id, trace => ({
       ...trace,
       completedAt,
       status: 'error',
@@ -212,25 +242,51 @@ export const useLumiConsciousnessObservabilityStore = defineStore('lumi-consciou
       firstTokenLatencyMs: input?.firstTokenLatencyMs ?? trace.firstTokenLatencyMs,
       durationMs: input?.durationMs ?? Math.max(0, completedAt - trace.startedAt),
     }))
-    persistNow()
+    if (changed)
+      persistNow()
   }
 
   function refreshFromStorage() {
-    requests.value = loadRequests()
+    const clearedAt = readClearedAt()
+    const storageRevision = readStorageRevision()
+    if (clearedAt === knownClearedAt && storageRevision === knownStorageRevision)
+      return
+
+    knownClearedAt = clearedAt
+    knownStorageRevision = storageRevision
+    requests.value = loadRequests(knownClearedAt)
   }
 
   function clear() {
+    cancelScheduledPersistence()
+    knownClearedAt = Math.max(Date.now(), knownClearedAt + 1)
     requests.value = []
-    persistNow()
+    try {
+      globalThis.localStorage?.setItem(STORAGE_CLEARED_AT_KEY, String(knownClearedAt))
+      globalThis.localStorage?.setItem(STORAGE_KEY, '[]')
+      writeStorageRevision()
+    }
+    catch (error) {
+      console.warn('[lumi-consciousness-observability] failed to clear request traces', error)
+    }
   }
 
   function deleteRequest(id: string) {
+    synchronizeClearMarker()
     requests.value = requests.value.filter(request => request.id !== id)
     persistNow()
   }
 
   function update(id: string, project: (trace: LumiConsciousnessRequestTrace) => LumiConsciousnessRequestTrace) {
-    requests.value = requests.value.map(trace => trace.id === id ? project(trace) : trace)
+    synchronizeClearMarker()
+    let changed = false
+    requests.value = requests.value.map((trace) => {
+      if (trace.id !== id)
+        return trace
+      changed = true
+      return project(trace)
+    })
+    return changed
   }
 
   function schedulePersist() {
@@ -239,20 +295,48 @@ export const useLumiConsciousnessObservabilityStore = defineStore('lumi-consciou
     persistenceTimer = setTimeout(() => {
       persistenceTimer = undefined
       persistNow()
-    }, 160)
+    }, 1_000)
   }
 
   function persistNow() {
-    if (persistenceTimer) {
-      clearTimeout(persistenceTimer)
-      persistenceTimer = undefined
-    }
+    cancelScheduledPersistence()
+    synchronizeClearMarker()
     try {
-      globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(compactRequests(requests.value)))
+      let serialized = JSON.stringify(compactRequests(requests.value))
+      // A clear can arrive from the settings window while a large trace is
+      // being serialized in the chat window. Re-check the tombstone before
+      // writing so an old in-memory request cannot repopulate the history.
+      if (synchronizeClearMarker())
+        serialized = JSON.stringify(compactRequests(requests.value))
+      globalThis.localStorage?.setItem(STORAGE_KEY, serialized)
+      writeStorageRevision()
     }
     catch (error) {
       console.warn('[lumi-consciousness-observability] failed to persist request traces', error)
     }
+  }
+
+  function synchronizeClearMarker() {
+    const clearedAt = readClearedAt()
+    if (clearedAt <= knownClearedAt)
+      return false
+
+    knownClearedAt = clearedAt
+    requests.value = requests.value.filter(request => request.startedAt > knownClearedAt)
+    return true
+  }
+
+  function cancelScheduledPersistence() {
+    if (!persistenceTimer)
+      return
+    clearTimeout(persistenceTimer)
+    persistenceTimer = undefined
+  }
+
+  function writeStorageRevision() {
+    const revision = createStorageRevision()
+    globalThis.localStorage?.setItem(STORAGE_REVISION_KEY, revision)
+    knownStorageRevision = revision
   }
 
   return {
@@ -277,19 +361,32 @@ function addUsage(current: number | undefined, value: number | undefined) {
   return value === undefined ? current : (current ?? 0) + value
 }
 
-function loadRequests(): LumiConsciousnessRequestTrace[] {
+function loadRequests(clearedAt: number): LumiConsciousnessRequestTrace[] {
   const serialized = globalThis.localStorage?.getItem(STORAGE_KEY)
   if (!serialized)
     return []
   try {
     const parsed: unknown = JSON.parse(serialized)
     return Array.isArray(parsed)
-      ? parsed.filter(isRequestTrace).slice(-MAX_REQUESTS)
+      ? parsed.filter(isRequestTrace).filter(request => request.startedAt > clearedAt).slice(-MAX_REQUESTS)
       : []
   }
   catch {
     return []
   }
+}
+
+function readClearedAt() {
+  const value = Number(globalThis.localStorage?.getItem(STORAGE_CLEARED_AT_KEY))
+  return Number.isFinite(value) && value > 0 ? value : 0
+}
+
+function readStorageRevision() {
+  return globalThis.localStorage?.getItem(STORAGE_REVISION_KEY) ?? ''
+}
+
+function createStorageRevision() {
+  return `${Date.now()}:${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`
 }
 
 function compactRequests(input: LumiConsciousnessRequestTrace[]) {

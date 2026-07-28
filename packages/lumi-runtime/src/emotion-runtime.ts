@@ -30,6 +30,8 @@ export interface LumiRelationshipAssessment {
 
 export interface LumiRelationshipGateResult {
   blocked: boolean
+  /** Whether this turn asks for work that Lumi must explicitly decline. */
+  refusalRequired: boolean
   reason: string
   action: string
   suggestedExpression?: LumiEmotionTag
@@ -462,11 +464,12 @@ export function checkLumiRelationshipGate(
   if (current.conflictSignal && !current.repairSincere) {
     return {
       blocked: true,
+      refusalRequired: false,
       reason: 'current_conflict',
       action: 'block_and_set_repair_required',
       suggestedExpression: 'angry',
       issues: ['user insulted, controlled, or crossed Lumi boundary'],
-      instruction: 'The user is insulting, controlling, or crossing Lumi boundaries in this turn. Lumi must keep anger and boundaries, refuse ordinary helper mode, and generate fresh wording without hate, threats, extreme cruelty, old-incident lists, bracketed stage directions, or formulaic listener phrases.',
+      instruction: '用户本轮正在辱骂、控制或越过 Lumi 的边界。保持生气和边界，按当前关系自然回嘴、表达不满或选择沉默；这只是激活防御，不要求使用明确拒绝词。不要仇恨、威胁、极端伤害、罗列旧账、添加括号动作或套用倾听者话术。',
     }
   }
 
@@ -474,18 +477,20 @@ export function checkLumiRelationshipGate(
     const taskShift = current.taskShift || fallback.taskShift
     return {
       blocked: true,
+      refusalRequired: true,
       reason: taskShift ? 'unresolved_conflict_task_shift' : 'unresolved_conflict',
       action: 'require_relationship_repair',
       suggestedExpression: score < thresholds.angry ? 'angry' : 'defensive',
       issues: ['relationship conflict is unresolved and repair is required'],
       instruction: taskShift
-        ? 'Relationship conflict is still unresolved and the user is shifting to a task request. Lumi should not enter normal helper mode yet. Do not list, quote, or enumerate previous incidents. Use at most one short boundary sentence saying repair is needed first, in fresh natural wording.'
-        : 'Relationship conflict is still unresolved. Lumi may continue guarded conversation without pretending everything is fixed. Do not repeat old conflict details.',
+        ? '关系冲突仍未修复，而用户正在转向任务请求。Lumi 暂时不要进入普通帮助模式，应使用本轮新生成的自然措辞表达边界；不要罗列、引用或枚举过去的冲突。'
+        : '关系冲突仍未修复。Lumi 可以保持戒备继续交谈，不要假装关系已经恢复，也不要重复过去的冲突细节。',
     }
   }
 
   return {
     blocked: false,
+    refusalRequired: false,
     reason: 'allow',
     action: 'allow',
     issues: [],

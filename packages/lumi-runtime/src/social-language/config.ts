@@ -26,6 +26,11 @@ export const DEFAULT_LANGUAGE_LEARNING_CONFIG: Readonly<LanguageLearningConfig> 
   vectorCandidateLimit: 24,
   preciseSelectorEnabled: true,
   feedbackLearningEnabled: true,
+  groupExpressionLearningEnabled: true,
+  groupJargonLearningEnabled: true,
+  groupBehaviorLearningEnabled: true,
+  groupPublicKnowledgeLearningEnabled: true,
+  directLanguageCandidateLearningEnabled: false,
   promptLoggingEnabled: false,
   multiMessageReplyEnabled: true,
 }
@@ -51,6 +56,11 @@ export function normalizeLanguageLearningConfig(input?: Partial<LanguageLearning
     vectorCandidateLimit: integerValue(input?.vectorCandidateLimit, 1, 100, DEFAULT_LANGUAGE_LEARNING_CONFIG.vectorCandidateLimit),
     preciseSelectorEnabled: booleanValue(input?.preciseSelectorEnabled, DEFAULT_LANGUAGE_LEARNING_CONFIG.preciseSelectorEnabled),
     feedbackLearningEnabled: booleanValue(input?.feedbackLearningEnabled, DEFAULT_LANGUAGE_LEARNING_CONFIG.feedbackLearningEnabled),
+    groupExpressionLearningEnabled: booleanValue(input?.groupExpressionLearningEnabled, DEFAULT_LANGUAGE_LEARNING_CONFIG.groupExpressionLearningEnabled),
+    groupJargonLearningEnabled: booleanValue(input?.groupJargonLearningEnabled, DEFAULT_LANGUAGE_LEARNING_CONFIG.groupJargonLearningEnabled),
+    groupBehaviorLearningEnabled: booleanValue(input?.groupBehaviorLearningEnabled, DEFAULT_LANGUAGE_LEARNING_CONFIG.groupBehaviorLearningEnabled),
+    groupPublicKnowledgeLearningEnabled: booleanValue(input?.groupPublicKnowledgeLearningEnabled, DEFAULT_LANGUAGE_LEARNING_CONFIG.groupPublicKnowledgeLearningEnabled),
+    directLanguageCandidateLearningEnabled: booleanValue(input?.directLanguageCandidateLearningEnabled, DEFAULT_LANGUAGE_LEARNING_CONFIG.directLanguageCandidateLearningEnabled),
     promptLoggingEnabled: booleanValue(input?.promptLoggingEnabled, DEFAULT_LANGUAGE_LEARNING_CONFIG.promptLoggingEnabled),
     multiMessageReplyEnabled: booleanValue(input?.multiMessageReplyEnabled, DEFAULT_LANGUAGE_LEARNING_CONFIG.multiMessageReplyEnabled),
   }
@@ -63,6 +73,7 @@ export function createEmptySocialLanguageSnapshot(now = Date.now()): SocialLangu
     expressions: [],
     jargon: [],
     behaviors: [],
+    publicKnowledge: [],
     decisions: [],
     observationBuffer: [],
     observationHistory: [],
@@ -99,6 +110,7 @@ export function migrateSocialLanguageSnapshot(input: unknown, now = Date.now()):
     expressions: migratedExpressions,
     jargon: Array.isArray(input.jargon) ? input.jargon.filter(isJargonKnowledge) : [],
     behaviors: Array.isArray(input.behaviors) ? input.behaviors.filter(isLearnedSocialBehavior) : [],
+    publicKnowledge: Array.isArray(input.publicKnowledge) ? input.publicKnowledge.filter(isPublicGroupKnowledge) : [],
     decisions: Array.isArray(input.decisions) ? input.decisions.filter(isLanguageDecisionLog) : [],
     observationBuffer: Array.isArray(input.observationBuffer)
       ? input.observationBuffer.filter(isSocialLanguageGroupObservation)
@@ -145,6 +157,7 @@ function isSocialLanguageObservationBatch(value: unknown): value is SocialLangua
     && (value.expressionIds === undefined || (Array.isArray(value.expressionIds) && value.expressionIds.every(item => typeof item === 'string')))
     && (value.jargonIds === undefined || (Array.isArray(value.jargonIds) && value.jargonIds.every(item => typeof item === 'string')))
     && (value.behaviorIds === undefined || (Array.isArray(value.behaviorIds) && value.behaviorIds.every(item => typeof item === 'string')))
+    && (value.publicKnowledgeIds === undefined || (Array.isArray(value.publicKnowledgeIds) && value.publicKnowledgeIds.every(item => typeof item === 'string')))
     && (value.warning === undefined || typeof value.warning === 'string')
     && (value.recoveredAt === undefined || Number.isFinite(value.recoveredAt))
     && (value.recoveryBatchId === undefined || typeof value.recoveryBatchId === 'string')
@@ -158,7 +171,22 @@ function normalizeSocialLanguageObservationBatch(
     expressionIds: batch.expressionIds ?? [],
     jargonIds: batch.jargonIds ?? [],
     behaviorIds: batch.behaviorIds ?? [],
+    publicKnowledgeIds: batch.publicKnowledgeIds ?? [],
   }
+}
+
+function isPublicGroupKnowledge(value: unknown): value is SocialLanguageSnapshot['publicKnowledge'][number] {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.sourceId === 'string'
+    && typeof value.content === 'string'
+    && Array.isArray(value.sourceMessageIds)
+    && value.sourceMessageIds.every(item => typeof item === 'string')
+    && Number.isFinite(value.confidence)
+    && Number.isFinite(value.observationCount)
+    && Number.isFinite(value.firstSeenAt)
+    && Number.isFinite(value.lastSeenAt)
+    && ['candidate', 'active', 'rejected', 'archived'].includes(String(value.status))
 }
 
 /**

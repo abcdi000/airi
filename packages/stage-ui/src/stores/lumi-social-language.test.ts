@@ -57,6 +57,46 @@ describe('lumi social-language store', () => {
     expect(persisted).toHaveLength(1)
   })
 
+  it('clears persisted reply decisions instead of only hiding them in the inspector', async () => {
+    const persisted: Array<{ decisions?: unknown[] }> = []
+    const store = useLumiSocialLanguageStore()
+    store.setPersistenceBridge({
+      loadSnapshot: async () => undefined,
+      replaceSnapshot: async (snapshot) => {
+        persisted.push(snapshot)
+      },
+    })
+
+    await store.recordDecision({
+      id: 'decision-to-clear',
+      timestamp: 1,
+      personId: 'doggy',
+      conversationId: 'astrbot-private',
+      platform: 'qq',
+      plannerIntent: createFallbackLumiReplyIntent({ rawDraft: '知道了' }),
+      retrievedExpressions: [],
+      selectedExpressions: [],
+      selectedExpressionReasons: {},
+      selectedBehaviors: [],
+      selectedJargon: [],
+      generatedReply: { messages: [{ text: '知道了' }] },
+      actuallySentReply: { messages: [{ text: '知道了' }] },
+      emotionState: {},
+      defenseState: {},
+      validator: {
+        passed: true,
+        attempts: 1,
+        issues: [],
+        fallbackUsed: false,
+      },
+    })
+
+    await store.clearDecisions()
+
+    expect(store.snapshot.decisions).toEqual([])
+    expect(persisted.at(-1)?.decisions).toEqual([])
+  })
+
   it('persists the v2 repair of expressions forgotten by the v1 threshold bug', async () => {
     const persisted: unknown[] = []
     const store = useLumiSocialLanguageStore()
@@ -198,6 +238,47 @@ describe('lumi social-language store', () => {
     expect(store.recoverableObservationGroups()[0]?.observations).toEqual([observation])
   })
 
+  it('does not persist new candidates from direct chat by default', async () => {
+    const store = useLumiSocialLanguageStore()
+
+    await store.observeEvidence({
+      messageId: 'direct-message',
+      text: '这也能行',
+      personId: 'doggy',
+      conversationId: 'direct-doggy',
+      platform: 'desktop',
+      timestamp: 100,
+      source: 'human',
+      sourceKind: 'chat',
+      authorVerified: true,
+    }, JSON.stringify({
+      expressions: [{
+        phrase: '这也能行',
+        situation: 'reacting to an unexpected result',
+        pragmaticFunction: 'react briefly',
+        patternType: 'reaction',
+        confidence: 0.9,
+      }],
+      jargon: [{
+        term: '炸了',
+        meaning: 'something failed or became unexpectedly intense',
+        context: 'casual chat',
+        pragmaticFunctions: ['react'],
+        confidence: 0.9,
+      }],
+      behaviors: [{
+        situation: 'the other person shares an unexpected result',
+        action: 'react briefly before asking for details',
+        expectedEffect: 'keep the conversation natural',
+        confidence: 0.9,
+      }],
+    }))
+
+    expect(store.snapshot.expressions).toEqual([])
+    expect(store.snapshot.jargon).toEqual([])
+    expect(store.snapshot.behaviors).toEqual([])
+  })
+
   it('persists manual expression, jargon, and behavior management', async () => {
     const persisted: unknown[] = []
     const store = useLumiSocialLanguageStore()
@@ -211,11 +292,11 @@ describe('lumi social-language store', () => {
       messageId: 'message-assets',
       text: 'learned source',
       personId: 'doggy',
-      conversationId: 'direct',
+      conversationId: 'learning:group',
       platform: 'desktop',
       timestamp: 100,
       source: 'human',
-      sourceKind: 'chat',
+      sourceKind: 'group_chat',
       authorVerified: true,
     }, JSON.stringify({
       expressions: [{
@@ -238,7 +319,7 @@ describe('lumi social-language store', () => {
         expectedEffect: 'natural conversation',
         confidence: 0.8,
       }],
-    }))
+    }), 'group_observation')
 
     const expressionId = store.snapshot.expressions[0]!.id
     const jargonId = store.snapshot.jargon[0]!.id

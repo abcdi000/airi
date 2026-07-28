@@ -117,6 +117,17 @@ class LumiResponse:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class LumiProgress:
+    sequence: int
+    tool_name: str
+    status: Literal["started", "succeeded", "failed", "skipped"]
+    message: str
+    timestamp: int
+    duration_ms: int | None = None
+    error_code: str | None = None
+
+
 @dataclass(slots=True)
 class LumiHealth:
     available: bool

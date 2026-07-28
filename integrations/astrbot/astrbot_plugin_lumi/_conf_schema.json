@@ -47,7 +47,8 @@
   "request_timeout_seconds": {
     "description": "Lumi 完成一次回复的最长等待时间",
     "type": "float",
-    "default": 120.0
+    "default": 300.0,
+    "hint": "完整 Agent Runtime 可能包含工具调用和一次 Replyer 自纠错；插件至少等待 300 秒，避免 AstrBot 先于 Lumi 返回结果而超时。"
   },
   "connect_timeout_seconds": {
     "description": "连接 Lumi 运行时的超时时间",
@@ -196,6 +197,12 @@
     "type": "float",
     "default": 0.35,
     "hint": "取值 0 到 1。例如 0.35 表示约 35% 的回复使用语音，仅在随机模式生效。"
+  },
+  "send_tool_progress": {
+    "description": "发送 Lumi 工具执行进度",
+    "type": "bool",
+    "default": true,
+    "hint": "多步工具任务进行时，把打开网页、查询记忆、操作页面等简短动作及时发送到当前私聊。不会发送隐藏思考、提示词、工具参数、账号凭据或工具结果正文。"
   },
   "failure_policy": {
     "description": "失败处理",

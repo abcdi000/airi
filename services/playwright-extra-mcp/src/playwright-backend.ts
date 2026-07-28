@@ -128,7 +128,7 @@ export class PlaywrightBackend extends BaseBrowserBackend {
 
     await this.acquireProfile()
     try {
-      this.context = await this.openContext(browserType)
+      this.attachContext(await this.openContext(browserType))
     }
     catch (error) {
       const message = String(error)

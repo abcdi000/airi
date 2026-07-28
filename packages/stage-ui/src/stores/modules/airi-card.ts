@@ -94,6 +94,29 @@ export interface AiriCard extends Card {
   } & Card['extensions']
 }
 
+/**
+ * Builds the minimal identity anchor consumed by the Lumi Agent Runtime.
+ *
+ * Use when:
+ * - Supplying basic character identity without replacing current runtime prompts.
+ * - Hashing the effective identity configuration for runtime reuse.
+ *
+ * Expects:
+ * - Detailed runtime policy remains owned by Lumi Agent Runtime.
+ *
+ * Returns:
+ * - Name, short identity, and core personality only.
+ */
+export function buildAgentRuntimeIdentityAnchor(card: AiriCard): string {
+  return [
+    `名字：${card.name}`,
+    card.description?.trim() ? `身份：${card.description.trim()}` : '',
+    card.personality?.trim() ? `核心性格：${card.personality.trim()}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
 export const useAiriCardStore = defineStore('airi-card', () => {
   const { t } = useI18n()
 
@@ -456,6 +479,11 @@ export const useAiriCardStore = defineStore('airi-card', () => {
       ].filter(Boolean)
 
       return components.join('\n\n')
+    }),
+
+    agentRuntimeIdentityAnchor: computed(() => {
+      const card = activeCard.value
+      return card ? buildAgentRuntimeIdentityAnchor(card) : ''
     }),
   }
 })

@@ -17,7 +17,12 @@ export type ContextTokenEstimator = (message: LumiAgentContextMessage) => number
 
 function defaultTokenEstimator(message: LumiAgentContextMessage): number {
   const serialized = JSON.stringify(message)
-  return Math.max(1, Math.ceil(serialized.length / 4))
+  let estimated = 0
+  for (const character of serialized)
+    estimated += character.codePointAt(0)! <= 0x7F ? 0.25 : 1
+  // JSON punctuation, escaping, and provider tokenization add overhead that is
+  // especially visible in mixed Chinese/English records.
+  return Math.max(1, Math.ceil(estimated * 1.12))
 }
 
 function isToolCallingPlannerMessage(

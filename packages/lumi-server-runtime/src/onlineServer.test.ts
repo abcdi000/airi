@@ -123,6 +123,50 @@ describe('lumiOnlineServer', () => {
       database.close()
     }
   })
+
+  it('persists and delivers every structured Replyer message in order', async () => {
+    const database = LumiServerDatabase.open(':memory:')
+    const server = new LumiOnlineServer({
+      database,
+      serverVersion: 'test',
+      replyGenerator: {
+        async generate() {
+          return {
+            messages: [
+              { messageId: 'reply-one', content: '先说这个' },
+              { messageId: 'reply-two', content: '然后再补一句' },
+            ],
+          }
+        },
+      },
+    })
+    const delivered: string[][] = []
+    server.onDelivery((delivery) => {
+      if (delivery.type === 'messages' && delivery.messages.every(message => message.role === 'assistant'))
+        delivered.push(delivery.messages.map(message => message.id))
+    })
+    try {
+      server.sendMessage(session(DOGGY_PERSON_ID, 'Doggy', 'owner'), {
+        conversationId: `lumi-direct:${DOGGY_PERSON_ID}`,
+        messageId: 'multi-message-input',
+        idempotencyKey: 'doggy-device:multi-message-input',
+        content: '分两条说',
+        createdAt: Date.now(),
+      })
+      await until(() => delivered.length === 1)
+
+      expect(delivered).toEqual([['reply-one', 'reply-two']])
+      expect(database.replay(`lumi-direct:${DOGGY_PERSON_ID}`, DOGGY_PERSON_ID, 0).messages)
+        .toMatchObject([
+          { role: 'user', content: '分两条说' },
+          { id: 'reply-one', role: 'assistant', content: '先说这个' },
+          { id: 'reply-two', role: 'assistant', content: '然后再补一句' },
+        ])
+    }
+    finally {
+      database.close()
+    }
+  })
 })
 
 function createServer(database: LumiServerDatabase) {

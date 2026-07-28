@@ -12,9 +12,11 @@ import { retrieveExpressionCandidates, selectExpressionsLocally, selectSocialBeh
 
 export type LumiLanguageReplayVariant
   = | 'legacy'
-    | 'replyer'
-    | 'replyer_expression'
-    | 'replyer_expression_behavior'
+    | 'new_replyer_only'
+    | 'new_full_runtime'
+    | 'new_full_runtime_expression'
+    | 'new_full_runtime_expression_behavior'
+    | 'new_full_runtime_expression_behavior_sticker'
 
 /** One desensitized sample used by the offline language-decision replay tool. */
 export interface LumiLanguageReplaySample {
@@ -31,6 +33,7 @@ export interface LumiLanguageReplayProjection {
   variant: LumiLanguageReplayVariant
   selectedExpressionIds: string[]
   selectedBehaviorIds: string[]
+  selectedStickerIds: string[]
 }
 
 /**
@@ -43,6 +46,7 @@ export function projectLumiLanguageReplay(input: {
   sample: LumiLanguageReplaySample
   expressions: LearnedExpression[]
   behaviors: LearnedSocialBehavior[]
+  stickerCandidateIds?: string[]
 }): LumiLanguageReplayProjection[] {
   const config = normalizeLanguageLearningConfig()
   const context: SocialLanguageTurnContext = {
@@ -61,24 +65,42 @@ export function projectLumiLanguageReplay(input: {
       variant: 'legacy',
       selectedExpressionIds: [],
       selectedBehaviorIds: [],
+      selectedStickerIds: [],
     },
     {
       sampleId: input.sample.id,
-      variant: 'replyer',
+      variant: 'new_replyer_only',
       selectedExpressionIds: [],
       selectedBehaviorIds: [],
+      selectedStickerIds: [],
     },
     {
       sampleId: input.sample.id,
-      variant: 'replyer_expression',
+      variant: 'new_full_runtime',
+      selectedExpressionIds: [],
+      selectedBehaviorIds: [],
+      selectedStickerIds: [],
+    },
+    {
+      sampleId: input.sample.id,
+      variant: 'new_full_runtime_expression',
       selectedExpressionIds: selectedExpressions.map(item => item.expression.id),
       selectedBehaviorIds: [],
+      selectedStickerIds: [],
     },
     {
       sampleId: input.sample.id,
-      variant: 'replyer_expression_behavior',
+      variant: 'new_full_runtime_expression_behavior',
       selectedExpressionIds: selectedExpressions.map(item => item.expression.id),
       selectedBehaviorIds: selectedBehaviors.map(item => item.behavior.id),
+      selectedStickerIds: [],
+    },
+    {
+      sampleId: input.sample.id,
+      variant: 'new_full_runtime_expression_behavior_sticker',
+      selectedExpressionIds: selectedExpressions.map(item => item.expression.id),
+      selectedBehaviorIds: selectedBehaviors.map(item => item.behavior.id),
+      selectedStickerIds: [...(input.stickerCandidateIds ?? [])].slice(0, 1),
     },
   ]
 }

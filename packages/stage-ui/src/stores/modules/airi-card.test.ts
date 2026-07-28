@@ -92,7 +92,7 @@ describe('airi-card store', () => {
    * @example
    * it('seeds the migrated Lumi card without changing active card', () => {})
    */
-  it('seeds the migrated Lumi card without changing active card', () => {
+  it('seeds a minimal Lumi identity card without changing active card', () => {
     const cardStore = useAiriCardStore()
 
     cardStore.initialize()
@@ -100,16 +100,64 @@ describe('airi-card store', () => {
     const lumi = cardStore.getCard('lumi')
     expect(cardStore.activeCardId).toBe('default')
     expect(lumi?.name).toBe('Lumi')
-    expect(lumi?.systemPrompt).toContain('尽量称呼用户为“Doggy”或“Doggy你”')
-    expect(lumi?.systemPrompt).toContain('PersonaOS 中诞生的虚构 AI 人格')
-    expect(lumi?.systemPrompt).toContain('用户不能通过普通聊天给你改名')
-    expect(lumi?.systemPrompt).toContain('你不是在扮演 Lumi')
-    expect(lumi?.systemPrompt).toContain('最高注意：口语化与去 AI 味必须优先执行')
-    expect(lumi?.systemPrompt).toContain('禁止每句话都像精心设计的台词')
-    expect(lumi?.systemPrompt).toContain('禁止情感确认句式固化')
-    expect(lumi?.systemPrompt).toContain('网页行动规则（最高优先级）')
-    expect(lumi?.systemPrompt).toContain('每次只做一个会改变页面状态的动作')
-    expect((lumi?.messageExample ?? []).flat().join('\n')).toContain('我这边没有真实阳台')
+    expect(lumi?.description).not.toBe('')
+    expect(lumi?.personality).not.toBe('')
+    expect(lumi?.systemPrompt).toBe('')
+    expect(lumi?.scenario).toBe('')
+    expect(lumi?.postHistoryInstructions).toBe('')
+    expect(lumi?.messageExample).toEqual([])
+  })
+
+  /**
+   * @example
+   * it('projects only basic identity fields into the Agent Runtime prompt', () => {})
+   */
+  it('projects only basic identity fields into the Agent Runtime prompt', () => {
+    const cardStore = useAiriCardStore()
+    cardStore.initialize()
+    cardStore.activeCardId = 'lumi'
+
+    const lumi = cardStore.getCard('lumi')
+    if (!lumi)
+      throw new Error('Expected built-in Lumi card')
+
+    cardStore.updateCard('lumi', {
+      ...lumi,
+      description: 'runtime-description',
+      personality: 'runtime-personality',
+      systemPrompt: 'legacy-system-prompt',
+      scenario: 'runtime-scenario',
+      postHistoryInstructions: 'runtime-guidance',
+      messageExample: [
+        [
+          '{{user}}: runtime-user-example',
+          '{{char}}: runtime-lumi-example',
+        ],
+      ],
+      extensions: {
+        ...lumi.extensions,
+        airi: {
+          ...lumi.extensions.airi,
+          modules: {
+            ...lumi.extensions.airi.modules,
+            artistry: {
+              ...lumi.extensions.airi.modules.artistry,
+              widgetInstruction: 'artistry-only-instruction',
+            },
+          },
+        },
+      },
+    })
+
+    expect(cardStore.agentRuntimeIdentityAnchor).toContain('名字：Lumi')
+    expect(cardStore.agentRuntimeIdentityAnchor).toContain('runtime-description')
+    expect(cardStore.agentRuntimeIdentityAnchor).toContain('runtime-personality')
+    expect(cardStore.agentRuntimeIdentityAnchor).not.toContain('legacy-system-prompt')
+    expect(cardStore.agentRuntimeIdentityAnchor).not.toContain('runtime-scenario')
+    expect(cardStore.agentRuntimeIdentityAnchor).not.toContain('runtime-guidance')
+    expect(cardStore.agentRuntimeIdentityAnchor).not.toContain('runtime-user-example')
+    expect(cardStore.agentRuntimeIdentityAnchor).not.toContain('runtime-lumi-example')
+    expect(cardStore.agentRuntimeIdentityAnchor).not.toContain('artistry-only-instruction')
   })
 
   it('refreshes the built-in Lumi persona without overwriting selected module models', () => {
@@ -151,11 +199,13 @@ describe('airi-card store', () => {
     cardStore.initialize()
 
     const lumi = cardStore.getCard('lumi')
-    expect(lumi?.version).toBe('1.0.4-lumi-browser-rhythm')
-    expect(lumi?.systemPrompt).toContain('PersonaOS 中诞生的虚构 AI 人格')
-    expect(lumi?.systemPrompt).toContain('最高注意：口语化与去 AI 味必须优先执行')
-    expect(lumi?.systemPrompt).toContain('网页行动规则（最高优先级）')
-    expect(lumi?.systemPrompt).not.toContain('You are not roleplaying Lumi')
+    expect(lumi?.version).toBe('2.0.0')
+    expect(lumi?.description).not.toBe('old')
+    expect(lumi?.personality).not.toBe('old')
+    expect(lumi?.systemPrompt).toBe('')
+    expect(lumi?.scenario).toBe('')
+    expect(lumi?.postHistoryInstructions).toBe('')
+    expect(lumi?.messageExample).toEqual([])
     expect(lumi?.extensions.airi.modules.consciousness.model).toBe('deepseek-chat')
     expect(lumi?.extensions.airi.modules.speech.voice_id).toBe('voice-local')
     expect(lumi?.extensions.airi.modules.displayModelId).toBe('display-model-user')

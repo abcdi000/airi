@@ -38,9 +38,10 @@ vi.mock('@guiiai/logg', () => ({
   useLogg: vi.fn(() => ({
     useGlobalConfig: () => ({
       debug: vi.fn(),
+      log: vi.fn(),
       warn: vi.fn(),
       withError: vi.fn(() => ({ warn: vi.fn() })),
-      withFields: vi.fn(() => ({ debug: vi.fn(), warn: vi.fn() })),
+      withFields: vi.fn(() => ({ debug: vi.fn(), log: vi.fn(), warn: vi.fn() })),
     }),
   })),
 }))
@@ -133,6 +134,29 @@ describe('createMcpStdioManager', () => {
     expect(result.ok).toBe(true)
     expect(result.tools).toEqual(['browser_snapshot'])
     expect(clientMocks.connect).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs legacy bare node MCP commands through Electron Node mode', async () => {
+    const { createMcpStdioManager } = await import('./index')
+    const manager = createMcpStdioManager()
+
+    const result = await manager.testServer({
+      name: 'legacy-node-server',
+      config: {
+        command: 'node',
+        args: ['dist/main.js'],
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(transportMocks.stdioServers).toHaveLength(1)
+    expect(transportMocks.stdioServers[0]).toMatchObject({
+      command: process.execPath,
+      args: ['dist/main.js'],
+      env: expect.objectContaining({
+        ELECTRON_RUN_AS_NODE: '1',
+      }),
+    })
   })
 
   it('only accepts Computer Use mutations from the current active chat turn', async () => {

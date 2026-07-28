@@ -99,6 +99,7 @@ const projections = projectLumiLanguageReplay({
   },
   expressions,
   behaviors,
+  stickerCandidateIds: ['sample-sticker'],
 })
 
 console.info(JSON.stringify(projections, null, 2))

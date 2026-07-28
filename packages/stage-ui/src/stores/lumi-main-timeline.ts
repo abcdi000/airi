@@ -78,7 +78,12 @@ export const useLumiMainTimelineStore = defineStore('lumi-main-timeline', () => 
     conversationSummaries.value = next
   }
 
+  function clearAllSummaries() {
+    conversationSummaries.value = {}
+  }
+
   return {
+    clearAllSummaries,
     clearSummary,
     conversationSummaries,
     maxRecentChatMessagesForPrompt,

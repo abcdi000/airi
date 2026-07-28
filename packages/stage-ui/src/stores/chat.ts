@@ -9,7 +9,7 @@ import type {
   SocialLanguageEvidence,
   SocialLanguageGroupObservation,
 } from '../../../lumi-runtime/src'
-import type { ChatHistoryItem, ChatInteractionContext } from '../types/chat'
+import type { ChatAssistantMessage, ChatHistoryItem, ChatInteractionContext, ChatStreamEventContext } from '../types/chat'
 import type { LumiUserProfileEntry, LumiUserProfilePendingUpdate, LumiUserProfileSourceKind } from './lumi-user-profile'
 
 import { errorMessageFrom } from '@moeru/std'
@@ -35,6 +35,7 @@ import {
   buildObservedGroupLearningMessages,
   buildSocialLanguageFeedbackMessages,
   buildSocialLanguageLearningMessages,
+  canCreateSocialLanguageCandidates,
   compressLumiConversationContext,
   createDefaultLumiPersonaAnchor,
   estimateLumiConversationTokens,
@@ -55,15 +56,19 @@ import {
 import { useAnalytics } from '../composables'
 import { startSpan } from '../composables/use-io-tracer'
 import { LUMI_AIRI_CARD_ID } from '../constants/lumi-card'
-import { extractMessageText, isCloudSyncableMessage } from '../libs/chat-sync'
+import { extractMessageText, isCloudSyncableMessage, stripInternalLumiOutput } from '../libs/chat-sync'
 import { createLumiRemoteToolTransform } from '../libs/lumi-tool-permissions'
+import { toStructuredCloneSnapshot } from '../utils/structured-clone'
 import { createLumiContext, createMinecraftContext } from './chat/context-providers'
 import { useChatContextStore } from './chat/context-store'
+import { DesktopLumiAgentHost } from './chat/desktop-agent-runtime'
 import { useChatSessionStore } from './chat/session-store'
+import { replaySharedRuntimeStageHooks } from './chat/shared-runtime-stage-hooks'
 import { useChatStreamStore } from './chat/stream-store'
 import { useContextObservabilityStore } from './devtools/context-observability'
 import { useLLM } from './llm'
 import { useLlmToolsetPromptsStore } from './llm-toolset-prompts'
+import { useLumiAgentRuntimeSettingsStore } from './lumi-agent-runtime-settings'
 import { useLumiConsciousnessObservabilityStore } from './lumi-consciousness-observability'
 import {
   buildLumiCurrentStateUpdatePrompt,
@@ -120,6 +125,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   const artistryAutonomousStore = useAutonomousArtistryStore()
   const providersStore = useProvidersStore()
   const lumiEmotionStore = useLumiEmotionStore()
+  const lumiAgentRuntimeSettingsStore = useLumiAgentRuntimeSettingsStore()
   const lumiIdentityStore = useLumiIdentityStore()
   const lumiCurrentStateStore = useLumiCurrentStateStore()
   const lumiConsciousnessObservabilityStore = useLumiConsciousnessObservabilityStore()
@@ -148,9 +154,11 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
   const sending = ref(false)
   const pendingQueuedSendCount = ref(0)
+  const desktopLumiAgentHost = new DesktopLumiAgentHost()
   let lumiMemoryToolsRegistered = false
   let activeGroupObservationWorkers = 0
   let groupObservationCommitQueue = Promise.resolve()
+  let runtime: ReturnType<typeof createChatOrchestratorRuntime>
 
   function syncLumiMemoryToolRegistration() {
     const shouldRegister = cardStore.activeCardId === LUMI_AIRI_CARD_ID
@@ -169,6 +177,74 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   }
 
   watch(() => cardStore.activeCardId, syncLumiMemoryToolRegistration, { immediate: true })
+
+  async function emitSharedRuntimeAssistantHooks(input: {
+    sessionId: string
+    sourceText: string
+    sentMessageIds: readonly string[]
+    transportInput?: ChatStreamEventContext['input']
+  }): Promise<void> {
+    if (input.sentMessageIds.length === 0)
+      return
+
+    const sessionMessages = chatSession.getSessionMessages(input.sessionId)
+    const sourceMessage = [...sessionMessages]
+      .reverse()
+      .find(message => message.role === 'user')
+    if (!sourceMessage)
+      return
+    const transportSourceMessage = toStructuredCloneSnapshot(sourceMessage)
+    const transportInput = input.transportInput
+      ? toStructuredCloneSnapshot(input.transportInput)
+      : undefined
+
+    for (const messageId of input.sentMessageIds) {
+      const assistantMessage = sessionMessages.find(message =>
+        message.id === messageId && message.role === 'assistant',
+      )
+      if (!assistantMessage)
+        continue
+
+      const messageText = stripInternalLumiOutput(extractMessageText(assistantMessage))
+      if (!messageText.trim())
+        continue
+
+      // NOTICE:
+      // The shared Lumi runtime owns generation but the existing Stage hooks
+      // still own local TTS, Live2D motion, and external renderer broadcasts.
+      // Replaying the final visible message through that stable boundary keeps
+      // device capabilities without coupling the platform-neutral runtime to Vue.
+      // This adapter can be removed once Stage consumes DirectOutbound events.
+      const createContext = (): ChatStreamEventContext => ({
+        message: transportSourceMessage,
+        contexts: {},
+        composedMessage: [],
+        input: transportInput,
+      })
+      const transportAssistantMessage = toStructuredCloneSnapshot({
+        ...assistantMessage,
+        content: messageText,
+        slices: [{ type: 'text', text: messageText }],
+      }) as ChatAssistantMessage
+      await replaySharedRuntimeStageHooks({
+        hooks: runtime.hooks,
+        sourceText: input.sourceText,
+        messageText,
+        assistantMessage: transportAssistantMessage,
+        createContext,
+        onError(name, error) {
+          // NOTICE:
+          // The reply is already committed, so a local integration failure
+          // must not suppress transport completion or the remaining hooks.
+          // This can be removed after Stage consumes DirectOutbound events.
+          console.warn(
+            `[lumi-agent-runtime:stage-hooks] ${name} failed; continuing reply delivery:`,
+            errorMessageFrom(error) ?? 'Unknown hook error',
+          )
+        },
+      })
+    }
+  }
 
   async function streamWithStageAdapters(
     model: string,
@@ -216,7 +292,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     pendingQueuedSendCount.value = state.pendingQueuedSendCount
   }
 
-  const runtime = createChatOrchestratorRuntime({
+  runtime = createChatOrchestratorRuntime({
     session: {
       ensureSession: sessionId => chatSession.ensureSession(sessionId),
       getSessionMessages: sessionId => chatSession.getSessionMessages(sessionId).map(message => toRaw(message)),
@@ -287,7 +363,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         void chatSession.pushMessageToCloud(sessionId, {
           id: message.id,
           role: 'assistant',
-          content: extractMessageText(message),
+          content: stripInternalLumiOutput(extractMessageText(message)),
         })
       }
     },
@@ -414,6 +490,84 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         lumiMemoryStore.ensureUserMemoryLoaded(interaction.actorId),
         lumiSocialLanguageStore.initialize(),
       ])
+    }
+    const sharedRuntimeEligible = cardStore.activeCardId === LUMI_AIRI_CARD_ID
+      && interaction?.conversationType === 'direct'
+      && Boolean(interaction.actorId)
+      && !options.hiddenUserMessage
+    if (sharedRuntimeEligible && interaction) {
+      const mode = lumiAgentRuntimeSettingsStore.mode
+      if (mode === 'maisaka') {
+        sending.value = true
+        const startedAt = performance.now()
+        try {
+          await prepareLumiRelationshipAssessment(
+            sendingMessage,
+            chatSession.getSessionMessages(sessionId),
+            interaction,
+          )
+          const turnResult = await desktopLumiAgentHost.ingest({
+            text: sendingMessage,
+            sessionId,
+            interaction,
+            runtimeConfig: lumiAgentRuntimeSettingsStore.runtimeConfig(),
+            mode,
+            visible: true,
+            onToolProgress: options.onAgentToolProgress,
+          })
+          if (
+            turnResult.sentMessageIds.length === 0
+            && options.input?.type === 'input:text'
+            && options.input.data.perception
+          ) {
+            const failure = turnResult.failure
+            throw new Error([
+              `Lumi Agent Runtime produced no outbound message (${turnResult.endReason})`,
+              failure ? `${failure.code}: ${failure.message}` : undefined,
+            ].filter(Boolean).join(' - '))
+          }
+          await emitSharedRuntimeAssistantHooks({
+            sessionId,
+            sourceText: sendingMessage,
+            sentMessageIds: turnResult.sentMessageIds,
+            transportInput: options.input,
+          })
+          const sessionMessages = chatSession.getSessionMessages(sessionId)
+          const assistantText = sessionMessages
+            .filter(message => message.role === 'assistant')
+            .slice(-3)
+            .map(extractMessageText)
+            .filter(Boolean)
+            .join('\n\n')
+          if (assistantText) {
+            void runLumiUserProfileAfterTurn(assistantText, sessionMessages, 'chat', interaction)
+            void runLumiCurrentStateAfterTurn(sessionMessages, false, interaction)
+            runLumiEmotionAfterTurn(assistantText, sessionMessages, interaction)
+            void runLumiAutoMemoryAfterTurn(assistantText, sessionMessages, sessionId, interaction)
+          }
+          trackMessageRound({
+            duration_ms: performance.now() - startedAt,
+            has_voice: false,
+            model: activeModel.value,
+          })
+          return
+        }
+        finally {
+          sending.value = false
+        }
+      }
+      if (mode === 'shadow') {
+        void desktopLumiAgentHost.ingest({
+          text: sendingMessage,
+          sessionId,
+          interaction,
+          runtimeConfig: lumiAgentRuntimeSettingsStore.runtimeConfig(),
+          mode,
+          visible: false,
+        }).catch(error =>
+          console.warn('[lumi-agent-runtime:desktop] shadow turn failed', errorMessageFrom(error) ?? error),
+        )
+      }
     }
     const scopedOptions: ChatOrchestratorSendOptions = {
       ...options,
@@ -695,7 +849,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         relationshipSummary,
         defenseSummary,
       },
-      refusalRequired: gate?.blocked === true,
+      refusalRequired: gate?.refusalRequired === true,
     }
   }
 
@@ -865,6 +1019,13 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       source: 'human',
       sourceKind: interaction?.conversationType === 'group' ? 'group_chat' : 'chat',
       authorVerified: Boolean(interaction?.actorId ?? userMessage.actorId),
+    }
+    if (!canCreateSocialLanguageCandidates({
+      config: lumiSocialLanguageStore.config,
+      evidence,
+      ingress: 'direct_turn',
+    })) {
+      return
     }
     let modelOutput: string | undefined
     const providerId = activeProvider.value
@@ -1743,10 +1904,8 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     const text = [`[${kind}]`, ...lines].join('\n')
     chatSession.appendSessionMessage(sessionId, {
-      role: 'assistant',
+      role: 'system',
       content: text,
-      slices: [{ type: 'text', text }],
-      tool_results: [],
       id: `lumi-memory-debug-${nanoid()}`,
       createdAt: Date.now(),
     })
@@ -1762,10 +1921,8 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     const text = ['[system_notice]', ...lines].join('\n')
     chatSession.appendSessionMessage(sessionId, {
-      role: 'assistant',
+      role: 'system',
       content: text,
-      slices: [{ type: 'text', text }],
-      tool_results: [],
       id: `lumi-system-notice-${nanoid()}`,
       createdAt: Date.now(),
     })
@@ -1885,6 +2042,43 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     }
   }
 
+  /**
+   * Removes local conversational context without touching Lumi's durable identity,
+   * memory, profile, social-language assets, diary, notes, or sticker library.
+   *
+   * Use when:
+   * - Development prompts or generated summaries polluted local private-chat context
+   *
+   * Expects:
+   * - Online server projections are cleared from Server Manager instead
+   *
+   * Returns:
+   * - Counts of deleted local direct sessions after every active runtime turn drains
+   */
+  async function clearLumiConversationContext() {
+    if (chatSession.onlineProjectionActive)
+      throw new Error('在线 Lumi 的上下文由服务器管理，请在 Server Manager 中清理。')
+
+    cancelPendingSends()
+    await desktopLumiAgentHost.clearConversationContexts()
+    useLumiMainTimelineStore().clearAllSummaries()
+    useLumiConsciousnessObservabilityStore().clear()
+
+    const sessionIds = Object.entries(chatSession.sessionMetas)
+      .filter(([, meta]) =>
+        meta.characterId === LUMI_AIRI_CARD_ID
+        && meta.conversationType !== 'group',
+      )
+      .map(([sessionId]) => sessionId)
+
+    for (const sessionId of sessionIds)
+      await chatSession.deleteSession(sessionId)
+
+    return {
+      deletedSessionCount: sessionIds.length,
+    }
+  }
+
   return {
     sending,
     pendingQueuedSendCount,
@@ -1897,6 +2091,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     reprocessMissedExternalGroupLanguage,
     runExternalStickerIntelligence,
     refreshLumiCurrentStateNow: () => runLumiCurrentStateAfterTurn(chatSession.messages, true),
+    clearLumiConversationContext,
     cancelPendingSends,
     getPendingQueuedSendSnapshot,
 
@@ -1960,7 +2155,7 @@ function stringRecord(value: unknown): Record<string, string> | undefined {
 }
 
 function isLumiMemoryDebugMessage(message: ChatHistoryItem) {
-  return message.role === 'assistant' && isLumiMemoryDebugText(extractMessageText(message))
+  return isLumiMemoryDebugText(extractMessageText(message))
 }
 
 function isLumiMemoryDebugText(text: string) {

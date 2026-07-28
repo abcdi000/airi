@@ -107,4 +107,60 @@ describe('executeToolPlan', () => {
     expect(dependent).toHaveBeenCalledOnce()
     expect(result.success).toBe(true)
   })
+
+  it('revalidates shadow-mode side effects before executing a model-emitted tool name', async () => {
+    // ROOT CAUSE:
+    //
+    // Planner tool definitions filtered write/external tools in shadow mode, but
+    // the executor previously trusted the emitted name and fetched it directly
+    // from the registry. A model could therefore name an unadvertised registered
+    // tool and bypass the read-only shadow contract.
+    //
+    // We fixed this by applying registry execution policy again immediately
+    // before invoking the handler.
+    const registry = new ToolRegistry()
+    const handler = vi.fn(async () => ({ success: true }))
+    registry.register({
+      ...spec('write-settings', handler),
+      sideEffectType: 'write',
+    })
+
+    const result = await executeToolPlan(registry, [
+      { id: 'write', toolName: 'write-settings', arguments: {} },
+    ], {
+      ...context,
+      runtimeMode: 'shadow',
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.steps[0]?.errorCode).toBe('TOOL_NOT_AVAILABLE')
+    expect(result.steps[0]?.skipped).toBe(true)
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('releases an aborted tool even when its handler ignores AbortSignal', async () => {
+    // ROOT CAUSE:
+    //
+    // The executor previously passed AbortSignal to a tool but only raced the
+    // handler against its timeout. A handler that ignored cancellation kept the
+    // per-conversation FIFO blocked until that timeout expired.
+    //
+    // We fixed this by racing handler completion against the abort event itself.
+    const registry = new ToolRegistry()
+    const neverFinishes = new Promise<never>(() => {})
+    registry.register(spec('ignores-abort', async () => await neverFinishes))
+    const controller = new AbortController()
+
+    const execution = executeToolPlan(registry, [
+      { id: 'blocked', toolName: 'ignores-abort', arguments: {} },
+    ], context, {
+      stepTimeoutMs: 60_000,
+    }, controller.signal)
+    controller.abort(new Error('superseded by a newer message'))
+    const result = await execution
+
+    expect(result.success).toBe(false)
+    expect(result.steps[0]?.errorCode).toBe('TOOL_EXECUTION_ABORTED')
+    expect(result.steps[0]?.errorMessage).toBe('superseded by a newer message')
+  })
 })

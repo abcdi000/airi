@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { Button, Callout, FieldInput } from '@proj-airi/ui'
+import { Button, Callout, FieldCheckbox, FieldInput } from '@proj-airi/ui'
 import { computed, shallowRef } from 'vue'
 
+import AgentRuntimeSettings from '../components/AgentRuntimeSettings.vue'
 import ManagerPage from '../components/ManagerPage.vue'
 
 import { SERVER_PROVIDER_PRESETS } from '../provider-catalog'
@@ -124,6 +125,7 @@ function selectProvider(id: string) {
         </div>
 
         <div v-else :class="['max-w-2xl space-y-5']">
+          <AgentRuntimeSettings />
           <div :class="['grid grid-cols-3 gap-4']">
             <FieldInput v-model="manager.configDraft.modelTemperature" type="number" label="Temperature" /><FieldInput v-model="manager.configDraft.modelMaxOutputTokens" type="number" label="最大输出 Tokens" /><FieldInput v-model="manager.configDraft.modelMaxSteps" type="number" label="最大工具步数" />
           </div>
@@ -136,6 +138,23 @@ function selectProvider(id: string) {
             <label :class="['block text-sm']"><span :class="['mb-1.5 block']">思考模式</span><select v-model="manager.configDraft.modelThinkingMode" :class="['h-10 w-full rounded-md border border-neutral-200 bg-transparent px-3 dark:border-neutral-800']"><option value="auto">跟随模型默认</option><option value="enabled">启用</option><option value="disabled">禁用</option></select></label>
             <label :class="['block text-sm']"><span :class="['mb-1.5 block']">推理强度</span><select v-model="manager.configDraft.modelReasoningEffort" :class="['h-10 w-full rounded-md border border-neutral-200 bg-transparent px-3 dark:border-neutral-800']"><option value="auto">自动</option><option value="high">High</option><option value="max">Max</option></select></label>
           </template>
+          <FieldCheckbox
+            v-model="manager.configDraft.directLanguageCandidateLearningEnabled"
+            label="允许私聊创建新的语言候选（兼容模式）"
+            description="默认关闭。私聊反馈仍会调整已有候选，新的表达、黑话与互动行为只从授权学习群获得。"
+          />
+          <div :class="['border-l-2 border-cyan-400/45 pl-4']">
+            <h3 :class="['text-sm font-semibold']">
+              授权学习群的独立归纳器
+            </h3>
+            <p :class="['mt-1 text-xs text-neutral-500']">
+              每类归纳器独立执行、持久化和失败重试，不会互相阻塞。
+            </p>
+          </div>
+          <FieldCheckbox v-model="manager.configDraft.groupExpressionLearningEnabled" label="归纳群聊表达" description="学习口癖、短句、标点和多消息节奏。" />
+          <FieldCheckbox v-model="manager.configDraft.groupJargonLearningEnabled" label="归纳群聊黑话" description="理解网络用语在具体语境里的含义。" />
+          <FieldCheckbox v-model="manager.configDraft.groupBehaviorLearningEnabled" label="归纳群聊互动行为" description="学习接话、追问、吐槽和沉默的社交节奏。" />
+          <FieldCheckbox v-model="manager.configDraft.groupPublicKnowledgeLearningEnabled" label="归纳群聊公共知识" description="仅保存当前批次有证据、允许公开复用的群体知识。" />
           <Button label="保存意识参数" icon="i-solar:diskette-bold-duotone" :loading="manager.busy.value" @click="manager.saveConsciousness" />
         </div>
       </div>

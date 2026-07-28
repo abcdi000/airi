@@ -43,6 +43,7 @@ class LumiPluginConfig:
     log_level: str
     voice_reply_mode: VoiceReplyMode
     random_voice_probability: float
+    send_tool_progress: bool
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "LumiPluginConfig":
@@ -121,7 +122,8 @@ class LumiPluginConfig:
                 raw.get("speech_api_token", raw.get("lumi_api_token", ""))
             ).strip(),
             request_timeout_seconds=_positive_float(
-                raw.get("request_timeout_seconds", 120), "request_timeout_seconds"
+                max(float(raw.get("request_timeout_seconds", 300)), 300),
+                "request_timeout_seconds",
             ),
             connect_timeout_seconds=_positive_float(
                 raw.get("connect_timeout_seconds", 10), "connect_timeout_seconds"
@@ -171,6 +173,7 @@ class LumiPluginConfig:
             log_level=str(raw.get("log_level", "INFO")).upper(),
             voice_reply_mode=cast(VoiceReplyMode, voice_reply_mode),
             random_voice_probability=random_voice_probability,
+            send_tool_progress=bool(raw.get("send_tool_progress", True)),
         )
 
     def should_reply_with_voice(

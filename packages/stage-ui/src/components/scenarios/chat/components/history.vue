@@ -12,6 +12,7 @@ import ChatUserItem from './user-item.vue'
 import { useChatHistoryScroll } from '../composables/use-chat-history-scroll'
 import { chatScrollContainerKey } from '../constants'
 import { getChatHistoryItemKey } from '../utils'
+import { projectHistoryMessage } from './history-message-projection'
 
 const props = withDefaults(defineProps<{
   messages: ChatHistoryItem[]
@@ -64,18 +65,21 @@ function shouldShowPlaceholder(message: ChatHistoryItem) {
   return message.context?.createdAt === ts || message.createdAt === ts
 }
 const fullRenderMessages = computed<ChatHistoryItem[]>(() => {
+  // Preserve array positions so delete/retry actions still address the original
+  // session entry while runtime diagnostics use the assistant card renderer.
+  const visibleMessages = props.messages.map(projectHistoryMessage)
   if (!props.sending)
-    return props.messages
+    return visibleMessages
 
   const streamTs = streamingTs.value
   if (!streamTs)
-    return props.messages
+    return visibleMessages
 
-  const hasStreamAlready = streamTs && props.messages.some(msg => msg?.role === 'assistant' && msg?.createdAt === streamTs)
+  const hasStreamAlready = streamTs && visibleMessages.some(msg => msg?.role === 'assistant' && msg?.createdAt === streamTs)
   if (hasStreamAlready)
-    return props.messages
+    return visibleMessages
 
-  return [...props.messages, streaming.value]
+  return [...visibleMessages, streaming.value]
 })
 
 const pagedStartOffset = ref(0)
@@ -146,13 +150,14 @@ function emitRetryMessage(message: ChatHistoryItem, index: number) {
     <button
       v-if="canLoadEarlier"
       type="button"
-      class="mx-auto my-1 rounded-full border border-primary-200/50 px-3 py-1 text-xs text-primary-600 transition hover:bg-primary-50 dark:border-primary-700/50 dark:text-primary-200 dark:hover:bg-primary-900/30"
+      class="mx-auto my-1 border border-primary-200/50 rounded-full px-3 py-1 text-xs text-primary-600 transition dark:border-primary-700/50 hover:bg-primary-50 dark:text-primary-200 dark:hover:bg-primary-900/30"
       @click="loadEarlierMessages"
     >
       加载更早消息
     </button>
     <template v-for="(message, index) in renderMessages" :key="getChatHistoryItemKey(message, getOriginalIndex(index))">
       <div
+        v-if="message.role === 'error' || message.role === 'assistant' || message.role === 'user'"
         :data-chat-message-index="getOriginalIndex(index)"
         :data-chat-message-key="String(getChatHistoryItemKey(message, getOriginalIndex(index)))"
         :data-chat-message-role="message.role"

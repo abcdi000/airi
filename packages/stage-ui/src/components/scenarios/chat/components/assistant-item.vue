@@ -8,9 +8,11 @@ import { computed } from 'vue'
 import ChatResponsePart from './response-part.vue'
 import ChatToolCallBlock from './tool-call-block.vue'
 
+import { stripInternalLumiOutput } from '../../../../libs/chat-sync'
 import { MarkdownRenderer } from '../../../markdown'
 import { getChatHistoryItemCopyText } from '../utils'
 import { ChatActionMenu } from './action-menu'
+import { parseAssistantDiagnostic } from './assistant-diagnostic'
 import { createToolCallResultLookup, resolveToolCallBlockState } from './tool-call-results'
 
 const props = withDefaults(defineProps<{
@@ -35,16 +37,26 @@ const emit = defineEmits<{
 const resolvedSlices = computed<ChatSlices[]>(() => {
   if (props.message.slices?.length) {
     return props.message.slices
+      .map((slice) => {
+        if (slice.type !== 'text')
+          return slice
+        return {
+          ...slice,
+          text: stripInternalLumiOutput(slice.text),
+        }
+      })
+      .filter(slice => slice.type !== 'text' || slice.text.length > 0)
   }
 
   if (typeof props.message.content === 'string' && props.message.content.trim()) {
-    return [{ type: 'text', text: props.message.content } satisfies ChatSlicesText]
+    const text = stripInternalLumiOutput(props.message.content)
+    return text ? [{ type: 'text', text } satisfies ChatSlicesText] : []
   }
 
   if (Array.isArray(props.message.content)) {
     const textPart = props.message.content.find(part => 'type' in part && part.type === 'text') as { text?: string } | undefined
     if (textPart?.text)
-      return [{ type: 'text', text: textPart.text } satisfies ChatSlicesText]
+      return [{ type: 'text', text: stripInternalLumiOutput(textPart.text) } satisfies ChatSlicesText]
   }
 
   return []
@@ -79,13 +91,13 @@ const containerClass = computed(() => props.variant === 'mobile' ? 'mr-0' : 'mr-
 const boxClasses = computed(() => [
   props.variant === 'mobile' ? 'px-2 py-2 text-sm bg-primary-50/90 dark:bg-primary-950/90' : 'px-3 py-3 bg-primary-50/80 dark:bg-primary-950/80',
 ])
-const copyText = computed(() => getChatHistoryItemCopyText(props.message as ChatHistoryItem))
+const copyText = computed(() => stripInternalLumiOutput(getChatHistoryItemCopyText(props.message as ChatHistoryItem)))
 const plainText = computed(() => resolvedSlices.value
   .filter((slice): slice is ChatSlicesText => slice.type === 'text')
   .map(slice => slice.text)
   .join('\n')
   .trim())
-const debugBubble = computed(() => parseDebugText(plainText.value))
+const debugBubble = computed(() => parseAssistantDiagnostic(props.message))
 const splitBubbleTexts = computed(() => {
   if (!props.splitTextBubbles)
     return []
@@ -105,7 +117,7 @@ const splitBubbleTexts = computed(() => {
   const looksLikeShortChatLines = lineParts.length > 1
     && lineParts.length <= 4
     && lineParts.every(part => part.length <= 180)
-    && lineParts.every(part => !/^\s*(?:[-*+]|\d+[.)]|#{1,6}\s|>\s|\|)/.test(part))
+    && lineParts.every(part => !/^\s*(?:[\-*+|]|\d+[.)]|#{1,6}\s|>\s)/.test(part))
 
   return looksLikeShortChatLines ? lineParts : []
 })
@@ -114,51 +126,26 @@ function stripVisibleAssistantPreamble(text: string) {
   const normalized = text.trim()
   const lines = normalized.split(/\r?\n/)
   for (let index = lines.length - 2; index >= 0; index -= 1) {
-    if (/^\s*(?:AIRI|Lumi|{{char}}|assistant)\s*[:：]?\s*$/i.test(lines[index] ?? '')) {
+    if (/^\s*(?:AIRI|Lumi|\{\{char\}\}|assistant)\s*(?:[:：]\s*)?$/i.test(lines[index] ?? '')) {
       const afterLabel = lines.slice(index + 1).join('\n').trim()
       if (afterLabel)
         return afterLabel
     }
   }
 
-  const responseIntentMatch = normalized.match(/(?:我想回应|我会回应|我应该回应|可以回应|想回应)\s*[:：]\s*([\s\S]+)$/)
-  if (responseIntentMatch?.[1]?.trim())
-    return responseIntentMatch[1].trim()
+  for (const prefix of ['我想回应', '我会回应', '我应该回应', '可以回应', '想回应']) {
+    for (const separator of [':', '：']) {
+      const marker = `${prefix}${separator}`
+      const markerIndex = normalized.lastIndexOf(marker)
+      if (markerIndex < 0)
+        continue
+      const responseText = normalized.slice(markerIndex + marker.length).trim()
+      if (responseText)
+        return responseText
+    }
+  }
 
   return normalized
-}
-
-function parseDebugText(text: string) {
-  const lines = text.trim().split(/\r?\n/)
-  const match = lines[0]?.match(/^\[(memory_search|memory_write|system_notice)\]$/)
-  if (!match)
-    return null
-
-  const kind = match[1] as 'memory_search' | 'memory_write' | 'system_notice'
-  const body = lines.slice(1).join('\n').trim()
-  const status = lines.slice(1).find(line => /^status:/.test(line))?.replace(/^status:\s*/, '')
-  const found = lines.slice(1).find(line => /^found:/.test(line))?.replace(/^found:\s*/, '')
-  const stored = lines.slice(1).find(line => /^stored:/.test(line))?.replace(/^stored:\s*/, '')
-  const activity = lines.slice(1).find(line => /^activity:/.test(line))?.replace(/^activity:\s*/, '')
-  const decision = lines.slice(1).find(line => /^decision:/.test(line))?.replace(/^decision:\s*/, '')
-
-  return {
-    title: kind === 'memory_search'
-      ? '记忆检索'
-      : kind === 'memory_write'
-        ? '记忆写入'
-        : '系统提示',
-    summary: [
-      status ? `状态 ${status}` : undefined,
-      found ? `命中 ${found}` : undefined,
-      stored ? `写入 ${stored}` : undefined,
-      activity ? `活动 ${activity}` : undefined,
-      decision ? `决策 ${decision}` : undefined,
-    ]
-      .filter(Boolean)
-      .join(' · '),
-    body,
-  }
 }
 </script>
 
@@ -173,7 +160,7 @@ function parseDebugText(text: string) {
       <template #default="{ setMeasuredElement }">
         <div
           :ref="setMeasuredElement"
-          class="w-full max-w-176 border border-emerald-200/80 rounded-lg bg-emerald-50/90 px-3 py-2 text-emerald-900 shadow-sm dark:border-emerald-700/50 dark:bg-emerald-950/70 dark:text-emerald-100"
+          class="max-w-176 w-full border border-emerald-200/80 rounded-lg bg-emerald-50/90 px-3 py-2 text-emerald-900 shadow-sm dark:border-emerald-700/50 dark:bg-emerald-950/70 dark:text-emerald-100"
         >
           <details>
             <summary class="cursor-pointer select-none text-sm font-medium outline-none">

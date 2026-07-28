@@ -17,6 +17,11 @@ describe('lumi Server process configuration', () => {
       expect(config.dataDirectory).toBe(join(directory, 'config', 'data'))
       expect(config.languageLearning).toMatchObject({
         enabled: true,
+        directLanguageCandidateLearningEnabled: false,
+        groupExpressionLearningEnabled: true,
+        groupJargonLearningEnabled: true,
+        groupBehaviorLearningEnabled: true,
+        groupPublicKnowledgeLearningEnabled: true,
         maxSelectedExpressions: 3,
         preciseSelectorEnabled: true,
         promptLoggingEnabled: false,
@@ -25,6 +30,17 @@ describe('lumi Server process configuration', () => {
         maxContextTokens: 1_000_000,
         outputReserveTokens: 64_000,
         promptReserveTokens: 32_000,
+      })
+      expect(config.agentRuntime).toMatchObject({
+        promptDirectory: join(directory, 'config', 'prompts'),
+        mode: 'maisaka',
+        plannerMaxRounds: 10,
+        plannerFinalizationMode: 'stop_after_successful_reply',
+        toolMaxConcurrency: 4,
+        deferredToolsEnabled: true,
+        expressionSelectorEnabled: true,
+        directLanguageFeedbackEnabled: true,
+        promptLoggingEnabled: false,
       })
       expect(config.astrbot).toMatchObject({
         privateReplyEnabled: true,
@@ -46,6 +62,7 @@ describe('lumi Server process configuration', () => {
       const legacy = JSON.parse(await readFile(path, 'utf8'))
       delete legacy.astrbot
       delete legacy.languageLearning
+      delete legacy.agentRuntime
       await writeFile(path, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8')
 
       await expect(upgradeLumiServerConfig(path)).resolves.toBe(true)
@@ -60,6 +77,11 @@ describe('lumi Server process configuration', () => {
       expect(upgraded.astrbot.identityBindings).toHaveLength(6)
       expect(upgraded.languageLearning).toMatchObject({
         enabled: true,
+        directLanguageCandidateLearningEnabled: false,
+        groupExpressionLearningEnabled: true,
+        groupJargonLearningEnabled: true,
+        groupBehaviorLearningEnabled: true,
+        groupPublicKnowledgeLearningEnabled: true,
         multiMessageReplyEnabled: true,
         preciseSelectorEnabled: true,
       })
@@ -67,6 +89,12 @@ describe('lumi Server process configuration', () => {
         maxContextTokens: 1_000_000,
         outputReserveTokens: 64_000,
         promptReserveTokens: 32_000,
+      })
+      expect(upgraded.agentRuntime).toMatchObject({
+        promptDirectory: './prompts',
+        mode: 'shadow',
+        plannerMaxRounds: 10,
+        plannerFinalizationMode: 'stop_after_successful_reply',
       })
       expect(upgraded.astrbot.identityBindings).toEqual(expect.arrayContaining([
         {

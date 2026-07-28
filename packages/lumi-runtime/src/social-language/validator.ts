@@ -26,6 +26,11 @@ const STAGE_DIRECTIONS = [
   /^\s*[（(【[][^)\]】]{1,80}(笑|叹气|皱眉|沉默|歪头|摸头|抱|看着|眨眼)[^)\]】]*[）)】\]]/u,
   /\*(smiles?|sighs?|looks?|hugs?|nods?)\*/i,
 ]
+const INTERNAL_RUNTIME_TERMS = [
+  /\b(?:planner|replyer)\b/i,
+  /意图框架|任务框架|语义意图|语义目标|内部运行机制|内部提示词|系统提示词|工具调用/u,
+  /(?:规划器|表达器).{0,12}(?:要求|决定|生成|调用|框架|意图)/u,
+]
 
 /**
  * Validates semantic and character invariants before a visible reply is sent.
@@ -50,8 +55,6 @@ export function validateLumiVisibleReply(input: {
   if (input.intent.defenseState.refusalRequired) {
     if (SOFTENED_HELP.some(pattern => pattern.test(normalized)))
       issues.push('Required refusal was softened into an offer of help.')
-    if (!looksLikeRefusal(normalized))
-      issues.push('Required refusal is not explicit in the final reply.')
   }
   if (input.intent.attitude.willingnessToHelp === 'unwilling' || input.intent.attitude.willingnessToHelp === 'refuse') {
     if (SOFTENED_HELP.some(pattern => pattern.test(normalized)))
@@ -69,6 +72,8 @@ export function validateLumiVisibleReply(input: {
     issues.push('Reply contains a bracketed stage direction.')
   if (/```(?:json)?|"(?:shouldReply|replyAct|semanticGoal|immutableConstraints)"\s*:/i.test(normalized))
     issues.push('Reply leaks internal JSON or Planner labels.')
+  if (INTERNAL_RUNTIME_TERMS.some(pattern => pattern.test(normalized)))
+    issues.push('Reply leaks internal runtime terminology.')
   if (looksLikeUnnecessaryOutline(normalized) && input.intent.expressionIntent.desiredLength !== 'long')
     issues.push('Reply introduced an unnecessary assistant-style outline.')
   if (repeatsQuestionAsHeading(normalized))
@@ -109,12 +114,6 @@ function normalizeReplyForComparison(text: string) {
     .trim()
     .replace(/\s+/g, ' ')
     .toLocaleLowerCase()
-}
-
-function looksLikeRefusal(text: string) {
-  return /(?:^|[，。！？\s])(?:不|不行|不能|拒绝|不想|不会|到此为止|别)(?:[，。！？\s]|$)/u.test(text)
-    || /(?:^|[，。！？\s])(?:不改|不帮|不弄|不做|不想|不愿|不会|不能)(?:[，。！？\s]|$)/u.test(text)
-    || /\b(?:no|won't|refuse|cannot|can't)\b/i.test(text)
 }
 
 function looksLikeAdvice(text: string) {

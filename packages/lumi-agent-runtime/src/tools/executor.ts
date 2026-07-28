@@ -113,16 +113,26 @@ async function executeWithTimeout(
 ): Promise<ToolExecutionResult> {
   if (spec.idempotencyPolicy === 'required' && !invocation.idempotencyKey)
     throw new ToolPlanValidationError(`Tool ${spec.name} requires an idempotency key`)
+  if (parentSignal?.aborted)
+    throw parentSignal.reason ?? new Error(`Tool ${spec.name} was aborted`)
 
   const controller = new AbortController()
   const abortFromParent = (): void => controller.abort(parentSignal?.reason)
-  if (parentSignal?.aborted)
-    abortFromParent()
-  else
-    parentSignal?.addEventListener('abort', abortFromParent, { once: true })
+  parentSignal?.addEventListener('abort', abortFromParent, { once: true })
 
   let timeout: ReturnType<typeof setTimeout> | undefined
+  let rejectOnAbort: (() => void) | undefined
   try {
+    const aborted = new Promise<ToolExecutionResult>((_resolve, reject) => {
+      rejectOnAbort = () => {
+        reject(controller.signal.reason ?? new Error(`Tool ${spec.name} was aborted`))
+      }
+      controller.signal.addEventListener('abort', rejectOnAbort, { once: true })
+    })
+    timeout = setTimeout(() => {
+      controller.abort(new Error(`Tool ${spec.name} timed out after ${timeoutMs} ms`))
+    }, timeoutMs)
+
     return await Promise.race([
       spec.handler({
         invocation,
@@ -130,17 +140,14 @@ async function executeWithTimeout(
         personId: context.personId,
         signal: controller.signal,
       }),
-      new Promise<ToolExecutionResult>((_resolve, reject) => {
-        timeout = setTimeout(() => {
-          controller.abort(new Error(`Tool ${spec.name} timed out after ${timeoutMs} ms`))
-          reject(new Error(`Tool ${spec.name} timed out after ${timeoutMs} ms`))
-        }, timeoutMs)
-      }),
+      aborted,
     ])
   }
   finally {
     if (timeout)
       clearTimeout(timeout)
+    if (rejectOnAbort)
+      controller.signal.removeEventListener('abort', rejectOnAbort)
     parentSignal?.removeEventListener('abort', abortFromParent)
   }
 }
@@ -167,14 +174,28 @@ async function executeStep(
       errorMessage: `Tool not found: ${step.toolName}`,
     }
   }
+  if (!await registry.canExecute(step.toolName, context)) {
+    return {
+      stepId: step.id,
+      toolName: step.toolName,
+      success: false,
+      skipped: true,
+      optional: step.optional ?? false,
+      startedAt,
+      finishedAt: Date.now(),
+      errorCode: 'TOOL_NOT_AVAILABLE',
+      errorMessage: `Tool is not available in the current runtime context: ${step.toolName}`,
+    }
+  }
 
   try {
+    const effectiveTimeoutMs = boundedInteger(spec.timeoutMs, timeoutMs, 10, 600_000)
     const result = await executeWithTimeout(spec, {
       callId: step.id,
       toolName: step.toolName,
       arguments: step.arguments,
       idempotencyKey: step.idempotencyKey,
-    }, context, timeoutMs, signal)
+    }, context, effectiveTimeoutMs, signal)
     return {
       stepId: step.id,
       toolName: step.toolName,
@@ -201,7 +222,11 @@ async function executeStep(
       optional: step.optional ?? false,
       startedAt,
       finishedAt: Date.now(),
-      errorCode: error instanceof ToolPlanValidationError ? 'INVALID_INVOCATION' : 'TOOL_EXECUTION_ERROR',
+      errorCode: error instanceof ToolPlanValidationError
+        ? 'INVALID_INVOCATION'
+        : signal?.aborted
+          ? 'TOOL_EXECUTION_ABORTED'
+          : 'TOOL_EXECUTION_ERROR',
       errorMessage: errorMessageFrom(error) ?? 'Tool execution failed',
     }
   }

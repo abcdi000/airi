@@ -1,14 +1,15 @@
+import type { PersistedSessionState } from '@proj-airi/lumi-agent-runtime'
 import type {
   LumiOnlineConversation,
   LumiOnlineMessage,
   LumiOnlinePerson,
 } from '@proj-airi/lumi-online'
 import type {
+  LumiConversationSummary,
   LumiMemoryCandidate,
   LumiMemoryFragment,
   LumiMemorySearchRequest,
   LumiMemoryStatus,
-  LumiConversationSummary,
   SocialLanguageSnapshot,
 } from '@proj-airi/lumi-runtime'
 
@@ -64,6 +65,7 @@ export interface LumiServerBackupV1 {
     conversationMembers: SqliteRow[]
     messages: SqliteRow[]
     conversationSummaries?: SqliteRow[]
+    agentSessions?: SqliteRow[]
     deliveryReceipts: SqliteRow[]
     memories: SqliteRow[]
     memoryVectors: SqliteRow[]
@@ -330,6 +332,48 @@ export class LumiServerDatabase {
       summary.estimatedSourceTokens,
       finiteTimestamp(summary.updatedAt),
     )
+  }
+
+  /** Restores the host-managed Agent Runtime state for one direct conversation. */
+  loadAgentSession(conversationId: string): PersistedSessionState | undefined {
+    const normalizedConversationId = requiredText(conversationId, 'conversationId', 240)
+    const row = this.row(
+      'SELECT state_json FROM lumi_agent_sessions WHERE conversation_id = ?',
+      normalizedConversationId,
+    )
+    if (!row)
+      return undefined
+    return parsePersistedAgentSession(row.state_json, normalizedConversationId)
+  }
+
+  /** Lists direct sessions whose persisted Planner wait must be re-armed. */
+  listWaitingAgentSessionIds(): string[] {
+    return this.rows(
+      'SELECT conversation_id, state_json FROM lumi_agent_sessions ORDER BY conversation_id',
+    ).flatMap((row) => {
+      const conversationId = String(row.conversation_id)
+      const state = parsePersistedAgentSession(row.state_json, conversationId)
+      return state.waitState?.continuation ? [conversationId] : []
+    })
+  }
+
+  /** Atomically replaces one direct conversation's host-managed runtime state. */
+  saveAgentSession(state: PersistedSessionState): void {
+    const conversationId = requiredText(state.conversationId, 'conversationId', 240)
+    const conversation = this.row(
+      'SELECT type FROM lumi_conversations WHERE id = ?',
+      conversationId,
+    )
+    if (!conversation || conversation.type !== 'direct')
+      throw new Error('Agent Runtime state requires an existing direct conversation')
+    const validated = parsePersistedAgentSession(JSON.stringify(state), conversationId)
+    this.database.prepare(`
+      INSERT INTO lumi_agent_sessions (conversation_id, state_json, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(conversation_id) DO UPDATE SET
+        state_json = excluded.state_json,
+        updated_at = excluded.updated_at
+    `).run(conversationId, JSON.stringify(validated), Date.now())
   }
 
   /** Returns a client-safe person resolved from a Better Auth user id. */
@@ -1119,6 +1163,7 @@ export class LumiServerDatabase {
         conversationMembers: this.rows('SELECT * FROM lumi_conversation_members ORDER BY conversation_id, person_id'),
         messages: this.rows('SELECT * FROM lumi_messages ORDER BY conversation_id, sequence'),
         conversationSummaries: this.rows('SELECT * FROM lumi_conversation_summaries ORDER BY conversation_id'),
+        agentSessions: this.rows('SELECT * FROM lumi_agent_sessions ORDER BY conversation_id'),
         deliveryReceipts: this.rows('SELECT * FROM lumi_delivery_receipts ORDER BY accepted_at ASC'),
         memories: this.rows('SELECT * FROM lumi_memories ORDER BY created_at ASC'),
         memoryVectors: this.rows('SELECT * FROM lumi_memory_vectors ORDER BY memory_id ASC'),
@@ -1151,6 +1196,7 @@ export class LumiServerDatabase {
           'lumi_delivery_receipts',
           'lumi_messages',
           'lumi_conversation_summaries',
+          'lumi_agent_sessions',
           'lumi_conversation_members',
           'lumi_memory_vectors',
           'lumi_memories',
@@ -1190,6 +1236,7 @@ export class LumiServerDatabase {
         this.insertRows('lumi_invitations', sections.invitations)
         this.insertRows('lumi_messages', sections.messages)
         this.insertRows('lumi_conversation_summaries', sections.conversationSummaries ?? [])
+        this.insertRows('lumi_agent_sessions', sections.agentSessions ?? [])
         this.insertRows('lumi_delivery_receipts', sections.deliveryReceipts)
         this.insertRows('lumi_memories', sections.memories)
         this.insertRows('lumi_memory_vectors', sections.memoryVectors)
@@ -1573,6 +1620,13 @@ export class LumiServerDatabase {
         FOREIGN KEY(through_message_id) REFERENCES lumi_messages(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS lumi_agent_sessions (
+        conversation_id TEXT PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(conversation_id) REFERENCES lumi_conversations(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS lumi_social_language_snapshot (
         id TEXT PRIMARY KEY,
         snapshot_json TEXT NOT NULL,
@@ -1910,6 +1964,41 @@ function parseJsonStringArray(value: SqliteValue): string[] {
   if (!Array.isArray(parsed) || !parsed.every(item => typeof item === 'string'))
     throw new Error('Stored JSON value is not a string array')
   return parsed
+}
+
+function parsePersistedAgentSession(
+  value: SqliteValue,
+  expectedConversationId: string,
+): PersistedSessionState {
+  const parsed = parseJsonObject(value)
+  if (parsed.conversationId !== expectedConversationId)
+    throw new Error('Stored Agent Runtime conversation does not match its database key')
+  for (const field of ['contextEpoch', 'summaryVersion', 'generation'] as const) {
+    if (!Number.isInteger(parsed[field]) || Number(parsed[field]) < 0)
+      throw new Error(`Stored Agent Runtime ${field} is invalid`)
+  }
+  for (const field of ['stablePrefixHash', 'dialogueSegmentId'] as const) {
+    if (typeof parsed[field] !== 'string')
+      throw new Error(`Stored Agent Runtime ${field} is invalid`)
+  }
+  if (!Array.isArray(parsed.history) || !Array.isArray(parsed.completedEvents))
+    throw new Error('Stored Agent Runtime ledgers are invalid')
+  if (parsed.waitState !== undefined) {
+    const waitState = parsed.waitState
+    if (!waitState || typeof waitState !== 'object' || Array.isArray(waitState))
+      throw new Error('Stored Agent Runtime wait state is invalid')
+  }
+  return {
+    conversationId: expectedConversationId,
+    contextEpoch: Number(parsed.contextEpoch),
+    summaryVersion: Number(parsed.summaryVersion),
+    stablePrefixHash: String(parsed.stablePrefixHash),
+    dialogueSegmentId: String(parsed.dialogueSegmentId),
+    generation: Number(parsed.generation),
+    history: parsed.history as PersistedSessionState['history'],
+    waitState: parsed.waitState as PersistedSessionState['waitState'],
+    completedEvents: parsed.completedEvents as PersistedSessionState['completedEvents'],
+  }
 }
 
 function finiteVector(value: unknown): number[] {

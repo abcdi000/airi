@@ -53,6 +53,7 @@ export abstract class BaseBrowserBackend {
   protected runtimeInfo: BrowserRuntimeInfo | undefined
   protected startPromise: Promise<void> | undefined
   protected closePromise: Promise<void> | undefined
+  private contextCleanupPromise: Promise<void> | undefined
 
   protected constructor(
     protected readonly settings: BrowserLaunchSettings,
@@ -63,7 +64,11 @@ export abstract class BaseBrowserBackend {
   protected abstract startInternal(): Promise<void>
 
   start(): Promise<void> {
-    this.startPromise ??= this.startInternal().catch(async (error) => {
+    this.startPromise ??= (async () => {
+      await this.contextCleanupPromise
+      this.contextCleanupPromise = undefined
+      await this.startInternal()
+    })().catch(async (error) => {
       this.startPromise = undefined
       await this.releaseResources()
       throw error
@@ -102,6 +107,56 @@ export abstract class BaseBrowserBackend {
     return await this.browser.newContext(options)
   }
 
+  /**
+   * Tracks a newly opened context and invalidates the backend if Chromium closes it.
+   *
+   * Use when:
+   * - A concrete backend has opened its persistent or temporary context
+   * - The MCP `browser_close` tool or a user may close the visible browser window
+   *
+   * Expects:
+   * - The context belongs to the currently acquired profile lease
+   *
+   * Returns:
+   * - Nothing; subsequent {@link getContext} calls reopen the configured backend
+   */
+  protected attachContext(context: BrowserContextLike): void {
+    this.context = context
+    context.once('close', () => {
+      if (this.context !== context)
+        return
+
+      const browser = this.browser
+      const lease = this.profileLease
+      this.context = undefined
+      this.browser = undefined
+      this.profileLease = undefined
+      this.runtimeInfo = undefined
+      this.startPromise = undefined
+
+      // NOTICE:
+      // A Playwright MCP browser_close call and a user closing the headed Chrome window both
+      // close the context without calling BrowserBackend.close(). The old implementation kept
+      // returning that dead context forever. Wait for its profile lock to be released before
+      // reopening so the persistent Lumi profile is never opened concurrently.
+      // Removal condition: the upstream MCP owns a restart-aware browser lifecycle.
+      const cleanupPromise = (async () => {
+        try {
+          await browser?.close()
+        }
+        finally {
+          await lease?.release()
+        }
+      })()
+      const trackedCleanup = cleanupPromise.catch(() => undefined)
+      this.contextCleanupPromise = trackedCleanup
+      void trackedCleanup.then(() => {
+        if (this.contextCleanupPromise === trackedCleanup)
+          this.contextCleanupPromise = undefined
+      })
+    })
+  }
+
   protected setRuntimeInfo(backend: BrowserRuntimeInfo['backend'], backendVersion: string): void {
     this.runtimeInfo = {
       backend,
@@ -117,6 +172,8 @@ export abstract class BaseBrowserBackend {
   }
 
   private async releaseResources(): Promise<void> {
+    await this.contextCleanupPromise
+    this.contextCleanupPromise = undefined
     const context = this.context
     const browser = this.browser
     const lease = this.profileLease

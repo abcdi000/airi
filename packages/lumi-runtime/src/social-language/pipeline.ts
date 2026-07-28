@@ -242,6 +242,7 @@ export async function runLumiSocialLanguagePipeline(
     realizedExpressions: reply.appliedExpressionIds ?? [],
     selectedExpressionReasons: Object.fromEntries(selectedExpressions.map(candidate => [candidate.expression.id, candidate.reasons])),
     selectedBehaviors: selectedBehaviorRecords.map(candidate => candidate.behavior.id),
+    selectedJargon: selectedJargon.map(candidate => candidate.id),
     replyerPromptSnapshot: input.config.promptLoggingEnabled ? promptMessages : undefined,
     contextProjection: {
       replyerHistoryTokens: replyerContext.estimatedHistoryTokens,

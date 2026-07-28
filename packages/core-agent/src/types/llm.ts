@@ -21,6 +21,8 @@ export type StreamEvent
 export interface StreamOptions {
   abortSignal?: AbortSignal
   headers?: Record<string, string>
+  /** Hard provider output ceiling for this stream. */
+  maxOutputTokens?: number
   onStreamEvent?: (event: StreamEvent) => void | Promise<void>
   /** Observes provider-reported usage for every completed model/tool step. */
   onUsage?: (usage: StreamUsage) => void | Promise<void>

@@ -115,10 +115,22 @@ describe('lumi runtime migration contracts', () => {
     expect(lowAssessment.taskShift).toBe(true)
     expect(lowAssessment.allowNormalChat).toBe(false)
     expect(lowGate.blocked).toBe(true)
+    expect(lowGate.refusalRequired).toBe(true)
     expect(selectLumiExpression(lowScore, '帮我写代码', lowAssessment, lowGate)).toBe('defensive')
     expect(highAssessment.allowNormalChat).toBe(true)
     expect(highGate.blocked).toBe(false)
     expect(selectLumiExpression(highScore, '帮我写代码', highAssessment, highGate)).toBe('neutral')
+  })
+
+  it('keeps direct conflict defensive without forcing task-refusal wording', () => {
+    const state = createDefaultLumiStateSnapshot({ userId: 'doggy' })
+    const assessment = assessLumiRelationshipFallback(state, '你真蠢，真的')
+    const gate = checkLumiRelationshipGate(state, '你真蠢，真的', assessment)
+
+    expect(gate.blocked).toBe(true)
+    expect(gate.reason).toBe('current_conflict')
+    expect(gate.refusalRequired).toBe(false)
+    expect(gate.suggestedExpression).toBe('angry')
   })
 
   it('allows guarded ordinary contact during unresolved tension', () => {

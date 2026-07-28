@@ -6,6 +6,7 @@ import {
   deserializeBackgroundEntries,
   exportLumiLocalStorageSnapshot,
   isLumiDataArchivePayload,
+  LUMI_ARCHIVE_LOCAL_STORAGE_KEYS,
   LUMI_DATA_ARCHIVE_FORMAT,
   LUMI_DATA_ARCHIVE_FORMAT_V1,
   LUMI_DATA_ARCHIVE_FORMAT_V2,
@@ -21,6 +22,12 @@ afterEach(() => {
 })
 
 describe('lumi data archive helpers', () => {
+  it('includes shared Agent Runtime migration settings in Lumi archives', () => {
+    expect(LUMI_ARCHIVE_LOCAL_STORAGE_KEYS).toContain('settings/lumi/shared-agent-runtime/mode')
+    expect(LUMI_ARCHIVE_LOCAL_STORAGE_KEYS).toContain('settings/lumi/shared-agent-runtime/planner-finalization-mode')
+    expect(LUMI_ARCHIVE_LOCAL_STORAGE_KEYS).toContain('settings/lumi/shared-agent-runtime/context-compaction-threshold-tokens')
+  })
+
   it('filters localStorage restore to the Lumi archive allowlist', () => {
     localStorage.setItem('settings/plugins/lumi-proactive-vision/private-notes', '[]')
 

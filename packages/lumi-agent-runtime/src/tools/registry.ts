@@ -62,6 +62,20 @@ export interface ToolSpec {
   description: string
   inputSchema: Readonly<Record<string, unknown>>
   outputSchema?: Readonly<Record<string, unknown>>
+  /**
+   * Exact user-language fragments that make this tool mandatory before reply.
+   *
+   * Use only for explicit commands such as "从记忆里查"; ordinary intent
+   * inference remains the Planner's responsibility.
+   */
+  explicitInvocationHints?: readonly string[]
+  /**
+   * Tool-specific execution timeout in milliseconds.
+   *
+   * Use only when a tool owns a bounded multi-stage workflow whose legitimate
+   * duration is longer than the runtime-wide default.
+   */
+  timeoutMs?: number
   provider: string
   visibility: ToolVisibility
   stage: ToolStage
@@ -87,6 +101,78 @@ function normalizeSearchText(value: string): string {
   return value.trim().toLocaleLowerCase()
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Normalizes host and legacy Tool Mesh schemas into provider-safe JSON Schema.
+ *
+ * Before:
+ * - `{}`
+ * - `{ query: "string?", limit: "number?" }`
+ *
+ * After:
+ * - `{ type: "object", properties: {}, additionalProperties: false }`
+ * - A root object schema with typed `query` and `limit` properties
+ */
+function normalizeInputSchema(schema: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  if (schema.type === 'object') {
+    return {
+      ...schema,
+      type: 'object',
+      properties: isRecord(schema.properties) ? schema.properties : {},
+      additionalProperties: schema.additionalProperties ?? false,
+    }
+  }
+
+  const entries = Object.entries(schema)
+  const isLegacyShape = entries.every(([, descriptor]) => typeof descriptor === 'string')
+  if (!isLegacyShape) {
+    return {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    }
+  }
+
+  const properties: Record<string, unknown> = {}
+  const required: string[] = []
+  for (const [name, rawDescriptor] of entries) {
+    const descriptor = String(rawDescriptor)
+    const optional = descriptor.endsWith('?')
+    const typeName = optional ? descriptor.slice(0, -1) : descriptor
+    properties[name] = legacyPropertySchema(typeName)
+    if (!optional)
+      required.push(name)
+  }
+
+  return {
+    type: 'object',
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+    additionalProperties: false,
+  }
+}
+
+function legacyPropertySchema(descriptor: string): Readonly<Record<string, unknown>> {
+  if (descriptor.endsWith('[]')) {
+    return {
+      type: 'array',
+      items: legacyPropertySchema(descriptor.slice(0, -2)),
+    }
+  }
+  if (descriptor === 'string')
+    return { type: 'string' }
+  if (descriptor === 'number')
+    return { type: 'number' }
+  if (descriptor === 'integer')
+    return { type: 'integer' }
+  if (descriptor === 'boolean')
+    return { type: 'boolean' }
+  return { type: 'object', additionalProperties: true }
+}
+
 /**
  * Stores canonical ToolSpecs and resolves stage-specific availability.
  */
@@ -101,7 +187,11 @@ export class ToolRegistry {
       throw new ToolRegistryError(`Tool already registered: ${name}`)
     if (spec.chatScope === 'group_observation' && spec.sideEffectType !== 'none' && spec.sideEffectType !== 'read')
       throw new ToolRegistryError(`Group observation tool cannot have outbound side effects: ${name}`)
-    this.#tools.set(name, Object.freeze({ ...spec, name }))
+    this.#tools.set(name, Object.freeze({
+      ...spec,
+      name,
+      inputSchema: normalizeInputSchema(spec.inputSchema),
+    }))
   }
 
   get(name: string): ToolSpec | undefined {
@@ -110,6 +200,32 @@ export class ToolRegistry {
 
   list(): readonly ToolSpec[] {
     return [...this.#tools.values()]
+  }
+
+  /**
+   * Revalidates execution policy independently from Planner tool visibility.
+   *
+   * Use when:
+   * - A model-emitted tool call is about to execute
+   * - A caller must not trust that the tool name came from the advertised list
+   *
+   * Expects:
+   * - Direct-chat availability context from the owning session
+   *
+   * Returns:
+   * - Whether scope, shadow-mode, and host availability policy allow execution
+   */
+  async canExecute(name: string, context: ToolAvailabilityContext): Promise<boolean> {
+    const spec = this.#tools.get(name)
+    if (!spec)
+      return false
+    if (spec.chatScope !== 'both' && spec.chatScope !== 'direct')
+      return false
+    if (spec.requiredScopes.some(scope => !context.grantedScopes.has(scope)))
+      return false
+    if (context.runtimeMode === 'shadow' && spec.sideEffectType !== 'none' && spec.sideEffectType !== 'read')
+      return false
+    return !spec.availability || await spec.availability(context)
   }
 
   async listAvailable(
@@ -132,11 +248,7 @@ export class ToolRegistry {
         continue
       if (!effectivelyVisible && options.visibility !== 'deferred')
         continue
-      if (spec.requiredScopes.some(scope => !context.grantedScopes.has(scope)))
-        continue
-      if (context.runtimeMode === 'shadow' && spec.sideEffectType !== 'none' && spec.sideEffectType !== 'read')
-        continue
-      if (spec.availability && !await spec.availability(context))
+      if (!await this.canExecute(spec.name, context))
         continue
       available.push(spec)
     }
@@ -166,6 +278,31 @@ export class ToolRegistry {
       .sort((left, right) => right.score - left.score || left.spec.name.localeCompare(right.spec.name))
       .slice(0, boundedLimit)
       .map(item => item.spec)
+  }
+
+  /**
+   * Finds tools explicitly requested in the current user message.
+   *
+   * Use when:
+   * - A user names a capability and the runtime must prevent a fake execution
+   *
+   * Expects:
+   * - Only the current user message, never accumulated conversation history
+   *
+   * Returns:
+   * - Available tools whose declared command fragments occur in the message
+   */
+  matchExplicitRequests(text: string, available: readonly ToolSpec[]): readonly ToolSpec[] {
+    const normalizedText = normalizeSearchText(text)
+    if (!normalizedText)
+      return []
+    return available.filter((spec) => {
+      const normalizedName = normalizeSearchText(spec.name)
+      return normalizedText.includes(normalizedName)
+        || spec.explicitInvocationHints?.some(hint =>
+          normalizedText.includes(normalizeSearchText(hint)),
+        )
+    })
   }
 
   toPlannerDefinitions(specs: readonly ToolSpec[]): readonly PlannerToolDefinition[] {

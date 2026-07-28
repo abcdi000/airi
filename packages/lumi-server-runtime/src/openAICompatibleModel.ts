@@ -1,4 +1,12 @@
-import type { Tool } from '@xsai/shared-chat'
+import type {
+  LanguageModelPort,
+  PlannerMessage,
+  PlannerModelPort,
+  PlannerToolCall,
+  PlannerToolDefinition,
+} from '@proj-airi/lumi-agent-runtime'
+import type { GenerateTextResponse } from '@xsai/generate-text'
+import type { AssistantMessage, Message, Tool } from '@xsai/shared-chat'
 
 import type {
   LumiConsciousnessCurationResult,
@@ -7,12 +15,18 @@ import type {
 } from './consciousness'
 
 import {
+  parsePlannerToolArguments,
+  PlannerResponseFormatError,
+} from '@proj-airi/lumi-agent-runtime'
+import {
   buildLumiMemoryCuratorPrompt,
   buildLumiMemoryCuratorUserPayload,
   buildSocialLanguageLearningMessages,
   parseLumiMemoryCuratorDocument,
   parseLumiMemoryCuratorOutput,
 } from '@proj-airi/lumi-runtime'
+import { generateText } from '@xsai/generate-text'
+import { chat } from '@xsai/shared-chat'
 import { streamText } from '@xsai/stream-text'
 
 export interface LumiServerToolProvider {
@@ -37,6 +51,128 @@ export interface OpenAICompatibleConsciousnessOptions {
   fetch?: typeof globalThis.fetch
   /** Runs Lumi's existing JSON memory curator after each successful reply. @default true */
   curateMemories?: boolean
+  /**
+   * Allows private turns to request new social-language candidates.
+   *
+   * Group candidate learning uses the separate observation runtime.
+   * @default false
+   */
+  directLanguageCandidateLearningEnabled?: boolean
+}
+
+/** Configuration for the host-managed Lumi Agent Runtime model adapters. */
+export type OpenAICompatibleAgentModelOptions = Omit<
+  OpenAICompatibleConsciousnessOptions,
+  | 'curateMemories'
+  | 'directLanguageCandidateLearningEnabled'
+  | 'maxSteps'
+  | 'toolProvider'
+>
+
+/** Model ports consumed by the shared host-managed Lumi Agent Runtime. */
+export interface OpenAICompatibleAgentModels {
+  /** Exactly one Planner request. The adapter never executes returned tools. */
+  plannerModel: PlannerModelPort
+  /** Tool-free requests used by Replyer, learning, and context compaction. */
+  languageModel: LanguageModelPort
+}
+
+interface OpenAICompatiblePlannerResponse extends GenerateTextResponse {
+  usage: GenerateTextResponse['usage'] & {
+    prompt_cache_hit_tokens?: number
+    prompt_cache_miss_tokens?: number
+  }
+}
+
+/**
+ * Creates single-step model ports for the host-managed Lumi Agent Runtime.
+ *
+ * Use when:
+ * - Lumi Agent Runtime, rather than xsAI, owns tool execution and continuation
+ * - Planner tool calls must be audited before any side effect
+ *
+ * Expects:
+ * - Planner messages and tools have already passed runtime authorization
+ *
+ * Returns:
+ * - A one-request Planner adapter and a tool-free language adapter
+ */
+export function createOpenAICompatibleAgentModels(
+  options: OpenAICompatibleAgentModelOptions,
+): OpenAICompatibleAgentModels {
+  const baseURL = normalizeBaseURL(options.baseURL)
+  const model = requiredText(options.model, 'model', 240)
+  validateSamplingOptions(options)
+  const fetch = providerFetch(options)
+
+  return {
+    plannerModel: {
+      async generateStep(input) {
+        // NOTICE:
+        // `generateText()` executes every returned tool before evaluating its
+        // stop condition in xsAI 0.5.0-beta.2. Lumi must authorize and execute
+        // tools itself, so this boundary deliberately uses xsAI's public raw
+        // `chat()` call and parses exactly one response.
+        // Source/context: `@xsai/generate-text/dist/index.js`, tool execution
+        // before `shouldStop(...)`.
+        // Removal condition: xsAI exposes a first-class no-execute single-step
+        // API that returns parsed tool calls.
+        const response = await chat({
+          abortSignal: input.signal,
+          apiKey: options.apiKey?.trim() || undefined,
+          baseURL,
+          model,
+          messages: input.messages.map(message => toXsaiMessage(
+            message,
+            options.providerId === 'deepseek' && options.thinkingMode !== 'disabled',
+          )),
+          temperature: options.temperature,
+          maxTokens: options.maxOutputTokens,
+          tools: input.tools.length > 0
+            ? input.tools.map(toXsaiTool)
+            : undefined,
+          toolChoice: input.tools.length > 0
+            ? (input.toolChoice ?? 'required')
+            : undefined,
+          fetch,
+        })
+        const document = await response.json() as OpenAICompatiblePlannerResponse
+        const choice = document.choices?.[0]
+        if (!choice?.message)
+          throw new Error('Planner model returned no message choice')
+        return {
+          content: assistantText(choice.message),
+          reasoning: choice.message.reasoning ?? choice.message.reasoning_content,
+          toolCalls: parsePlannerToolCalls(choice.message),
+          usage: {
+            inputTokens: document.usage?.prompt_tokens,
+            outputTokens: document.usage?.completion_tokens,
+            cacheHitTokens: document.usage?.prompt_cache_hit_tokens,
+            cacheMissTokens: document.usage?.prompt_cache_miss_tokens,
+          },
+          modelName: document.model || model,
+        }
+      },
+    },
+    languageModel: {
+      async generate(messages, _purpose, signal, requestOptions) {
+        const result = await generateText({
+          abortSignal: signal,
+          apiKey: options.apiKey?.trim() || undefined,
+          baseURL,
+          model,
+          messages: messages.map(message => ({
+            role: message.role,
+            content: message.content,
+          })),
+          temperature: options.temperature,
+          maxTokens: boundedOutputTokens(options.maxOutputTokens, requestOptions?.maxOutputTokens),
+          fetch,
+        })
+        return result.text ?? ''
+      },
+    },
+  }
 }
 
 /**
@@ -59,10 +195,7 @@ export function createOpenAICompatibleConsciousnessModel(
   const baseURL = normalizeBaseURL(options.baseURL)
   const model = requiredText(options.model, 'model', 240)
   const maxSteps = boundedInteger(options.maxSteps ?? 8, 1, 64, 'maxSteps')
-  if (options.temperature !== undefined && (!Number.isFinite(options.temperature) || options.temperature < 0 || options.temperature > 2))
-    throw new Error('temperature must be between 0 and 2')
-  if (options.maxOutputTokens !== undefined)
-    boundedInteger(options.maxOutputTokens, 1, 1_000_000, 'maxOutputTokens')
+  validateSamplingOptions(options)
 
   return {
     async generate(request, emitDelta) {
@@ -152,38 +285,40 @@ export function createOpenAICompatibleConsciousnessModel(
           // Model curation is post-reply enrichment; failure leaves memory unchanged.
         }
       }
-      try {
-        const learning = streamText({
-          apiKey: options.apiKey?.trim() || undefined,
-          baseURL,
-          model,
-          messages: buildSocialLanguageLearningMessages({
-            evidence: {
-              messageId: request.sourceMessageId ?? request.conversationId,
-              text: source,
-              personId: request.actorPersonId,
-              conversationId: request.conversationId,
-              platform: 'lumi-online',
-              timestamp: Date.now(),
-              source: 'human',
-              sourceKind: request.conversationType === 'group' ? 'group_chat' : 'chat',
-              authorVerified: true,
-            },
-            recentContext: request.messages
-              .filter((message): message is typeof message & { role: 'user' | 'assistant' } =>
-                message.role === 'user' || message.role === 'assistant')
-              .slice(-8)
-              .map(message => ({ role: message.role, content: message.content })),
-          }),
-          temperature: 0,
-          maxTokens: 1_500,
-          maxSteps: 1,
-          fetch: providerFetch(options),
-        })
-        result.socialLanguageLearningOutput = await consumeTextResponse(learning)
-      }
-      catch {
-        // Deterministic expression learning remains available.
+      if (request.conversationType === 'direct' && options.directLanguageCandidateLearningEnabled === true) {
+        try {
+          const learning = streamText({
+            apiKey: options.apiKey?.trim() || undefined,
+            baseURL,
+            model,
+            messages: buildSocialLanguageLearningMessages({
+              evidence: {
+                messageId: request.sourceMessageId ?? request.conversationId,
+                text: source,
+                personId: request.actorPersonId,
+                conversationId: request.conversationId,
+                platform: 'lumi-online',
+                timestamp: Date.now(),
+                source: 'human',
+                sourceKind: 'chat',
+                authorVerified: true,
+              },
+              recentContext: request.messages
+                .filter((message): message is typeof message & { role: 'user' | 'assistant' } =>
+                  message.role === 'user' || message.role === 'assistant')
+                .slice(-8)
+                .map(message => ({ role: message.role, content: message.content })),
+            }),
+            temperature: 0,
+            maxTokens: 1_500,
+            maxSteps: 1,
+            fetch: providerFetch(options),
+          })
+          result.socialLanguageLearningOutput = await consumeTextResponse(learning)
+        }
+        catch {
+          // Candidate curation is optional post-reply enrichment.
+        }
       }
       return result
     },
@@ -207,6 +342,16 @@ function providerFetch(options: OpenAICompatibleConsciousnessOptions) {
     const body = JSON.parse(init.body) as Record<string, unknown>
     const thinkingMode = options.thinkingMode ?? 'auto'
     const reasoningEffort = options.reasoningEffort ?? 'auto'
+    // NOTICE:
+    // DeepSeek V4 thinking supports tools but rejects `tool_choice`. Keep the
+    // tools themselves and let V4 select them; an explicitly disabled thinking
+    // mode retains the provider-neutral Planner requirement.
+    // Source/context: `https://api-docs.deepseek.com/zh-cn/guides/thinking_mode`
+    // and `https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/oh_my_pi`.
+    // Removal condition: DeepSeek documents and accepts `tool_choice` in V4
+    // thinking requests.
+    if (thinkingMode !== 'disabled')
+      delete body.tool_choice
     if (thinkingMode !== 'auto')
       body.thinking = { type: thinkingMode }
     if (reasoningEffort !== 'auto')
@@ -223,6 +368,107 @@ function providerFetch(options: OpenAICompatibleConsciousnessOptions) {
     }
     return await fetcher(input, { ...init, headers, body: JSON.stringify(body) })
   }
+}
+
+function toXsaiMessage(
+  message: PlannerMessage,
+  deepSeekThinkingProtocol = false,
+): Message {
+  if (message.role === 'tool') {
+    return {
+      role: 'tool',
+      content: message.content,
+      tool_call_id: message.toolCallId,
+    }
+  }
+  if (message.role !== 'assistant') {
+    return {
+      role: message.role,
+      content: message.content,
+    }
+  }
+  const toolCalls = message.toolCalls?.map(call => ({
+    id: call.id,
+    type: 'function' as const,
+    function: {
+      name: call.name,
+      arguments: JSON.stringify(call.arguments),
+    },
+  }))
+  const reasoning = message.reasoning
+    ? deepSeekThinkingProtocol && toolCalls?.length
+      ? { reasoning_content: message.reasoning }
+      : { reasoning: message.reasoning }
+    : {}
+  return {
+    role: 'assistant',
+    content: message.content,
+    ...reasoning,
+    ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+  }
+}
+
+function boundedOutputTokens(
+  configured: number | undefined,
+  requested: number | undefined,
+): number | undefined {
+  if (configured === undefined)
+    return requested
+  if (requested === undefined)
+    return configured
+  return Math.min(configured, requested)
+}
+
+function toXsaiTool(definition: PlannerToolDefinition): Tool {
+  return {
+    type: 'function',
+    function: {
+      name: definition.name,
+      description: definition.description,
+      parameters: { ...definition.inputSchema },
+    },
+    execute: () => {
+      throw new Error('Planner tools must be executed by Lumi Agent Runtime')
+    },
+  }
+}
+
+function assistantText(message: AssistantMessage): string {
+  if (typeof message.content === 'string')
+    return message.content
+  return message.content
+    ?.flatMap(part => part.type === 'text' ? [part.text] : [])
+    .join('\n') ?? ''
+}
+
+function parsePlannerToolCalls(message: AssistantMessage): PlannerToolCall[] {
+  return (message.tool_calls ?? []).map((call) => {
+    const name = call.function.name?.trim()
+    if (!name)
+      throw new Error(`Planner tool call ${call.id} has no function name`)
+    const rawArguments = call.function.arguments?.trim() || '{}'
+    const parsed = parsePlannerToolArguments(rawArguments)
+    if (!parsed) {
+      throw new PlannerResponseFormatError(
+        `Planner tool call ${call.id} returned invalid JSON arguments`,
+      )
+    }
+    return {
+      id: call.id,
+      name,
+      arguments: parsed,
+    }
+  })
+}
+
+function validateSamplingOptions(options: Pick<
+  OpenAICompatibleConsciousnessOptions,
+  'maxOutputTokens' | 'temperature'
+>): void {
+  if (options.temperature !== undefined && (!Number.isFinite(options.temperature) || options.temperature < 0 || options.temperature > 2))
+    throw new Error('temperature must be between 0 and 2')
+  if (options.maxOutputTokens !== undefined)
+    boundedInteger(options.maxOutputTokens, 1, 1_000_000, 'maxOutputTokens')
 }
 
 async function consumeTextResponse(

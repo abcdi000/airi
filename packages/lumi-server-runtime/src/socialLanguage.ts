@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto'
 import {
   applyExpressionFeedback,
   behaviorSemanticKey,
+  canCreateSocialLanguageCandidates,
   expressionIdsActuallyUsed,
   expressionIdsForDecisionFeedback,
   expressionSemanticKey,
@@ -134,14 +135,23 @@ export function observeServerLanguageEvidence(input: {
   snapshot: SocialLanguageSnapshot
   evidence: SocialLanguageEvidence
   config: LanguageLearningConfig
+  ingress: 'direct_turn' | 'group_observation'
   modelOutput?: string
 }): SocialLanguageSnapshot {
   const snapshot = maintainSocialLanguageSnapshot(
     migrateSocialLanguageSnapshot(input.snapshot),
     input.evidence.timestamp,
   )
-  if (!input.config.enabled || !isTrustedSocialLanguageEvidence(input.evidence))
+  if (
+    !isTrustedSocialLanguageEvidence(input.evidence)
+    || !canCreateSocialLanguageCandidates({
+      config: input.config,
+      evidence: input.evidence,
+      ingress: input.ingress,
+    })
+  ) {
     return snapshot
+  }
   if (input.evidence.source === 'lumi' && !input.config.selfExpressionLearningEnabled)
     return snapshot
 

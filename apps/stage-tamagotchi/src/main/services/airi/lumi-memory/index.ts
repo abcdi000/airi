@@ -812,9 +812,19 @@ async function searchVectors(userId: string, query: string, limit = LUMI_MEMORY_
   if (!safeQuery)
     return { scores: {}, status: vectorStatusWithDb(db, userId) }
 
-  let status = vectorStatusWithDb(db, userId)
-  if (status.indexedCount === 0 && status.missingCount > 0)
-    status = await backfillVectors(userId, Math.min(160, status.missingCount))
+  const status = vectorStatusWithDb(db, userId)
+  if (status.indexedCount === 0) {
+    // NOTICE:
+    // Vector backfill is a background maintenance task and can include model
+    // startup plus hundreds of embeddings. Running it inside an interactive
+    // search consumed the AstrBot reply budget before Planner could answer.
+    // Source/context: prewarmSemanticIndex() already owns startup backfill.
+    // Removal condition: interactive search gains a cancellable priority queue.
+    vectorWorkerProgress = status.missingCount > 0
+      ? `向量索引正在后台补全，当前检索先使用词法记忆（缺失 ${status.missingCount}）`
+      : '当前没有可用于语义检索的记忆'
+    return { scores: {}, status }
+  }
 
   try {
     vectorWorkerProgress = `正在检索向量: ${previewText(safeQuery, 40)}`

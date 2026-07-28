@@ -60,11 +60,11 @@ describe('lumi social language', () => {
       }],
     })
 
-    expect(system).toContain('[Lumi final-response planning contract]')
+    expect(system).toContain('<Lumi最终回复规划协议>')
     expect(system).not.toContain('Current emotion:')
     expect(system).not.toContain('when teased')
-    expect(turn).toContain('[Lumi planner turn context]')
-    expect(turn).toContain('Current emotion:')
+    expect(turn).toContain('<Lumi规划回合上下文>')
+    expect(turn).toContain('当前情绪：')
     expect(turn).toContain('when teased')
   })
 
@@ -80,7 +80,7 @@ describe('lumi social language', () => {
     })
     const serialized = JSON.stringify(messages)
     expect(serialized).toContain('默认风格平淡简短')
-    expect(serialized).toContain('短促的日常聊天消息结尾通常不要加句号')
+    expect(serialized).toContain('短促的日常消息结尾通常不必补句号')
     expect(serialized).toContain('每个 text 字段只放实际发言')
   })
 
@@ -163,7 +163,7 @@ describe('lumi social language', () => {
     })
 
     expect(messages[0]?.content).toContain('"pragmaticFunction"')
-    expect(messages[0]?.content).toContain('Always include all three arrays')
+    expect(messages[0]?.content).toContain('必须始终包含三个数组')
     expect(messages[1]?.content).toContain('"recent_context"')
     expect(messages[1]?.content).toContain('"focus_batch"')
   })
@@ -517,7 +517,7 @@ describe('lumi social language', () => {
       misunderstanding: false,
       aiStyleComplaint: false,
     }))
-    expect(prompt[0]?.content).toContain('Do not infer')
+    expect(prompt[0]?.content).toContain('不要根据孤立关键词推断')
     expect(feedback).toBeDefined()
     if (!feedback)
       throw new Error('Expected valid feedback')
@@ -549,6 +549,19 @@ describe('lumi social language', () => {
     expect(result.issues.some(issue => issue.includes('offer of help'))).toBe(true)
   })
 
+  it('accepts a natural boundary response without requiring refusal keywords', () => {
+    const result = validateLumiVisibleReply({
+      intent: intent({
+        replyAct: 'refuse',
+        willingnessToHelp: 'refuse',
+        refusalRequired: true,
+      }),
+      reply: { messages: [{ text: '先把刚才那件事说清楚，再谈别的。' }] },
+    })
+
+    expect(result.passed).toBe(true)
+  })
+
   it('rejects agreement when Planner chose disagreement', () => {
     const result = validateLumiVisibleReply({
       intent: intent({ replyAct: 'disagree', constraints: ['必须明确反对'] }),
@@ -564,6 +577,20 @@ describe('lumi social language', () => {
       forbiddenPrivacyTokens: ['alpha-secret'],
     })
     expect(result.issues).toHaveLength(2)
+  })
+
+  it('rejects internal runtime terminology in visible chat text', () => {
+    const result = validateLumiVisibleReply({
+      intent: intent(),
+      reply: {
+        messages: [{
+          text: '按你那个意图框架，我得先让 Planner 调用 reply 工具。',
+        }],
+      },
+    })
+
+    expect(result.passed).toBe(false)
+    expect(result.issues).toContain('Reply leaks internal runtime terminology.')
   })
 
   it('rejects an exact replay of a recent assistant response', () => {
@@ -609,7 +636,7 @@ describe('lumi social language', () => {
     const earlierRefusal = '不。至少现在不想继续帮你弄这个。'
     const generate = vi.fn()
       .mockResolvedValueOnce(JSON.stringify({ messages: [{ text: '我可以继续帮你。' }] }))
-      .mockResolvedValueOnce(JSON.stringify({ messages: [{ text: '我还是可以帮你。' }] }))
+      .mockResolvedValueOnce(JSON.stringify({ messages: [{ text: '我可以继续帮你试试。' }] }))
     const result = await runLumiSocialLanguagePipeline({
       plannerOutput: JSON.stringify(intent({
         replyAct: 'refuse',
@@ -808,7 +835,7 @@ describe('lumi social language', () => {
     expect(result.decision.validator.fallbackUsed).toBe(true)
   })
 
-  it('projects all four offline replay variants deterministically', () => {
+  it('projects the complete offline runtime replay matrix deterministically', () => {
     const projections = projectLumiLanguageReplay({
       sample: {
         id: 'sample-1',
@@ -819,13 +846,17 @@ describe('lumi social language', () => {
       },
       expressions: [expression({ situation: 'build failure', affinity: { global: 1, byPerson: {}, byConversation: {}, byPlatform: {} } })],
       behaviors: [],
+      stickerCandidateIds: ['sticker-1'],
     })
     expect(projections.map(item => item.variant)).toEqual([
       'legacy',
-      'replyer',
-      'replyer_expression',
-      'replyer_expression_behavior',
+      'new_replyer_only',
+      'new_full_runtime',
+      'new_full_runtime_expression',
+      'new_full_runtime_expression_behavior',
+      'new_full_runtime_expression_behavior_sticker',
     ])
+    expect(projections.at(-1)?.selectedStickerIds).toEqual(['sticker-1'])
   })
 })
 

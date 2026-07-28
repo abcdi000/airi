@@ -68,17 +68,14 @@ function formatRuntimeInfo(backend: BrowserBackend): string {
 export async function runPlaywrightExtraMcp(config: LauncherConfig): Promise<void> {
   let backendPromise: Promise<BrowserBackend> | undefined
   let closePromise: Promise<void> | undefined
+  let configuredContext: BrowserContextLike | undefined
+  let configuredContextPromise: Promise<void> | undefined
   const factory = new BrowserFactory(config)
 
   const getBackend = (): Promise<BrowserBackend> => {
     if (!backendPromise) {
       closePromise = undefined
-      backendPromise = factory.create(config.startupRequest).then(async (backend) => {
-        const context = await backend.getContext()
-        await configureBrowserContext(context, config)
-        console.error(`[lumi-browser] Browser session started: ${formatRuntimeInfo(backend)}`)
-        return backend
-      }, (error) => {
+      backendPromise = factory.create(config.startupRequest).catch((error) => {
         backendPromise = undefined
         throw error
       })
@@ -87,7 +84,36 @@ export async function runPlaywrightExtraMcp(config: LauncherConfig): Promise<voi
   }
 
   const getContext = async (): Promise<BrowserContextLike> => {
-    return await (await getBackend()).getContext()
+    const backend = await getBackend()
+    const context = await backend.getContext()
+    if (configuredContext !== context) {
+      configuredContext = context
+      const configurePromise = configureBrowserContext(context, config).then(() => {
+        console.error(`[lumi-browser] Browser session started: ${formatRuntimeInfo(backend)}`)
+      })
+      configuredContextPromise = configurePromise
+      context.once('close', () => {
+        if (configuredContext !== context)
+          return
+        configuredContext = undefined
+        configuredContextPromise = undefined
+        console.error('[lumi-browser] Browser context closed; the next browser tool call will restart it.')
+      })
+      try {
+        await configurePromise
+      }
+      catch (error) {
+        if (configuredContext === context) {
+          configuredContext = undefined
+          configuredContextPromise = undefined
+        }
+        throw error
+      }
+    }
+    else {
+      await configuredContextPromise
+    }
+    return context
   }
   type McpContextGetter = NonNullable<Parameters<typeof createConnection>[1]>
   const server = await createConnection(config.mcp, getContext as unknown as McpContextGetter)
@@ -98,6 +124,8 @@ export async function runPlaywrightExtraMcp(config: LauncherConfig): Promise<voi
       closePromise = (async () => {
         const pendingBackend = backendPromise
         backendPromise = undefined
+        configuredContext = undefined
+        configuredContextPromise = undefined
         if (!pendingBackend)
           return
         try {

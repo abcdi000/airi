@@ -36,7 +36,7 @@ import { LumiStickerLibrary } from './sticker-library'
 const DOGGY_PERSON_ID = 'lumi-user-00000000-0000-4000-8000-000000000001'
 const MOUSSY_PERSON_ID = 'lumi-user-00000000-0000-4000-8000-000000000002'
 const MAX_REQUEST_BYTES = 50 * 1024 * 1024
-const RESPONSE_TIMEOUT_MS = 120_000
+const RESPONSE_TIMEOUT_MS = 300_000
 const RUNTIME_STATUS_TIMEOUT_MS = 5_000
 const SPEECH_TIMEOUT_MS = 120_000
 const STICKER_INTELLIGENCE_TIMEOUT_MS = 120_000
@@ -167,6 +167,21 @@ interface PendingSpeech {
   timer: ReturnType<typeof setTimeout>
 }
 
+interface GatewayProgressEvent {
+  sequence: number
+  tool_name: string
+  status: 'started' | 'succeeded' | 'failed' | 'skipped'
+  message: string
+  timestamp: number
+  duration_ms?: number
+  error_code?: string
+}
+
+interface GatewayProgressState {
+  complete: boolean
+  events: GatewayProgressEvent[]
+}
+
 interface StickerIntelligenceResult {
   classification?: {
     tags: string[]
@@ -208,6 +223,7 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
   let running = false
   let lastError = ''
   const pending = new Map<string, PendingResponse>()
+  const progressByEvent = new Map<string, GatewayProgressState>()
   const pendingRuntimeStatuses = new Map<string, PendingRuntimeStatus>()
   const pendingSpeech = new Map<string, PendingSpeech>()
   const pendingStickerIntelligence = new Map<string, PendingStickerIntelligence>()
@@ -276,6 +292,7 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
       waiter.reject(new Error('Lumi local AstrBot gateway stopped'))
     }
     pending.clear()
+    progressByEvent.clear()
     for (const waiter of pendingRuntimeStatuses.values()) {
       clearTimeout(waiter.timer)
       waiter.reject(new Error('Lumi local AstrBot gateway stopped'))
@@ -337,6 +354,7 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
       possibleEvents: [
         'output:gen-ai:chat:complete',
         'lumi:external:perception:failed',
+        'lumi:external:agent-progress',
         'lumi:external:runtime:status',
         'lumi:external:group-observation:result',
         'lumi:external:sticker-intelligence:result',
@@ -348,11 +366,15 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
       const perception = input?.type === 'input:text' ? input.data.perception : undefined
       if (!perception || !input || input.type !== 'input:text')
         return
+      const outputText = stripInternalLumiOutput(event.data.outputText)
+      if (!outputText)
+        return
       const waiter = pending.get(perception.eventId)
       if (!waiter)
         return
+      clearTimeout(waiter.timer)
+      pending.delete(perception.eventId)
       const actor = input.data.actor
-      const outputText = event.data.outputText.trim()
       let sticker: Awaited<ReturnType<typeof stickerLibrary.selectForReply>> = null
       try {
         sticker = await stickerLibrary.selectForReply({
@@ -401,10 +423,28 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
           runtime_role: 'offline-client',
         },
       }
-      clearTimeout(waiter.timer)
-      pending.delete(perception.eventId)
       rememberCompleted(perception.eventId, response)
+      completeProgress(perception.eventId)
       waiter.resolve(response)
+    })
+    channelClient.onEvent('lumi:external:agent-progress', (event) => {
+      const state = progressByEvent.get(event.data.eventId)
+      if (!state || state.complete || event.data.toolName === 'reply')
+        return
+      const message = describeToolProgress(event.data.toolName, event.data.status)
+      if (!message)
+        return
+      if (state.events.some(item => item.message === message))
+        return
+      state.events.push({
+        sequence: state.events.length + 1,
+        tool_name: event.data.toolName,
+        status: event.data.status,
+        message,
+        timestamp: event.data.timestamp,
+        ...(event.data.durationMs === undefined ? {} : { duration_ms: event.data.durationMs }),
+        ...(event.data.errorCode ? { error_code: event.data.errorCode } : {}),
+      })
     })
     channelClient.onEvent('lumi:external:perception:failed', (event) => {
       const waiter = pending.get(event.data.eventId)
@@ -412,6 +452,7 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
         return
       clearTimeout(waiter.timer)
       pending.delete(event.data.eventId)
+      completeProgress(event.data.eventId)
       waiter.reject(new GatewayRequestError(event.data.code, event.data.message))
     })
     channelClient.onEvent('lumi:external:runtime:status', (event) => {
@@ -580,6 +621,20 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
         return Response.json({ error: errorMessageFrom(error) ?? 'Group observation failed' }, { status: 500 })
       }
     })
+    app.get('/api/lumi/integrations/astrbot/progress', (event) => {
+      if (!hasToken(event.req.headers, currentConfig().apiToken))
+        return Response.json({ error: 'Authentication required' }, { status: 401 })
+      const url = new URL(event.req.url)
+      const eventId = url.searchParams.get('event_id')?.trim()
+      const after = Number(url.searchParams.get('after') ?? 0)
+      if (!eventId || !Number.isInteger(after) || after < 0)
+        return Response.json({ error: 'Progress cursor is invalid' }, { status: 400 })
+      const state = progressByEvent.get(eventId)
+      return Response.json({
+        events: state?.events.filter(item => item.sequence > after) ?? [],
+        complete: state?.complete ?? false,
+      })
+    })
     app.post('/api/lumi/integrations/astrbot/speech', async (event) => {
       if (!hasToken(event.req.headers, currentConfig().apiToken))
         return Response.json({ error: 'Authentication required' }, { status: 401 })
@@ -633,6 +688,7 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
     const response = new Promise<GatewayResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(event.event_id)
+        completeProgress(event.event_id)
         reject(new GatewayRequestError('generation_timeout', 'Lumi local generation timed out'))
       }, RESPONSE_TIMEOUT_MS)
       pending.set(event.event_id, {
@@ -645,6 +701,7 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
         timer,
       })
     })
+    progressByEvent.set(event.event_id, { complete: false, events: [] })
 
     try {
       client.sendOrThrow({
@@ -675,6 +732,7 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
       if (waiter)
         clearTimeout(waiter.timer)
       pending.delete(event.event_id)
+      completeProgress(event.event_id)
       throw error
     }
     return await response
@@ -772,6 +830,14 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
       throw error
     }
     return await response
+  }
+
+  function completeProgress(eventId: string) {
+    const state = progressByEvent.get(eventId)
+    if (state)
+      state.complete = true
+    const timer = setTimeout(() => progressByEvent.delete(eventId), 60_000)
+    timer.unref()
   }
 
   defineInvokeHandler(context, electronLumiAstrBotGatewayGetState, getState)
@@ -1000,6 +1066,57 @@ function normalizeConfig(input: unknown): ElectronLumiAstrBotGatewayConfig {
       cooldownMessages,
     },
   }
+}
+
+/**
+ * Converts a private tool trace into a short public action update.
+ *
+ * Tool arguments, results, prompts, and model reasoning are intentionally not
+ * accepted here, so this projection cannot leak credentials or hidden context.
+ */
+function describeToolProgress(
+  toolName: string,
+  status: GatewayProgressEvent['status'],
+): string | undefined {
+  // Completion and failure are internal execution facts, not things Lumi
+  // intentionally chose to say. Only announce a clear user-facing action.
+  if (status !== 'started')
+    return undefined
+
+  const normalized = toolName.toLowerCase()
+  if (normalized === 'tool_search')
+    return '我先找一下合适的工具'
+  if (normalized.includes('memory') || normalized.includes('记忆'))
+    return '我先去记忆里查一下'
+  if (normalized.includes('navigate') || normalized.includes('open_url'))
+    return '我先打开网页看看'
+  if (normalized.includes('snapshot') || normalized.includes('screenshot'))
+    return '我看一下当前页面'
+  if (normalized.includes('search'))
+    return '我正在搜索相关内容'
+  if (normalized.includes('click'))
+    return '我继续操作一下页面'
+  if (normalized.includes('type') || normalized.includes('fill'))
+    return '我正在填写页面内容'
+  if (normalized.includes('browser') || normalized.includes('playwright') || normalized.includes('patchright'))
+    return '我正在用浏览器处理'
+  if (normalized.includes('computer') || normalized.includes('window'))
+    return '我正在操作电脑'
+  if (normalized.includes('minecraft') || normalized.includes('mineflayer'))
+    return '我正在处理 Minecraft 里的操作'
+  // MCP dispatchers and other wrappers do not describe the actual action.
+  // Exposing their implementation names produces repetitive robotic chatter.
+  return undefined
+}
+
+function stripInternalLumiOutput(text: string): string {
+  const markerIndexes = ['[memory_search]', '[memory_write]', '[system_notice]']
+    .map(marker => text.indexOf(marker))
+    .filter(index => index >= 0)
+  if (markerIndexes.length === 0)
+    return text.trim()
+
+  return text.slice(0, Math.min(...markerIndexes)).trim()
 }
 
 function validateGroupObservation(value: unknown, config: ElectronLumiAstrBotGatewayConfig) {

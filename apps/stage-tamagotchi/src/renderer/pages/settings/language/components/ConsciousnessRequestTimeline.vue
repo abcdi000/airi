@@ -19,6 +19,12 @@ const detailTab = shallowRef<DetailTab>('response')
 const copied = shallowRef(false)
 
 const orderedRequests = computed(() => requests.value.slice().reverse())
+const requestOptions = computed(() =>
+  orderedRequests.value.map(request => ({
+    id: request.id,
+    label: requestOption(request),
+  })),
+)
 const selectedRequest = computed(() =>
   orderedRequests.value.find(request => request.id === selectedRequestId.value) ?? orderedRequests.value[0],
 )
@@ -36,7 +42,7 @@ const averageDuration = computed(() => {
 
 useIntervalFn(() => {
   store.refreshFromStorage()
-}, 300, { immediate: true })
+}, 1_000, { immediate: true })
 
 watch(orderedRequests, (next) => {
   if (!next.some(request => request.id === selectedRequestId.value))
@@ -119,6 +125,16 @@ function requestOption(request: LumiConsciousnessRequestTrace) {
   return `${time} · ${purposeLabel(request.purpose)} · ${statusLabel(request.status)} · ${formatDuration(request.durationMs)}`
 }
 
+function emptyResponseLabel(request: LumiConsciousnessRequestTrace) {
+  if (request.status === 'streaming')
+    return '等待模型返回内容…'
+  if (request.status === 'error')
+    return '请求失败，没有可显示的模型输出。'
+  if (request.purpose === 'planner')
+    return 'Planner 已完成，但本次没有返回普通文本或工具调用。'
+  return '请求已完成，但模型返回内容为空。'
+}
+
 async function copyCurrent() {
   if (!selectedRequest.value)
     return
@@ -130,6 +146,11 @@ async function copyCurrent() {
   window.setTimeout(() => {
     copied.value = false
   }, 1_500)
+}
+
+function clearRequests() {
+  selectedRequestId.value = ''
+  store.clear()
 }
 </script>
 
@@ -178,12 +199,12 @@ async function copyCurrent() {
             v-model="selectedRequestId"
             :class="['h-10 w-full rounded-lg border border-neutral-200 bg-white px-3 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-900']"
           >
-            <option v-for="request in orderedRequests" :key="request.id" :value="request.id">
-              {{ requestOption(request) }}
+            <option v-for="option in requestOptions" :key="option.id" :value="option.id">
+              {{ option.label }}
             </option>
           </select>
         </label>
-        <DoubleCheckButton size="sm" variant="danger" @confirm="store.clear()">
+        <DoubleCheckButton size="sm" variant="danger" @confirm="clearRequests">
           清空
           <template #confirm>
             确认清空
@@ -234,6 +255,38 @@ async function copyCurrent() {
             </div>
             <div :class="['mt-1 break-all font-medium']">
               {{ selectedRequest.model }}
+            </div>
+          </div>
+          <div>
+            <div :class="['text-xs text-neutral-500']">
+              可用工具
+            </div>
+            <div :class="['mt-1 font-medium tabular-nums']">
+              {{ selectedRequest.toolCount ?? 0 }}
+            </div>
+          </div>
+          <div>
+            <div :class="['text-xs text-neutral-500']">
+              请求工具策略
+            </div>
+            <div :class="['mt-1 font-medium']">
+              {{ selectedRequest.requestedToolChoice ?? '未设置' }}
+            </div>
+          </div>
+          <div>
+            <div :class="['text-xs text-neutral-500']">
+              实际发送策略
+            </div>
+            <div :class="['mt-1 font-medium']">
+              {{ selectedRequest.effectiveToolChoice ?? '未设置' }}
+            </div>
+          </div>
+          <div>
+            <div :class="['text-xs text-neutral-500']">
+              思考模式
+            </div>
+            <div :class="['mt-1 font-medium']">
+              {{ selectedRequest.thinkingMode ?? '供应商默认' }}
             </div>
           </div>
           <div>
@@ -355,7 +408,7 @@ async function copyCurrent() {
         <pre
           v-if="detailTab === 'response'"
           :class="['min-h-32 max-h-[560px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-neutral-200 p-4 text-xs leading-5 font-mono dark:border-neutral-800']"
-        >{{ selectedRequest.responseText || '等待模型返回内容…' }}</pre>
+        >{{ selectedRequest.responseText || emptyResponseLabel(selectedRequest) }}</pre>
         <div v-else :class="['flex flex-col gap-3']">
           <div
             v-if="!selectedRequest.requestMessages"

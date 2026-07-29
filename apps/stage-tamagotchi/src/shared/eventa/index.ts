@@ -17,6 +17,7 @@ import type {
   LumiCognitiveContextBundle,
   LumiCognitiveDialogueTurn,
   LumiCognitiveIdentity,
+  LumiWorkingMemory,
 } from '@proj-airi/lumi-runtime'
 import type { ServerOptions } from '@proj-airi/server-runtime/server'
 import type {
@@ -694,6 +695,12 @@ export interface ElectronLumiCognitiveRecordUseRequest {
   usedAt: string
 }
 
+/** Reads one exact host-owned Working Memory projection without hydrating cognitive tables in Renderer. */
+export interface ElectronLumiCognitiveLoadWorkingMemoryRequest {
+  /** Immutable actor and conversation whose projection may be returned. */
+  identity: LumiCognitiveIdentity
+}
+
 /** Persists one accepted Agent Runtime checkpoint through the main-process cognitive host. */
 export interface ElectronLumiCognitiveConsolidateEpisodeRequest {
   /** Immutable direct-conversation identity from the latest validated bundle. */
@@ -709,6 +716,7 @@ export interface ElectronLumiCognitiveConsolidateEpisodeRequest {
 }
 
 export const electronLumiCognitivePrepareTurn = defineInvokeEventa<LumiCognitiveContextBundle, ElectronLumiCognitivePrepareTurnRequest>('eventa:invoke:electron:lumi-cognitive:prepare-turn')
+export const electronLumiCognitiveLoadWorkingMemory = defineInvokeEventa<LumiWorkingMemory | null, ElectronLumiCognitiveLoadWorkingMemoryRequest>('eventa:invoke:electron:lumi-cognitive:load-working-memory')
 export const electronLumiCognitiveRecordUse = defineInvokeEventa<void, ElectronLumiCognitiveRecordUseRequest>('eventa:invoke:electron:lumi-cognitive:record-use')
 export const electronLumiCognitiveConsolidateEpisode = defineInvokeEventa<void, ElectronLumiCognitiveConsolidateEpisodeRequest>('eventa:invoke:electron:lumi-cognitive:consolidate-episode')
 

@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   electronLumiCognitiveConsolidateEpisode,
+  electronLumiCognitiveLoadWorkingMemory,
   electronLumiCognitivePrepareTurn,
   electronLumiCognitiveRecordUse,
 } from '../../../../shared/eventa'
@@ -154,6 +155,7 @@ describe('desktop cognitive service', () => {
       }),
     })
     const consolidateEpisode = defineInvoke(context, electronLumiCognitiveConsolidateEpisode)
+    const loadWorkingMemory = defineInvoke(context, electronLumiCognitiveLoadWorkingMemory)
     const prepareTurn = defineInvoke(context, electronLumiCognitivePrepareTurn)
     const recordUse = defineInvoke(context, electronLumiCognitiveRecordUse)
 
@@ -199,6 +201,11 @@ describe('desktop cognitive service', () => {
     expect(recall).toHaveBeenCalledTimes(1)
     expect(loadMemoriesByIds).toHaveBeenCalledTimes(1)
     expect(second.workingMemory.continuationPoint).toContain('Patchright')
+    expect(await loadWorkingMemory({ identity })).toEqual(second.workingMemory)
+    expect(await loadWorkingMemory({ identity: moussyIdentity })).toMatchObject({
+      personId: moussyIdentity.actorId,
+      conversationId: moussyIdentity.conversationId,
+    })
     expect(db.prepare(`SELECT COUNT(*) AS count FROM lumi_cognitive_evidence WHERE origin = 'primary'`).get()?.count).toBe(2)
     expect(db.prepare(`SELECT phase FROM lumi_cognitive_migrations WHERE source_kind = 'legacy_desktop_cognition'`).get()?.phase).toBe('active')
 

@@ -71,14 +71,8 @@ import { useLLM } from './llm'
 import { useLlmToolsetPromptsStore } from './llm-toolset-prompts'
 import { useLumiAgentRuntimeSettingsStore } from './lumi-agent-runtime-settings'
 import { useLumiConsciousnessObservabilityStore } from './lumi-consciousness-observability'
-import {
-  buildLumiCurrentStateUpdatePrompt,
-  buildLumiCurrentStateUpdateUserPayload,
-  parseLumiCurrentStateUpdateOutput,
-  useLumiCurrentStateStore,
-} from './lumi-current-state'
+import { useLumiCurrentStateStore } from './lumi-current-state'
 import { useLumiEmotionStore } from './lumi-emotion'
-import { useLumiIdentityStore } from './lumi-identity'
 import { useLumiMainTimelineStore } from './lumi-main-timeline'
 import { useLumiMemoryStore } from './lumi-memory'
 import { bindLumiMemoryToolsForTurn, clearLumiMemoryTools, registerLumiMemoryTools } from './lumi-memory-tools'
@@ -125,7 +119,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   const providersStore = useProvidersStore()
   const lumiEmotionStore = useLumiEmotionStore()
   const lumiAgentRuntimeSettingsStore = useLumiAgentRuntimeSettingsStore()
-  const lumiIdentityStore = useLumiIdentityStore()
   const lumiCurrentStateStore = useLumiCurrentStateStore()
   const lumiConsciousnessObservabilityStore = useLumiConsciousnessObservabilityStore()
   const lumiMemoryStore = useLumiMemoryStore()
@@ -1546,89 +1539,24 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   }
 
   async function runLumiCurrentStateAfterTurn(
-    sessionMessages: ChatHistoryItem[],
-    force = false,
+    _sessionMessages: ChatHistoryItem[],
+    _force = false,
     interaction?: ChatInteractionContext,
   ) {
     if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
       return { status: 'skipped:not_lumi' as const }
-    if (!interaction?.actorId)
+    const targetInteraction = interaction ?? chatSession.getInteractionContext()
+    if (!targetInteraction?.actorId)
       return { status: 'skipped:missing_actor' as const }
-    if (interaction.conversationType === 'group')
+    if (targetInteraction.conversationType === 'group')
       return { status: 'skipped:group_uses_group_memory' as const }
 
-    const userId = interaction.actorId
-    await lumiCurrentStateStore.ensureUserStateLoaded(userId)
-    const previousState = { ...lumiCurrentStateStore.getStateForUser(userId) }
-    const nextTurnCount = previousState.turnCount + 1
-    if (!force && nextTurnCount % lumiCurrentStateStore.normalizedUpdateEveryTurns !== 0) {
-      await lumiCurrentStateStore.saveCurrentState({
-        turnCount: nextTurnCount,
-        updatedAt: previousState.updatedAt || new Date().toISOString(),
-      }, userId)
-      return { status: 'skipped:interval' as const }
-    }
-
-    const providerId = activeProvider.value
-    const modelId = activeModel.value
-    if (!providerId || !modelId)
-      return { status: 'skipped:no_model' as const }
-
-    const latestUser = findLatestUserMessage(sessionMessages)
-    const profileContext = lumiUserProfileStore.buildRelevantContext({
-      messageText: latestUser ? extractMessageText(latestUser) : '',
-      limit: 6,
-    }, interaction?.actorId)
-    const sourceMessageIds = sessionMessages
-      .slice(-16)
-      .map(message => message.id)
-      .filter((id): id is string => typeof id === 'string' && !!id)
-
     try {
-      const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
-      const buffer = await generateSocialLanguageTextWithProvider({
-        model: modelId,
-        chatProvider,
-        purpose: 'current_state',
-        messages: [
-          {
-            role: 'system',
-            content: buildLumiCurrentStateUpdatePrompt(),
-          },
-          {
-            role: 'user',
-            content: buildLumiCurrentStateUpdateUserPayload({
-              previousState,
-              profileContext,
-              recentMessages: sessionMessages,
-              userDisplayName: interaction?.actorDisplayName
-                ?? lumiIdentityStore.users.find(user => user.id === interaction?.actorId)?.displayName,
-            }),
-          },
-        ],
-      })
-
-      const nextState = parseLumiCurrentStateUpdateOutput(buffer, previousState, sourceMessageIds)
-      await lumiCurrentStateStore.saveCurrentState(nextState, userId)
-
-      appendLumiSystemNotice([
-        'title: 短期意识状态',
-        'status: updated',
-        `topics: ${nextState.recentTopics.slice(0, 3).join('；') || 'none'}`,
-        `active_projects: ${nextState.activeProjects.length}`,
-        `unfinished_tasks: ${nextState.unfinishedTasks.length}`,
-        'profile_projection: cognitive_evidence_only',
-      ])
-
-      return { status: 'updated' as const, state: nextState }
+      const state = await lumiCurrentStateStore.refreshCognitiveProjection(targetInteraction)
+      return { status: 'refreshed' as const, state }
     }
     catch (error) {
-      console.warn('[lumi-current-state] update failed', error)
-      appendLumiSystemNotice([
-        'title: 短期意识状态',
-        'status: failed',
-        `error: ${errorMessageFrom(error) ?? 'Unknown error'}`,
-      ])
+      console.warn('[lumi-current-state] Working Memory projection refresh failed', error)
       return { status: 'failed' as const }
     }
   }
@@ -1719,23 +1647,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       role: 'system',
       content: text,
       id: `lumi-memory-debug-${nanoid()}`,
-      createdAt: Date.now(),
-    })
-  }
-
-  function appendLumiSystemNotice(lines: string[]) {
-    if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
-      return
-
-    const sessionId = activeSessionId.value
-    if (!sessionId)
-      return
-
-    const text = ['[system_notice]', ...lines].join('\n')
-    chatSession.appendSessionMessage(sessionId, {
-      role: 'system',
-      content: text,
-      id: `lumi-system-notice-${nanoid()}`,
       createdAt: Date.now(),
     })
   }

@@ -1,11 +1,13 @@
 import type { LumiToolDefinition } from './lumi-tool-mesh'
 
 import { createTestingPinia } from '@pinia/testing'
+import { createLumiWorkingMemory } from '@proj-airi/lumi-runtime'
 import { tool } from '@xsai/tool'
 import { setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
+import { useLumiCurrentStateStore } from './lumi-current-state'
 import { useLumiMemoryStore } from './lumi-memory'
 import {
   bindLumiToolMeshToolsForTurn,
@@ -240,6 +242,64 @@ describe('lumi tool mesh', () => {
       conversationId: 'direct-moussy',
       participantUserIds: ['moussy'],
     }))
+  })
+
+  // ROOT CAUSE:
+  //
+  // Short-memory tools previously read the mutable settings user and a single
+  // legacy current_state document instead of the identity captured by the
+  // Agent Runtime tool invocation.
+  //
+  // The executor now reloads the exact actor/conversation Working Memory and
+  // the old ungrounded write tool is no longer model-visible.
+  /** @example A Moussy tool turn cannot read the foreground Doggy projection. */
+  it('reads short memory through the immutable tool identity and retires direct writes', async () => {
+    const mesh = useLumiToolMeshStore()
+    const current = useLumiCurrentStateStore()
+    const loadWorkingMemory = vi.fn(async ({ identity }: { identity: { actorId: string, conversationId: string } }) => ({
+      ...createLumiWorkingMemory({
+        personId: identity.actorId,
+        personaId: 'lumi',
+        conversationId: identity.conversationId,
+        conversationType: 'direct',
+        now: '2026-07-29T09:00:00.000Z',
+      }),
+      continuationPoint: `continue ${identity.actorId} in ${identity.conversationId}`,
+    }))
+    current.setActiveStateUser('doggy')
+    current.setCognitiveBridge({ loadWorkingMemory })
+    mesh.initializeCoreTools()
+
+    const result = await mesh.executeTool('search_short_memory', { query: '刚才聊到哪' }, {
+      scope: 'chat',
+      source: 'shared_agent_runtime',
+      conversationId: 'direct-moussy',
+      conversationType: 'direct',
+      actorId: 'moussy',
+      participantIds: ['moussy'],
+    })
+
+    expect(result.status).toBe('success')
+    expect(result.result).toMatchObject({
+      query: '刚才聊到哪',
+      state: {
+        lastContinuationPoint: 'continue moussy in direct-moussy',
+      },
+    })
+    expect(loadWorkingMemory).toHaveBeenCalledWith({
+      identity: {
+        actorId: 'moussy',
+        personaId: 'lumi',
+        conversationId: 'direct-moussy',
+        conversationType: 'direct',
+        participantUserIds: ['moussy'],
+      },
+    })
+    expect(mesh.implementedDefinitions.map(item => item.id)).not.toContain('update_current_state_candidate')
+    expect(mesh.definitionById('update_current_state_candidate')).toMatchObject({
+      executionMode: 'blocked',
+      status: 'partial',
+    })
   })
 
   it('blocks Lumi-private records even in a direct user chat', async () => {

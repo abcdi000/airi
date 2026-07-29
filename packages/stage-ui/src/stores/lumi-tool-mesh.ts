@@ -392,8 +392,8 @@ const CORE_TOOL_DEFINITIONS: LumiToolDefinition[] = [
     outputSchema: { state: 'object' },
     riskLevel: 'medium',
     accessScopes: ['chat', 'autonomous_life', 'proactive_vision'],
-    executionMode: 'operator_present_auto',
-    status: 'implemented',
+    executionMode: 'blocked',
+    status: 'partial',
     implementationPath: 'packages/stage-ui/src/stores/lumi-current-state.ts',
     canRead: true,
     canWrite: true,
@@ -934,22 +934,34 @@ export const useLumiToolMeshStore = defineStore('lumi-tool-mesh', () => {
         } as any)
         return { stored: Boolean(memory), memory }
       },
-      search_short_memory: async (input) => {
+      search_short_memory: async (input, context) => {
         const store = useLumiCurrentStateStore()
-        await store.initializePersistence()
-        return { query: input.query ?? '', context: store.buildPromptContext(), state: store.currentState }
+        if (!context.actorId || !context.conversationId || !context.conversationType || !context.participantIds)
+          throw new Error('Short-memory reads require an immutable tool interaction identity')
+        const state = await store.refreshCognitiveProjection({
+          actorId: context.actorId,
+          conversationId: context.conversationId,
+          conversationType: context.conversationType,
+          participantIds: context.participantIds,
+        })
+        return {
+          query: input.query ?? '',
+          context: store.buildPromptContext(context.actorId, context.conversationId),
+          state,
+        }
       },
-      read_current_state: async () => {
+      read_current_state: async (_input, context) => {
         const store = useLumiCurrentStateStore()
-        await store.initializePersistence()
-        return { state: store.currentState }
-      },
-      update_current_state_candidate: async (input) => {
-        const store = useLumiCurrentStateStore()
-        await store.initializePersistence()
-        const patch = input.patch && typeof input.patch === 'object' && !Array.isArray(input.patch) ? input.patch : input
-        await store.saveCurrentState(patch as any)
-        return { state: store.currentState }
+        if (!context.actorId || !context.conversationId || !context.conversationType || !context.participantIds)
+          throw new Error('Current-state reads require an immutable tool interaction identity')
+        return {
+          state: await store.refreshCognitiveProjection({
+            actorId: context.actorId,
+            conversationId: context.conversationId,
+            conversationType: context.conversationType,
+            participantIds: context.participantIds,
+          }),
+        }
       },
       read_user_profile: async (input) => {
         const store = useLumiUserProfileStore()

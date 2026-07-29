@@ -15,6 +15,7 @@ import type {
 import type {
   ElectronLumiCognitiveArchive,
   ElectronLumiCognitiveConsolidateEpisodeRequest,
+  ElectronLumiCognitiveLoadWorkingMemoryRequest,
   ElectronLumiCognitivePrepareTurnRequest,
   ElectronLumiCognitiveRecordUseRequest,
 } from '../../../../shared/eventa'
@@ -34,6 +35,7 @@ import {
 
 import {
   electronLumiCognitiveConsolidateEpisode,
+  electronLumiCognitiveLoadWorkingMemory,
   electronLumiCognitivePrepareTurn,
   electronLumiCognitiveRecordUse,
 } from '../../../../shared/eventa'
@@ -96,6 +98,9 @@ export function createLumiDesktopCognitiveService(
       repository,
     })
   })
+  defineInvokeHandler(options.context, electronLumiCognitiveLoadWorkingMemory, async (request) => {
+    return await loadDesktopCognitiveWorkingMemory(options, request)
+  })
   defineInvokeHandler(options.context, electronLumiCognitiveRecordUse, async (request) => {
     const { db } = await options.getDatabase()
     ensureCognitiveSchema(db)
@@ -106,6 +111,34 @@ export function createLumiDesktopCognitiveService(
     const episode = consolidateDesktopConversationEpisode(db, request, options.persistMemory)
     options.onMemoryPersisted?.(episode.memory)
   })
+}
+
+/**
+ * Loads one exact desktop Working Memory projection through the cognitive host.
+ *
+ * Use when:
+ * - Settings, proactive vision, or a tool needs a read-only compatibility view
+ *
+ * Expects:
+ * - Renderer supplies the immutable turn/session identity, never activeUserId
+ *
+ * Returns:
+ * - The exact non-expired projection, or null when the conversation has none
+ */
+export async function loadDesktopCognitiveWorkingMemory(
+  options: LumiDesktopCognitiveServiceOptions,
+  request: ElectronLumiCognitiveLoadWorkingMemoryRequest,
+): Promise<LumiWorkingMemory | null> {
+  const { db } = await options.getDatabase()
+  ensureCognitiveSchema(db)
+  assertIdentity(request.identity)
+  try {
+    await migrateLegacyDesktopCognition(db, request.identity, options)
+  }
+  catch (error) {
+    console.warn('[lumi-cognitive] legacy projection migration failed during working-memory read', error)
+  }
+  return loadWorkingMemory(db, request.identity) ?? null
 }
 
 /**

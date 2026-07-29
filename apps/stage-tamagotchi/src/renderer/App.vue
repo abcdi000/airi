@@ -51,6 +51,7 @@ import {
   electronGodotStageStatusChanged,
   electronImportLumiChannelDeviceArchive,
   electronLumiCognitiveConsolidateEpisode,
+  electronLumiCognitiveLoadWorkingMemory,
   electronLumiCognitivePrepareTurn,
   electronLumiCognitiveRecordUse,
   electronLumiCurrentStateClear,
@@ -220,6 +221,7 @@ const saveLumiMemoryEvent = useElectronEventaInvoke(electronLumiMemorySaveEvent)
 const setLumiMemorySeedId = useElectronEventaInvoke(electronLumiMemorySetSeedId)
 const clearLumiMemory = useElectronEventaInvoke(electronLumiMemoryClear)
 const consolidateLumiCognitiveEpisode = useElectronEventaInvoke(electronLumiCognitiveConsolidateEpisode)
+const loadLumiCognitiveWorkingMemory = useElectronEventaInvoke(electronLumiCognitiveLoadWorkingMemory)
 const prepareLumiCognitiveTurn = useElectronEventaInvoke(electronLumiCognitivePrepareTurn)
 const recordLumiCognitiveUse = useElectronEventaInvoke(electronLumiCognitiveRecordUse)
 const getLumiSocialLanguageSnapshot = useElectronEventaInvoke(electronLumiSocialLanguageGetSnapshot)
@@ -389,6 +391,30 @@ lumiCurrentStateStore.setPersistenceBridge({
   saveCurrentState: (snapshot, userId) => saveLumiCurrentStateSnapshot({ userId: userId ?? lumiIdentityStore.activeUserId, snapshot: toIpcPayload(snapshot) as any }) as any,
   clearCurrentState: () => clearLumiCurrentStateDatabase({ userId: lumiIdentityStore.activeUserId }),
 })
+lumiCurrentStateStore.setCognitiveBridge({
+  loadWorkingMemory: request => loadLumiCognitiveWorkingMemory(toIpcPayload(request)),
+})
+
+watch(
+  [() => chatSessionStore.activeSessionId, () => lumiIdentityStore.activeUserId],
+  async ([sessionId]) => {
+    const interaction = chatSessionStore.getInteractionContext(sessionId)
+    if (!interaction) {
+      lumiCurrentStateStore.setActiveStateConversation('')
+      return
+    }
+
+    lumiCurrentStateStore.setActiveStateUser(interaction.actorId)
+    lumiCurrentStateStore.setActiveStateConversation(interaction.conversationId)
+    try {
+      await lumiCurrentStateStore.refreshCognitiveProjection(interaction)
+    }
+    catch (error) {
+      console.warn('[App] Lumi Working Memory projection refresh failed:', error)
+    }
+  },
+  { immediate: true },
+)
 
 lumiAgentStore.setBridge({
   runClaudeTask: payload => runClaudeCodeAgentTask(payload as any) as any,

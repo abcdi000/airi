@@ -3390,6 +3390,9 @@ importers:
       '@proj-airi/lumi-online':
         specifier: workspace:*
         version: link:../lumi-online
+      '@proj-airi/lumi-runtime':
+        specifier: workspace:*
+        version: link:../lumi-runtime
       '@proj-airi/model-driver-lipsync':
         specifier: workspace:^
         version: link:../model-driver-lipsync

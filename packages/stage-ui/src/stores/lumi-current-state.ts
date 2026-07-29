@@ -1,10 +1,13 @@
-import type { ChatHistoryItem } from '../types/chat'
+import type { LumiCognitiveIdentity, LumiWorkingMemory } from '@proj-airi/lumi-runtime'
+
+import type { ChatHistoryItem, ChatInteractionContext } from '../types/chat'
 
 import { errorMessageFrom } from '@moeru/std'
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 
+import { LUMI_AIRI_CARD_ID } from '../constants/lumi-card'
 import { extractMessageText } from '../libs/chat-sync'
 import { LUMI_DOGGY_USER_ID } from './lumi-identity'
 
@@ -36,6 +39,12 @@ export interface LumiCurrentStatePersistenceBridge {
   loadCurrentStateFromDatabase: (userId?: string) => Promise<LumiCurrentStatePersistenceSnapshot>
   saveCurrentState: (snapshot: LumiCurrentStatePersistenceSnapshot, userId?: string) => Promise<LumiCurrentStatePersistenceSnapshot>
   clearCurrentState: () => Promise<void>
+}
+
+/** Host-owned read boundary for the unified cognitive Working Memory. */
+export interface LumiCurrentStateCognitiveBridge {
+  /** Loads only the exact actor and conversation projection requested by Renderer. */
+  loadWorkingMemory: (request: { identity: LumiCognitiveIdentity }) => Promise<LumiWorkingMemory | null>
 }
 
 const DEFAULT_STATE: LumiCurrentState = {
@@ -75,6 +84,42 @@ function normalizeState(value: Partial<LumiCurrentState> | null | undefined): Lu
     turnCount: Number.isFinite(value?.turnCount) ? Math.max(0, Math.round(value!.turnCount!)) : 0,
     updatedAt: typeof value?.updatedAt === 'string' && value.updatedAt ? value.updatedAt : now,
   }
+}
+
+function createEmptyState(): LumiCurrentState {
+  return {
+    ...DEFAULT_STATE,
+    recentTopics: [],
+    recentImportantDecisions: [],
+    activeProjects: [],
+    unfinishedTasks: [],
+    lumiViews: [],
+    sourceMessageIds: [],
+  }
+}
+
+function cognitiveStateKey(actorId: string, conversationId: string) {
+  return `${actorId}\u0000${conversationId}`
+}
+
+/** Projects authoritative Working Memory into the deprecated current_state display shape. */
+function projectWorkingMemory(memory: LumiWorkingMemory | null): LumiCurrentState {
+  if (!memory)
+    return createEmptyState()
+
+  return normalizeState({
+    recentTopics: memory.activeTopics.map(item => item.value),
+    userRecentMood: memory.temporaryUserStates.map(item => item.value).join('；'),
+    recentImportantDecisions: memory.goals.map(item => item.value),
+    activeProjects: memory.projects.map(item => item.value),
+    unfinishedTasks: memory.openLoops.map(item => item.value),
+    relationshipContext: memory.relationshipContext?.value ?? '',
+    lumiViews: [],
+    lastContinuationPoint: memory.continuationPoint ?? '',
+    sourceMessageIds: memory.sourceMessageIds,
+    turnCount: 0,
+    updatedAt: memory.updatedAt,
+  })
 }
 
 function normalizePersistenceSnapshot(snapshot: LumiCurrentStatePersistenceSnapshot): LumiCurrentStatePersistenceSnapshot {
@@ -155,13 +200,16 @@ export function parseLumiCurrentStateUpdateOutput(text: string, previousState: L
 }
 
 export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => {
-  const currentState = ref<LumiCurrentState>(normalizeState(DEFAULT_STATE))
+  const currentState = ref<LumiCurrentState>(createEmptyState())
   const updateEveryTurns = useLocalStorageManualReset<number>('settings/lumi/current-state/update-every-turns', 4)
   const persistenceBridge = shallowRef<LumiCurrentStatePersistenceBridge | null>(null)
+  const cognitiveBridge = shallowRef<LumiCurrentStateCognitiveBridge | null>(null)
   const persistenceReady = ref(false)
   const persistenceDbPath = ref('')
   const persistenceLastError = ref('')
   const activeStateUserId = ref(LUMI_DOGGY_USER_ID)
+  const activeStateConversationId = ref('')
+  const cognitiveStates = new Map<string, LumiCurrentState>()
   const detachedStates = new Map<string, LumiCurrentStatePersistenceSnapshot>()
   const detachedLoadPromises = new Map<string, Promise<LumiCurrentStatePersistenceSnapshot>>()
   const detachedWriteQueues = new Map<string, Promise<void>>()
@@ -174,8 +222,46 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     persistenceBridge.value = bridge
   }
 
+  function setCognitiveBridge(bridge: LumiCurrentStateCognitiveBridge | null) {
+    cognitiveBridge.value = bridge
+    cognitiveStates.clear()
+  }
+
   function setActiveStateUser(userId: string) {
     activeStateUserId.value = userId
+  }
+
+  function setActiveStateConversation(conversationId: string) {
+    activeStateConversationId.value = conversationId
+    currentState.value = cognitiveStates.get(cognitiveStateKey(activeStateUserId.value, conversationId))
+      ?? createEmptyState()
+  }
+
+  /** Reloads one exact, direct-conversation Working Memory projection from its host. */
+  async function refreshCognitiveProjection(interaction: ChatInteractionContext) {
+    const key = cognitiveStateKey(interaction.actorId, interaction.conversationId)
+    if (interaction.conversationType === 'group') {
+      const empty = createEmptyState()
+      cognitiveStates.set(key, empty)
+      return empty
+    }
+
+    const bridge = cognitiveBridge.value
+    const state = projectWorkingMemory(bridge
+      ? await bridge.loadWorkingMemory({
+          identity: {
+            actorId: interaction.actorId,
+            personaId: LUMI_AIRI_CARD_ID,
+            conversationId: interaction.conversationId,
+            conversationType: interaction.conversationType,
+            participantUserIds: [...interaction.participantIds],
+          },
+        })
+      : null)
+    cognitiveStates.set(key, state)
+    if (interaction.actorId === activeStateUserId.value && interaction.conversationId === activeStateConversationId.value)
+      currentState.value = state
+    return state
   }
 
   /** Loads one user's short-term state without changing the settings UI identity. */
@@ -206,7 +292,14 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     return load
   }
 
-  function getStateForUser(userId: string) {
+  function getStateForUser(userId: string, conversationId?: string) {
+    if (cognitiveBridge.value) {
+      const targetConversationId = conversationId
+        ?? (userId === activeStateUserId.value ? activeStateConversationId.value : '')
+      if (!targetConversationId)
+        return createEmptyState()
+      return cognitiveStates.get(cognitiveStateKey(userId, targetConversationId)) ?? createEmptyState()
+    }
     if (userId === activeStateUserId.value)
       return currentState.value
     return normalizeState(detachedStates.get(userId)?.state ?? DEFAULT_STATE)
@@ -240,11 +333,14 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
   async function reloadForActiveUser() {
     initializePromise = null
     persistenceReady.value = false
-    currentState.value = normalizeState(DEFAULT_STATE)
+    currentState.value = createEmptyState()
     await initializePersistence()
   }
 
   async function saveCurrentState(next: Partial<LumiCurrentState>, userId = activeStateUserId.value) {
+    if (cognitiveBridge.value)
+      throw new Error('Legacy current_state is read-only while unified cognitive working memory is active')
+
     if (userId !== activeStateUserId.value) {
       return enqueueDetachedWrite(userId, async () => {
         const previous = (await ensureUserStateLoaded(userId)).state
@@ -286,7 +382,7 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
   }
 
   async function clearCurrentState() {
-    currentState.value = normalizeState(DEFAULT_STATE)
+    currentState.value = createEmptyState()
     const bridge = persistenceBridge.value
     if (!bridge)
       return
@@ -298,8 +394,8 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     }
   }
 
-  function buildPromptContext(userId = activeStateUserId.value) {
-    const state = getStateForUser(userId)
+  function buildPromptContext(userId = activeStateUserId.value, conversationId?: string) {
+    const state = getStateForUser(userId, conversationId)
     const sections: string[] = []
     if (state.recentTopics.length)
       sections.push(`最近话题：${state.recentTopics.join('；')}`)
@@ -349,7 +445,10 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     hasState,
 
     setPersistenceBridge,
+    setCognitiveBridge,
     setActiveStateUser,
+    setActiveStateConversation,
+    refreshCognitiveProjection,
     ensureUserStateLoaded,
     getStateForUser,
     initializePersistence,

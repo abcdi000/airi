@@ -1,6 +1,6 @@
 import type { LumiCognitiveIdentity, LumiWorkingMemory } from '@proj-airi/lumi-runtime'
 
-import type { ChatHistoryItem, ChatInteractionContext } from '../types/chat'
+import type { ChatInteractionContext } from '../types/chat'
 
 import { errorMessageFrom } from '@moeru/std'
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
@@ -8,7 +8,6 @@ import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 
 import { LUMI_AIRI_CARD_ID } from '../constants/lumi-card'
-import { extractMessageText } from '../libs/chat-sync'
 import { LUMI_DOGGY_USER_ID } from './lumi-identity'
 
 export interface LumiCurrentState {
@@ -127,76 +126,6 @@ function normalizePersistenceSnapshot(snapshot: LumiCurrentStatePersistenceSnaps
     ...snapshot,
     state: snapshot.state ? normalizeState(snapshot.state) : null,
   }
-}
-
-function parseJsonObject(text: string): Record<string, any> {
-  const trimmed = text.trim()
-  let raw = trimmed
-  if (trimmed.startsWith('```')) {
-    const contentStart = trimmed.indexOf('\n')
-    const contentEnd = trimmed.lastIndexOf('```')
-    if (contentStart >= 0 && contentEnd > contentStart)
-      raw = trimmed.slice(contentStart + 1, contentEnd).trim()
-  }
-  const start = raw.indexOf('{')
-  const end = raw.lastIndexOf('}')
-  if (start < 0 || end < start)
-    throw new Error('Current state response did not contain a JSON object')
-  return JSON.parse(raw.slice(start, end + 1))
-}
-
-export function buildLumiCurrentStateUpdatePrompt() {
-  return [
-    '你是 Lumi 的短期意识状态整理器。请只输出 JSON，不要输出解释。',
-    '任务：根据最近对话、已有用户画像锚点和旧 current_state，更新 Lumi 当前短期意识状态。',
-    '规则：',
-    '- current_state 只表示近期语境，不得改写长期用户画像或 Lumi 核心人格。',
-    '- 单次情绪只写入 userRecentMood，不要把它上升为长期性格判断。',
-    '- 不要编造用户没有说过的经历、喜好、决定。',
-    '- 如果信息不足，对应字段保留旧值或留空。',
-    '- 输出字段必须为：recentTopics, userRecentMood, recentImportantDecisions, activeProjects, unfinishedTasks, relationshipContext, lumiViews, lastContinuationPoint。',
-  ].join('\n')
-}
-
-export function buildLumiCurrentStateUpdateUserPayload(params: {
-  previousState: LumiCurrentState
-  profileContext: string
-  recentMessages: ChatHistoryItem[]
-  userDisplayName?: string
-}) {
-  const userDisplayName = params.userDisplayName?.trim() || 'Doggy'
-  const recent = params.recentMessages
-    .filter(message => message.role === 'user' || message.role === 'assistant')
-    .slice(-16)
-    .map((message) => {
-      const who = message.role === 'user' ? userDisplayName : 'Lumi'
-      return `${who}: ${extractMessageText(message).slice(0, 800)}`
-    })
-    .join('\n')
-
-  return [
-    '旧 current_state:',
-    JSON.stringify(params.previousState, null, 2),
-    '',
-    '相关用户画像锚点:',
-    params.profileContext || '(无相关画像)',
-    '',
-    '最近主线消息:',
-    recent || '(无最近消息)',
-    '',
-    '请输出新的 current_state JSON。',
-  ].join('\n')
-}
-
-export function parseLumiCurrentStateUpdateOutput(text: string, previousState: LumiCurrentState, sourceMessageIds: string[]) {
-  const parsed = parseJsonObject(text)
-  return normalizeState({
-    ...previousState,
-    ...parsed,
-    sourceMessageIds,
-    turnCount: previousState.turnCount + 1,
-    updatedAt: new Date().toISOString(),
-  })
 }
 
 export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => {
@@ -318,7 +247,7 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
       try {
         const snapshot = await bridge.loadCurrentStateFromDatabase()
         persistenceDbPath.value = snapshot.dbPath ?? ''
-        if (snapshot.state)
+        if (!cognitiveBridge.value && snapshot.state)
           currentState.value = normalizeState(snapshot.state)
         persistenceReady.value = true
       }

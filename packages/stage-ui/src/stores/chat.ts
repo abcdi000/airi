@@ -471,7 +471,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     if (cardStore.activeCardId === LUMI_AIRI_CARD_ID && interaction?.actorId) {
       await Promise.all([
         lumiUserProfileStore.ensureUserProfileLoaded(interaction.actorId),
-        lumiCurrentStateStore.ensureUserStateLoaded(interaction.actorId),
         lumiMemoryStore.ensureUserMemoryLoaded(interaction.actorId),
         lumiSocialLanguageStore.initialize(),
       ])
@@ -518,6 +517,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
             transportInput: options.input,
           })
           const sessionMessages = chatSession.getSessionMessages(sessionId)
+          void runLumiCurrentStateAfterTurn(sessionMessages, false, interaction)
           const assistantText = sessionMessages
             .filter(message => message.role === 'assistant')
             .slice(-3)

@@ -155,4 +155,67 @@ describe('lumi-current-state multi-user isolation', () => {
     expect(group.updatedAt).toBe('')
     expect(loadWorkingMemory).toHaveBeenCalledTimes(callsBeforeGroup)
   })
+
+  // ROOT CAUSE:
+  //
+  // Desktop startup initializes the legacy SQLite bridge after installing the
+  // cognitive bridge. A slower legacy read could therefore overwrite a newer,
+  // conversation-scoped Working Memory projection in the settings window.
+  /** @example Legacy migration metadata loads without replacing host-owned projection data. */
+  it('does not replace a cognitive projection when legacy persistence finishes later', async () => {
+    const store = useLumiCurrentStateStore()
+    store.setPersistenceBridge({
+      loadCurrentStateFromDatabase: vi.fn(async () => ({
+        dbPath: 'legacy-current-state.sqlite3',
+        state: {
+          recentTopics: ['legacy topic'],
+          userRecentMood: '',
+          recentImportantDecisions: [],
+          activeProjects: [],
+          unfinishedTasks: [],
+          relationshipContext: '',
+          lumiViews: [],
+          lastContinuationPoint: '',
+          sourceMessageIds: [],
+          turnCount: 4,
+          updatedAt: '2026-07-20T09:00:00.000Z',
+        },
+      })),
+      saveCurrentState: vi.fn(async snapshot => snapshot),
+      clearCurrentState: vi.fn(async () => {}),
+    })
+    store.setCognitiveBridge({
+      loadWorkingMemory: vi.fn(async ({ identity }) => ({
+        ...createLumiWorkingMemory({
+          personId: identity.actorId,
+          personaId: identity.personaId,
+          conversationId: identity.conversationId,
+          conversationType: identity.conversationType,
+          now: '2026-07-29T10:00:00.000Z',
+        }),
+        activeTopics: [{
+          id: 'topic:new',
+          value: 'authoritative topic',
+          evidenceIds: ['evidence:new'],
+          sourceMessageIds: ['message:new'],
+          updatedAt: '2026-07-29T10:00:00.000Z',
+          expiresAt: '2026-07-30T10:00:00.000Z',
+        }],
+      })),
+    })
+    store.setActiveStateUser(LUMI_DOGGY_USER_ID)
+    store.setActiveStateConversation('direct:doggy')
+    await store.refreshCognitiveProjection({
+      conversationId: 'direct:doggy',
+      conversationType: 'direct',
+      actorId: LUMI_DOGGY_USER_ID,
+      participantIds: [LUMI_DOGGY_USER_ID],
+    })
+
+    await store.initializePersistence()
+
+    expect(store.currentState.recentTopics).toEqual(['authoritative topic'])
+    expect(store.currentState.recentTopics).not.toContain('legacy topic')
+    expect(store.persistenceDbPath).toBe('legacy-current-state.sqlite3')
+  })
 })

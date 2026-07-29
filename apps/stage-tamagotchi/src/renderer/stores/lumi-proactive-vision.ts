@@ -1,7 +1,15 @@
 import type { VisionWorkloadId } from '@proj-airi/stage-ui/composables'
 import type { ChatHistoryItem } from '@proj-airi/stage-ui/types/chat'
-import type { SourcesOptions } from 'electron'
 import type { Message, Tool } from '@xsai/shared-chat'
+import type { SourcesOptions } from 'electron'
+
+import type {
+  AutonomousSettingAuditEntry,
+  LumiAutonomousDecisionInput,
+  LumiAutonomousDecisionLogEntry,
+  LumiAutonomousDecisionOutput,
+  LumiAutonomousSummaryMode,
+} from './lumi-proactive-autonomy'
 
 import { defineInvoke } from '@moeru/eventa'
 import { errorMessageFrom } from '@moeru/std'
@@ -11,8 +19,8 @@ import { VISION_WORKLOADS } from '@proj-airi/stage-ui/composables'
 import { LUMI_AIRI_CARD_ID } from '@proj-airi/stage-ui/constants/lumi-card'
 import { extractMessageText } from '@proj-airi/stage-ui/libs/chat-sync'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
-import { useLlmToolsetPromptsStore } from '@proj-airi/stage-ui/stores/llm-toolset-prompts'
 import { useLlmToolsStore } from '@proj-airi/stage-ui/stores/llm-tools'
+import { useLlmToolsetPromptsStore } from '@proj-airi/stage-ui/stores/llm-toolset-prompts'
 import { useLumiAgentStore } from '@proj-airi/stage-ui/stores/lumi-agent'
 import { useLumiCurrentStateStore } from '@proj-airi/stage-ui/stores/lumi-current-state'
 import { useLumiUserProfileStore } from '@proj-airi/stage-ui/stores/lumi-user-profile'
@@ -38,13 +46,6 @@ import {
   LUMI_PROACTIVE_RETURN_CONTEXT_KEY,
   parseAutonomousDecision,
 } from './lumi-proactive-autonomy'
-import type {
-  AutonomousSettingAuditEntry,
-  LumiAutonomousDecisionInput,
-  LumiAutonomousDecisionLogEntry,
-  LumiAutonomousDecisionOutput,
-  LumiAutonomousSummaryMode,
-} from './lumi-proactive-autonomy'
 import { useLumiSelfTodoStore } from './lumi-self-todo'
 
 const DEFAULT_MIN_INTERVAL_MS = 2 * 60 * 1000
@@ -67,17 +68,17 @@ const PROACTIVE_ERROR_NOTICE_COOLDOWN_MS = 10 * 60 * 1000
 const VISION_FAILURE_BACKOFF_BASE_MS = 2 * 60 * 1000
 const VISION_FAILURE_BACKOFF_MAX_MS = 20 * 60 * 1000
 
-type LumiScreenActivity =
-  | 'video'
-  | 'coding'
-  | 'reading'
-  | 'browsing'
-  | 'chatting'
-  | 'gaming'
-  | 'creative'
-  | 'settings'
-  | 'idle'
-  | 'unknown'
+type LumiScreenActivity
+  = | 'video'
+    | 'coding'
+    | 'reading'
+    | 'browsing'
+    | 'chatting'
+    | 'gaming'
+    | 'creative'
+    | 'settings'
+    | 'idle'
+    | 'unknown'
 
 type LumiObservationSalience = 'low' | 'medium' | 'high'
 
@@ -1459,18 +1460,20 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
     return pruned
   }
 
-  function buildAutonomousDecisionInput(entry: LumiEnvironmentContextEntry, repeated: boolean, messages: ChatHistoryItem[]): LumiAutonomousDecisionInput {
+  function buildAutonomousDecisionInput(
+    entry: LumiEnvironmentContextEntry,
+    repeated: boolean,
+    messages: ChatHistoryItem[],
+    context: {
+      currentState: string
+      userProfile: string
+    },
+  ): LumiAutonomousDecisionInput {
     const now = Date.now()
     const latestUserAt = latestMessageAt(messages, 'user')
     const idleMinutes = latestUserAt > 0 ? Math.max(0, Math.round((now - latestUserAt) / 60_000)) : 999
     const activeProject = selfTodoStore.activeProject
     const executableTodo = selfTodoStore.getNextExecutableTodo()
-    const profileContext = userProfileStore.buildRelevantContext({
-      messageText: entry.observation,
-      recentMessages: messages,
-      limit: 6,
-    })
-
     return {
       observationSummary: entry.summary,
       activity: entry.activity,
@@ -1498,14 +1501,36 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
       pendingReflectionCount: 0,
       explicitNegativeFeedback: false,
       budgetState: buildAutonomyBudgetState(),
-      currentStateContext: currentStateStore.buildPromptContext(),
-      userProfileContext: profileContext,
+      currentStateContext: context.currentState,
+      userProfileContext: context.userProfile,
       recentDiarySummary: diarySchedulerStore.lastStatus || '',
     }
   }
 
-  async function decideAfterObservation(entry: LumiEnvironmentContextEntry, repeated: boolean, messages: ChatHistoryItem[]) {
-    const input = buildAutonomousDecisionInput(entry, repeated, messages)
+  async function decideAfterObservation(
+    sessionId: string,
+    entry: LumiEnvironmentContextEntry,
+    repeated: boolean,
+    messages: ChatHistoryItem[],
+  ) {
+    const interaction = chatSession.getInteractionContext(sessionId)
+    let currentState = ''
+    let userProfile = ''
+    if (interaction?.actorId && interaction.conversationType === 'direct') {
+      try {
+        await currentStateStore.refreshCognitiveProjection(interaction)
+        currentState = currentStateStore.buildPromptContext(interaction.actorId, interaction.conversationId)
+      }
+      catch (error) {
+        console.warn('[lumi-proactive-vision] Working Memory projection unavailable; continuing without it.', error)
+      }
+      userProfile = userProfileStore.buildRelevantContext({
+        messageText: entry.observation,
+        recentMessages: messages,
+        limit: 6,
+      }, interaction.actorId)
+    }
+    const input = buildAutonomousDecisionInput(entry, repeated, messages, { currentState, userProfile })
     if (!autonomousEnabled.value)
       return fallbackAutonomousDecision({ ...input, quietMode: false, summaryMode: 'normal' })
 
@@ -1788,7 +1813,7 @@ export const useLumiProactiveVisionStore = defineStore('lumi-proactive-vision', 
       lowChangeStreak.value = repeated && entry.salience === 'low'
         ? Number(lowChangeStreak.value || 0) + 1
         : 0
-      const decision = await decideAfterObservation(entry, repeated, chatSession.getSessionMessages(sessionId))
+      const decision = await decideAfterObservation(sessionId, entry, repeated, chatSession.getSessionMessages(sessionId))
       await executeAutonomousDecision(sessionId, entry, decision)
       if (decision.mode === 'observe_quietly' || decision.mode === 'rest')
         skippedCount.value += 1

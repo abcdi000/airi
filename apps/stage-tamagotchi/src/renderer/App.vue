@@ -50,6 +50,7 @@ import {
   electronGodotStageGetStatus,
   electronGodotStageStatusChanged,
   electronImportLumiChannelDeviceArchive,
+  electronLumiCognitiveConsolidateEpisode,
   electronLumiCognitivePrepareTurn,
   electronLumiCognitiveRecordUse,
   electronLumiCurrentStateClear,
@@ -218,6 +219,7 @@ const syncLumiMemoryVector = useElectronEventaInvoke(electronLumiMemorySyncVecto
 const saveLumiMemoryEvent = useElectronEventaInvoke(electronLumiMemorySaveEvent)
 const setLumiMemorySeedId = useElectronEventaInvoke(electronLumiMemorySetSeedId)
 const clearLumiMemory = useElectronEventaInvoke(electronLumiMemoryClear)
+const consolidateLumiCognitiveEpisode = useElectronEventaInvoke(electronLumiCognitiveConsolidateEpisode)
 const prepareLumiCognitiveTurn = useElectronEventaInvoke(electronLumiCognitivePrepareTurn)
 const recordLumiCognitiveUse = useElectronEventaInvoke(electronLumiCognitiveRecordUse)
 const getLumiSocialLanguageSnapshot = useElectronEventaInvoke(electronLumiSocialLanguageGetSnapshot)
@@ -367,6 +369,12 @@ chatOrchestratorStore.setDesktopCognitivePort({
       hypothesisIds: [...hypothesisIds],
       usedAt,
     })
+  },
+  async consolidateEpisode(input) {
+    await consolidateLumiCognitiveEpisode(toIpcPayload({
+      ...input,
+      sourceMessageIds: [...input.sourceMessageIds],
+    }))
   },
 })
 

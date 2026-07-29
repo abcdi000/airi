@@ -694,8 +694,23 @@ export interface ElectronLumiCognitiveRecordUseRequest {
   usedAt: string
 }
 
+/** Persists one accepted Agent Runtime checkpoint through the main-process cognitive host. */
+export interface ElectronLumiCognitiveConsolidateEpisodeRequest {
+  /** Immutable direct-conversation identity from the latest validated bundle. */
+  identity: LumiCognitiveIdentity
+  /** Stable dialogue checkpoint identifier. */
+  episodeId: string
+  /** Model-derived continuity summary. */
+  summary: string
+  /** Ordered source messages covered by the checkpoint. */
+  sourceMessageIds: string[]
+  /** ISO timestamp at which Agent Runtime accepted the checkpoint. */
+  occurredAt: string
+}
+
 export const electronLumiCognitivePrepareTurn = defineInvokeEventa<LumiCognitiveContextBundle, ElectronLumiCognitivePrepareTurnRequest>('eventa:invoke:electron:lumi-cognitive:prepare-turn')
 export const electronLumiCognitiveRecordUse = defineInvokeEventa<void, ElectronLumiCognitiveRecordUseRequest>('eventa:invoke:electron:lumi-cognitive:record-use')
+export const electronLumiCognitiveConsolidateEpisode = defineInvokeEventa<void, ElectronLumiCognitiveConsolidateEpisodeRequest>('eventa:invoke:electron:lumi-cognitive:consolidate-episode')
 
 export interface ElectronLumiSocialLanguageSnapshot {
   version: 1 | 2 | 3 | 4

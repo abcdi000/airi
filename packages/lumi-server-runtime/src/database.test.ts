@@ -552,6 +552,76 @@ describe('lumiServerDatabase', () => {
     }
   })
 
+  /** @example A server checkpoint becomes one private episode and remains actor-isolated. */
+  it('persists context compaction as idempotent derived episodic cognition', () => {
+    const database = LumiServerDatabase.open(':memory:')
+    try {
+      const identity = cognitiveIdentity()
+      for (const [messageId, content] of [
+        ['episode-message-1', 'Continue the Patchright migration.'],
+        ['episode-message-2', 'Keep the unresolved browser decision.'],
+      ] as const) {
+        database.acceptUserMessage({
+          conversationId: doggyDirectId,
+          actorPersonId: DOGGY_PERSON_ID,
+          messageId,
+          idempotencyKey: messageId,
+          content,
+          createdAt: Date.parse('2026-07-29T08:00:00.000Z'),
+        })
+        database.commitCognitiveFastLoop({
+          identity,
+          evidence: cognitiveEvidence(messageId, content),
+          feedback: [],
+          workingMemory: createLumiWorkingMemory({
+            personId: identity.actorId,
+            personaId: identity.personaId,
+            conversationId: identity.conversationId,
+            conversationType: identity.conversationType,
+            now: '2026-07-29T08:00:00.000Z',
+          }),
+        })
+      }
+
+      const input = {
+        identity,
+        episodeId: 'dialogue:1:summary:1',
+        summary: 'Doggy and Lumi kept the Patchright migration and its unresolved browser decision.',
+        sourceMessageIds: ['episode-message-1', 'assistant-message-1', 'episode-message-2'],
+        occurredAt: '2026-07-29T08:05:00.000Z',
+      }
+      const memory = database.consolidateCognitiveEpisode(input)
+      const repeated = database.consolidateCognitiveEpisode(input)
+
+      expect(repeated.id).toBe(memory.id)
+      expect(database.loadAccessibleMemoriesByIds(identity, [memory.id])).toEqual([
+        expect.objectContaining({
+          id: memory.id,
+          type: 'shared_event',
+          scope: 'private',
+          visibility: 'private',
+          sourceEpisodeStartMessageId: 'episode-message-1',
+          sourceEpisodeEndMessageId: 'episode-message-2',
+          evidenceOrigin: 'derived',
+        }),
+      ])
+      expect(database.loadAccessibleMemoriesByIds(cognitiveIdentity(
+        MOUSSY_PERSON_ID,
+        moussyDirectId,
+      ), [memory.id])).toEqual([])
+      const archive = database.exportBackup()
+      expect(archive.sections.cognitiveEvidence).toContainEqual(expect.objectContaining({
+        kind: 'conversation_episode',
+        origin: 'derived',
+        author_verified: 0,
+      }))
+      expect(archive.sections.cognitiveEvidenceLineage).toHaveLength(2)
+    }
+    finally {
+      database.close()
+    }
+  })
+
   it('consolidates an explicit correction and supersedes only its prior evidence-backed memory', () => {
     const database = LumiServerDatabase.open(':memory:')
     try {

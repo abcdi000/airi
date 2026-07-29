@@ -5,6 +5,7 @@ import type {
   LumiCognitiveIdentity,
   LumiCognitiveProfileProjection,
   LumiCognitiveProjectionState,
+  LumiConversationEpisode,
   LumiFeedbackEvent,
   LumiMemoryFragment,
   LumiWorkingMemory,
@@ -13,6 +14,7 @@ import type {
 
 import type {
   ElectronLumiCognitiveArchive,
+  ElectronLumiCognitiveConsolidateEpisodeRequest,
   ElectronLumiCognitivePrepareTurnRequest,
   ElectronLumiCognitiveRecordUseRequest,
 } from '../../../../shared/eventa'
@@ -21,6 +23,7 @@ import type { SqliteDatabase } from './index'
 
 import { defineInvokeHandler } from '@moeru/eventa'
 import {
+  createLumiConversationEpisode,
   deriveLumiMemoryCognitiveObservation,
   maintainLumiCognitiveState,
   observeLumiBeliefHypothesis,
@@ -30,6 +33,7 @@ import {
 } from '@proj-airi/lumi-runtime'
 
 import {
+  electronLumiCognitiveConsolidateEpisode,
   electronLumiCognitivePrepareTurn,
   electronLumiCognitiveRecordUse,
 } from '../../../../shared/eventa'
@@ -59,6 +63,10 @@ export interface LumiDesktopCognitiveServiceOptions extends LegacyDesktopCogniti
   }) => Promise<LumiMemoryFragment[]>
   /** Existing social-language snapshot, used only as non-authorizing guidance. */
   getSocialLanguageSnapshot: () => Promise<SocialLanguageSnapshot>
+  /** Existing canonical memory writer used inside the cognitive transaction. */
+  persistMemory: (db: SqliteDatabase, memory: LumiMemoryFragment) => void
+  /** Optional vector-index synchronization scheduled after the transaction. */
+  onMemoryPersisted?: (memory: LumiMemoryFragment) => void
 }
 
 /**
@@ -93,6 +101,83 @@ export function createLumiDesktopCognitiveService(
     ensureCognitiveSchema(db)
     recordContextUse(db, request)
   })
+  defineInvokeHandler(options.context, electronLumiCognitiveConsolidateEpisode, async (request) => {
+    const { db } = await options.getDatabase()
+    const episode = consolidateDesktopConversationEpisode(db, request, options.persistMemory)
+    options.onMemoryPersisted?.(episode.memory)
+  })
+}
+
+/**
+ * Persists one desktop context checkpoint with private evidence lineage.
+ *
+ * Use when:
+ * - The Electron main process accepts Agent Runtime's idle compaction result
+ *
+ * Expects:
+ * - The caller supplies the canonical memory writer for the shared database
+ * - Source evidence was already committed by the cognitive fast loop
+ *
+ * Returns:
+ * - The idempotently persisted evidence and episodic memory
+ */
+export function consolidateDesktopConversationEpisode(
+  db: SqliteDatabase,
+  input: ElectronLumiCognitiveConsolidateEpisodeRequest,
+  persistMemory: (db: SqliteDatabase, memory: LumiMemoryFragment) => void,
+): LumiConversationEpisode {
+  ensureCognitiveSchema(db)
+  assertIdentity(input.identity)
+  const sourceMessageIds = uniqueStrings(input.sourceMessageIds, 500)
+  if (sourceMessageIds.length === 0)
+    throw new Error('Desktop cognitive episode has no source messages')
+  const placeholders = sourceMessageIds.map(() => '?').join(', ')
+  const primaryEvidence = db.prepare(`
+    SELECT * FROM lumi_cognitive_evidence
+    WHERE actor_id = ? AND conversation_id = ?
+      AND origin = 'primary' AND author_verified = 1
+      AND source_message_id IN (${placeholders})
+    ORDER BY occurred_at ASC, id ASC
+  `).all(
+    input.identity.actorId,
+    input.identity.conversationId,
+    ...sourceMessageIds,
+  ).flatMap(rowToEvidence)
+  const episode = createLumiConversationEpisode({
+    ...input,
+    sourceMessageIds,
+    primaryEvidence,
+  })
+
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const existingEvidence = db.prepare(
+      'SELECT * FROM lumi_cognitive_evidence WHERE id = ?',
+    ).get(episode.evidence.id)
+    if (existingEvidence) {
+      if (!sameEvidence(existingEvidence, episode.evidence))
+        throw new Error('Desktop cognitive episode evidence id was reused for different content')
+    }
+    else {
+      writeEvidence(db, episode.evidence)
+    }
+    const existingMemory = db.prepare(
+      'SELECT id, user_id FROM lumi_memories WHERE id = ?',
+    ).get(episode.memory.id)
+    if (existingMemory) {
+      if (existingMemory.user_id !== episode.memory.userId)
+        throw new Error('Desktop cognitive episode memory belongs to another actor')
+    }
+    else {
+      persistMemory(db, episode.memory)
+    }
+    db.exec('COMMIT')
+  }
+  catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+  return episode
 }
 
 /** Result of consolidating one model-curated memory through primary evidence. */
@@ -1365,11 +1450,12 @@ function sameEvidence(row: Record<string, unknown>, evidence: LumiCognitiveEvide
     && row.source_id === (evidence.sourceId ?? null)
     && row.source_message_id === (evidence.sourceMessageId ?? null)
     && row.occurred_at === evidence.occurredAt
-    && Number(row.author_verified) === 1
+    && Number(row.author_verified) === (evidence.authorVerified ? 1 : 0)
     && row.scope === evidence.scope
     && row.sensitivity === evidence.sensitivity
     && sameStringSet(jsonStringArray(row.subject_user_ids_json), evidence.subjectUserIds)
     && sameStringSet(jsonStringArray(row.participant_user_ids_json), evidence.participantUserIds)
+    && sameStringSet(jsonStringArray(row.derived_from_evidence_ids_json), evidence.derivedFromEvidenceIds)
 }
 
 function jsonStringArray(value: unknown): string[] {

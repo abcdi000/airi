@@ -1,4 +1,7 @@
-import type { LumiCognitiveContextBundle } from '@proj-airi/lumi-runtime'
+import type {
+  LumiCognitiveContextBundle,
+  LumiCognitiveIdentity,
+} from '@proj-airi/lumi-runtime'
 
 import type { DirectPerceptionEnvelope } from '../input'
 
@@ -16,6 +19,20 @@ export interface CognitiveDialogueTurn {
   feedbackTargetIds?: readonly string[]
   /** Original event timestamp. */
   timestamp: number
+}
+
+/** Immutable context checkpoint supplied to the host medium-loop service. */
+export interface CognitiveEpisodeConsolidationInput {
+  /** Identity validated during the latest successful cognitive preparation. */
+  identity: LumiCognitiveIdentity
+  /** Stable dialogue checkpoint identifier. */
+  episodeId: string
+  /** Model-derived continuity summary. */
+  summary: string
+  /** Ordered source messages covered by the summary. */
+  sourceMessageIds: readonly string[]
+  /** ISO timestamp at which Agent Runtime accepted the checkpoint. */
+  occurredAt: string
 }
 
 /**
@@ -43,4 +60,6 @@ export interface CognitiveContextPort {
     hypothesisIds: readonly string[]
     usedAt: string
   }) => Promise<void>
+  /** Persists one successful idle compaction as derived episodic cognition. */
+  consolidateEpisode?: (input: CognitiveEpisodeConsolidationInput) => Promise<void>
 }

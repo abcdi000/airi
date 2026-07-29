@@ -13,6 +13,7 @@ import { migrateSocialLanguageSnapshot } from '@proj-airi/lumi-runtime'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  electronLumiCognitiveConsolidateEpisode,
   electronLumiCognitivePrepareTurn,
   electronLumiCognitiveRecordUse,
 } from '../../../../shared/eventa'
@@ -88,6 +89,18 @@ function database(): DatabaseSync {
   return db
 }
 
+function persistTestMemory(db: SqliteDatabase, value: LumiMemoryFragment): void {
+  db.prepare(`
+    INSERT INTO lumi_memories (id, user_id, status, scope, last_used_at, updated_at)
+    VALUES (?, ?, ?, ?, NULL, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      user_id = excluded.user_id,
+      status = excluded.status,
+      scope = excluded.scope,
+      updated_at = excluded.updated_at
+  `).run(value.id, value.userId, value.status, value.scope ?? 'relationship', value.updatedAt)
+}
+
 describe('desktop cognitive service', () => {
   it('persists evidence, reuses low-information recall, and records actual Planner use', async () => {
     const db = database()
@@ -114,6 +127,7 @@ describe('desktop cognitive service', () => {
     createLumiDesktopCognitiveService({
       context: context as never,
       getDatabase: async () => ({ db: db as SqliteDatabase }),
+      persistMemory: persistTestMemory,
       recall,
       loadMemoriesByIds,
       getSocialLanguageSnapshot: async () => migrateSocialLanguageSnapshot({}),
@@ -139,6 +153,7 @@ describe('desktop cognitive service', () => {
         updatedAt: new Date().toISOString(),
       }),
     })
+    const consolidateEpisode = defineInvoke(context, electronLumiCognitiveConsolidateEpisode)
     const prepareTurn = defineInvoke(context, electronLumiCognitivePrepareTurn)
     const recordUse = defineInvoke(context, electronLumiCognitiveRecordUse)
 
@@ -187,6 +202,30 @@ describe('desktop cognitive service', () => {
     expect(db.prepare(`SELECT COUNT(*) AS count FROM lumi_cognitive_evidence WHERE origin = 'primary'`).get()?.count).toBe(2)
     expect(db.prepare(`SELECT phase FROM lumi_cognitive_migrations WHERE source_kind = 'legacy_desktop_cognition'`).get()?.phase).toBe('active')
 
+    const episodeInput = {
+      identity,
+      episodeId: 'dialogue:1:summary:1',
+      summary: 'Doggy and Lumi confirmed the Patchright default and kept the browser decision.',
+      sourceMessageIds: ['message:1', 'reply:1', 'message:2'],
+      occurredAt: '2026-07-29T08:05:00.000Z',
+    }
+    await consolidateEpisode(episodeInput)
+    await consolidateEpisode(episodeInput)
+    const episodeEvidence = db.prepare(`
+      SELECT * FROM lumi_cognitive_evidence WHERE kind = 'conversation_episode'
+    `).get()
+    expect(episodeEvidence).toMatchObject({
+      origin: 'derived',
+      author_verified: 0,
+      scope: 'private',
+      sensitivity: 'private',
+    })
+    expect(JSON.parse(String(episodeEvidence?.derived_from_evidence_ids_json))).toHaveLength(2)
+    expect(db.prepare(`
+      SELECT COUNT(*) AS count FROM lumi_memories
+      WHERE user_id = ? AND scope = 'private'
+    `).get(identity.actorId)?.count).toBe(1)
+
     db.prepare(`
       INSERT INTO lumi_memories (id, user_id, status, scope, last_used_at, use_count)
       VALUES (?, ?, 'active', 'private', NULL, 0)
@@ -209,6 +248,7 @@ describe('desktop cognitive service', () => {
     createLumiDesktopCognitiveService({
       context: context as never,
       getDatabase: async () => ({ db: db as SqliteDatabase }),
+      persistMemory: persistTestMemory,
       recall: async () => ({
         memories: [],
         trace: {
@@ -250,6 +290,7 @@ describe('desktop cognitive service', () => {
     createLumiDesktopCognitiveService({
       context: context as never,
       getDatabase: async () => ({ db: db as SqliteDatabase }),
+      persistMemory: persistTestMemory,
       recall: async () => ({
         memories: [],
         trace: {
@@ -363,6 +404,7 @@ describe('desktop cognitive service', () => {
     createLumiDesktopCognitiveService({
       context: context as never,
       getDatabase: async () => ({ db: db as SqliteDatabase }),
+      persistMemory: persistTestMemory,
       recall: async () => ({
         memories: [],
         trace: {
@@ -408,6 +450,7 @@ describe('desktop cognitive service', () => {
     createLumiDesktopCognitiveService({
       context: context as never,
       getDatabase: async () => ({ db: db as SqliteDatabase }),
+      persistMemory: persistTestMemory,
       recall: async () => ({
         memories: [],
         trace: {
@@ -470,6 +513,7 @@ describe('desktop cognitive service', () => {
     createLumiDesktopCognitiveService({
       context: context as never,
       getDatabase: async () => ({ db: db as SqliteDatabase }),
+      persistMemory: persistTestMemory,
       recall: async () => ({
         memories: [],
         trace: {

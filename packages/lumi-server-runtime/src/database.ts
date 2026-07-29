@@ -1,4 +1,7 @@
-import type { PersistedSessionState } from '@proj-airi/lumi-agent-runtime'
+import type {
+  CognitiveEpisodeConsolidationInput,
+  PersistedSessionState,
+} from '@proj-airi/lumi-agent-runtime'
 import type {
   LumiOnlineConversation,
   LumiOnlineMessage,
@@ -33,6 +36,7 @@ import {
   canAccessLumiMemory,
   classifyLumiMemoryCandidate,
   createEmptySocialLanguageSnapshot,
+  createLumiConversationEpisode,
   decideLumiMemoryStatus,
   deriveLumiMemoryCognitiveObservation,
   maintainLumiCognitiveState,
@@ -2262,6 +2266,63 @@ export class LumiServerDatabase {
   }
 
   /**
+   * Persists one accepted context checkpoint as derived private cognition.
+   *
+   * Use when:
+   * - Agent Runtime completed background compaction for a direct conversation
+   *
+   * Expects:
+   * - Source message IDs came from the immutable compactor provenance
+   * - Primary evidence already exists for at least one covered user message
+   *
+   * Returns:
+   * - The idempotently persisted private episodic memory
+   */
+  consolidateCognitiveEpisode(
+    input: CognitiveEpisodeConsolidationInput,
+  ): LumiMemoryFragment {
+    this.assertCognitiveIdentity(input.identity)
+    if (input.identity.conversationType !== 'direct')
+      throw new Error('Cognitive episode consolidation accepts direct conversations only')
+    const sourceMessageIds = uniqueRequiredTexts(
+      input.sourceMessageIds,
+      'episode source message id',
+      240,
+      500,
+    )
+    if (sourceMessageIds.length === 0)
+      throw new Error('Cognitive episode has no source messages')
+    const placeholders = sourceMessageIds.map(() => '?').join(', ')
+    const primaryEvidence = this.rows(`
+      SELECT * FROM lumi_cognitive_evidence
+      WHERE actor_id = ? AND conversation_id = ?
+        AND origin = 'primary' AND author_verified = 1
+        AND source_message_id IN (${placeholders})
+      ORDER BY occurred_at ASC, id ASC
+    `, input.identity.actorId, input.identity.conversationId, ...sourceMessageIds)
+      .map(row => this.cognitiveEvidenceFromRow(row))
+      .filter(evidence => canAccessCognitiveEvidence(evidence, input.identity))
+    const episode = createLumiConversationEpisode({
+      ...input,
+      sourceMessageIds,
+      primaryEvidence,
+    })
+
+    this.transaction(() => {
+      this.writeCognitiveEvidence(episode.evidence)
+      const row = this.row('SELECT * FROM lumi_memories WHERE id = ?', episode.memory.id)
+      if (!row) {
+        this.writeMemory(episode.memory)
+        return
+      }
+      const existing = memoryFromRow(row)
+      if (!sameConversationEpisodeMemory(existing, episode.memory))
+        throw new Error('Cognitive episode memory id was reused for different content')
+    })
+    return episode.memory
+  }
+
+  /**
    * Runs deterministic decay and projection rebuilding outside the reply path.
    *
    * Use when:
@@ -3498,6 +3559,27 @@ function sameCognitiveFeedback(row: SqliteRow, feedback: LumiFeedbackEvent): boo
     && Number(row.author_verified) === (feedback.authorVerified ? 1 : 0)
     && row.scope === feedback.scope
     && row.sensitivity === feedback.sensitivity
+}
+
+function sameConversationEpisodeMemory(
+  left: LumiMemoryFragment,
+  right: LumiMemoryFragment,
+): boolean {
+  return left.id === right.id
+    && left.userId === right.userId
+    && left.personaId === right.personaId
+    && left.conversationId === right.conversationId
+    && left.type === right.type
+    && left.content === right.content
+    && left.status === right.status
+    && left.scope === right.scope
+    && left.visibility === right.visibility
+    && left.sensitivity === right.sensitivity
+    && left.sourceEpisodeStartMessageId === right.sourceEpisodeStartMessageId
+    && left.sourceEpisodeEndMessageId === right.sourceEpisodeEndMessageId
+    && sameStringSet(left.participantUserIds ?? [], right.participantUserIds ?? [])
+    && sameStringSet(left.subjectUserIds ?? [], right.subjectUserIds ?? [])
+    && sameStringSet(left.derivedFromEvidenceIds ?? [], right.derivedFromEvidenceIds ?? [])
 }
 
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {

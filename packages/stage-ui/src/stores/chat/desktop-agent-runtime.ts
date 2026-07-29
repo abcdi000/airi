@@ -138,6 +138,9 @@ export class DesktopLumiAgentHost {
     recordContextUse: async (input) => {
       await this.#requiredCognitive().recordContextUse?.(input)
     },
+    consolidateEpisode: async (input) => {
+      await this.#requiredCognitive().consolidateEpisode?.(input)
+    },
   }
 
   /**

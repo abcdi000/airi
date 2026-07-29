@@ -1,5 +1,6 @@
 export * from './beliefs'
 export * from './context'
+export * from './episode'
 export * from './feedback'
 export * from './maintenance'
 export * from './memory-consolidation'

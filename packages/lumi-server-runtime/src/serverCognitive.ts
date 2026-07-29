@@ -153,6 +153,9 @@ export function createServerCognitiveContextPort(
         usedAt,
       })
     },
+    async consolidateEpisode(input) {
+      options.database.consolidateCognitiveEpisode(input)
+    },
   }
 }
 

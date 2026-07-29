@@ -522,6 +522,13 @@ export function createLumiMemoryService(params: {
     recall: recallCognitiveMemories,
     loadMemoriesByIds: loadCognitiveMemoriesByIds,
     getSocialLanguageSnapshot: async () => migrateSocialLanguageSnapshot(await getSocialLanguageSnapshot()),
+    persistMemory: (db, memory) => upsertMemoryWithDb(db, memory),
+    onMemoryPersisted: (memory) => {
+      void syncVectorForMemory(memory).catch(error => console.warn(
+        '[lumi-cognitive] failed to index consolidated episode',
+        error,
+      ))
+    },
     loadLegacyCurrentState: async actorId => (await loadCurrentStateFromDatabase(actorId)).state,
     loadLegacyProfile: async actorId => (await loadProfileFromDatabase(actorId)).entries,
   })

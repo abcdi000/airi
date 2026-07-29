@@ -1,4 +1,9 @@
-import type { LumiCognitiveContextBundle, LumiFeedbackEvent, LumiVisibleReply } from '@proj-airi/lumi-runtime'
+import type {
+  LumiCognitiveContextBundle,
+  LumiCognitiveIdentity,
+  LumiFeedbackEvent,
+  LumiVisibleReply,
+} from '@proj-airi/lumi-runtime'
 
 import type {
   DialogueAssistantMessage,
@@ -165,6 +170,7 @@ export class SessionRuntime {
   #compactionTimer?: ReturnType<typeof setTimeout>
   #compactionController?: AbortController
   #activeCognitiveContext?: LumiCognitiveContextBundle
+  #lastCognitiveIdentity?: LumiCognitiveIdentity
 
   constructor(options: {
     conversationId: string
@@ -924,6 +930,10 @@ export class SessionRuntime {
       })
       validateCognitiveBundleIdentity(bundle, turn.envelope)
       this.#activeCognitiveContext = bundle
+      this.#lastCognitiveIdentity = {
+        ...bundle.identity,
+        participantUserIds: [...bundle.identity.participantUserIds],
+      }
       this.#replaceCognitiveReferences(bundle)
       await this.#trace?.record({
         type: 'automatic_recall',
@@ -1355,6 +1365,7 @@ export class SessionRuntime {
       return
     const expectedGeneration = this.#generation
     const snapshot = this.#history
+    const cognitiveIdentity = this.#lastCognitiveIdentity
     const controller = new AbortController()
     this.#compactionController = controller
     this.#compaction = compactContext({
@@ -1389,6 +1400,32 @@ export class SessionRuntime {
       this.#stablePrefixHash = result.stablePrefixHash
       this.#dialogueSegmentId = result.dialogueSegmentId
       await this.#save()
+      const summary = result.history.find((message): message is ReferenceMessage =>
+        message.kind === 'reference'
+        && message.referenceType === 'continuity_summary'
+        && message.provenance.sourceIds.length > 0)
+      if (
+        summary
+        && cognitiveIdentity
+        && this.#cognitive?.consolidateEpisode
+        && !controller.signal.aborted
+      ) {
+        try {
+          await this.#cognitive.consolidateEpisode({
+            identity: cognitiveIdentity,
+            episodeId: `${result.dialogueSegmentId}:summary:${result.summaryVersion}`,
+            summary: summary.content,
+            sourceMessageIds: result.summarizedSourceIds,
+            occurredAt: new Date(summary.timestamp).toISOString(),
+          })
+        }
+        catch (error) {
+          console.warn(
+            '[lumi-agent-runtime] cognitive episode consolidation failed safely',
+            errorMessageFrom(error) ?? error,
+          )
+        }
+      }
     }).catch(error => console.warn(
       '[lumi-agent-runtime] context compaction failed safely',
       error,

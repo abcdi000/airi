@@ -5,6 +5,8 @@ import type {
   AgentToolsPort,
   AgentTraceEvent,
   CognitiveContextPort,
+  DialogueAssistantMessage,
+  DialogueUserMessage,
   DirectOutboundAdapter,
   DirectPerceptionEnvelope,
   LanguageModelPort,
@@ -236,10 +238,19 @@ function createHarness(input: {
   }
   const replyTexts = [...(input.replyTexts ?? ['收到'])]
   const replyOutputs = [...(input.replyOutputs ?? [])]
-  const generate = vi.fn<LanguageModelPort['generate']>(async () => replyOutputs.shift() ?? JSON.stringify({
-    messages: [{ text: replyTexts.shift() ?? '收到' }],
-    appliedExpressionIds: [],
-  }))
+  const generate = vi.fn<LanguageModelPort['generate']>(async (messages, purpose) => {
+    if (purpose === 'context_summary') {
+      const payload = JSON.parse(messages[1]?.content ?? '{}') as { coverageToken?: string }
+      return JSON.stringify({
+        summary: 'Doggy and Lumi kept the active project and unresolved decision for continuity.',
+        coverageToken: payload.coverageToken,
+      })
+    }
+    return replyOutputs.shift() ?? JSON.stringify({
+      messages: [{ text: replyTexts.shift() ?? '收到' }],
+      appliedExpressionIds: [],
+    })
+  })
   const languageModel = { generate }
   const runtime = new LumiAgentRuntime({
     config: {
@@ -1528,6 +1539,96 @@ describe('lumiAgentRuntime direct session', () => {
     const serialized = JSON.stringify(traces.filter(event => event.type === 'model_request'))
     expect(serialized).toContain('[REDACTED]')
     expect(serialized).not.toContain('private-value')
+  })
+
+  // ROOT CAUSE:
+  //
+  // Context compaction used to persist only a continuity reference. The
+  // medium cognitive loop never received the grounded source range, so old
+  // dialogue disappeared from typed history without becoming an episode.
+  //
+  // We fixed this by notifying the host cognitive port after an accepted idle
+  // checkpoint, while keeping consolidation failure outside the reply path.
+  /** @example An accepted idle checkpoint becomes one host-owned episode. */
+  it('consolidates a successful context checkpoint after the visible reply', async () => {
+    const persistence = createPersistence()
+    const history = Array.from({ length: 18 }, (_, index): DialogueUserMessage | DialogueAssistantMessage => {
+      const timestamp = 1_700_000_000_000 + index
+      if (index % 2 === 0) {
+        return {
+          id: `history-user:${index}`,
+          kind: 'dialogue_user',
+          messageId: `history-message:${index}`,
+          personId: 'doggy',
+          text: `user history ${index}`,
+          segments: [{ type: 'text', text: `user history ${index}` }],
+          attachments: [],
+          timestamp,
+          countInContext: true,
+          remainingUses: null,
+          source: 'test',
+          visibility: 'both',
+          provenance: {
+            origin: 'test',
+            sourceIds: [`history-message:${index}`],
+          },
+        }
+      }
+      return {
+        id: `history-assistant:${index}`,
+        kind: 'dialogue_assistant',
+        messageIds: [`history-message:${index}`],
+        textSegments: [`assistant history ${index}`],
+        appliedExpressionIds: [],
+        timestamp,
+        countInContext: true,
+        remainingUses: null,
+        source: 'test',
+        visibility: 'both',
+        provenance: {
+          origin: 'test',
+          sourceIds: [`history-message:${index}`],
+        },
+      }
+    })
+    persistence.sessions.set('direct-doggy', {
+      conversationId: 'direct-doggy',
+      contextEpoch: 0,
+      summaryVersion: 0,
+      stablePrefixHash: '',
+      dialogueSegmentId: 'dialogue:0',
+      generation: 0,
+      history,
+      completedEvents: [],
+    })
+    const consolidateEpisode = vi.fn<NonNullable<CognitiveContextPort['consolidateEpisode']>>(async () => {})
+    const currentEnvelope = envelope(20, 'continue the project')
+    const harness = createHarness({
+      persistence,
+      plannerModel: {
+        generateStep: vi.fn(async () => plannerStep([replyCall()])),
+      },
+      cognitive: {
+        prepareTurn: vi.fn(async () => cognitiveBundle(currentEnvelope)),
+        consolidateEpisode,
+      },
+      config: {
+        contextCompactionIdleMs: 0,
+        contextCompactionThresholdMessages: 16,
+        contextRecentMessages: 8,
+      },
+    })
+
+    const result = await harness.runtime.ingestDirect(currentEnvelope)
+    await waitUntil(() => consolidateEpisode.mock.calls.length === 1)
+
+    expect(result.endReason).toBe('reply_sent')
+    expect(consolidateEpisode).toHaveBeenCalledWith(expect.objectContaining({
+      identity: cognitiveBundle(currentEnvelope).identity,
+      episodeId: 'dialogue:1:summary:1',
+      summary: 'Doggy and Lumi kept the active project and unresolved decision for continuity.',
+    }))
+    expect(consolidateEpisode.mock.calls[0]?.[0].sourceMessageIds).toContain('history-message:0')
   })
 
   it('deduplicates the same platform event while it is in flight', async () => {

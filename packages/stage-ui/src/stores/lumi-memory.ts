@@ -108,6 +108,18 @@ export interface LumiMemoryPersistenceSnapshot {
   dbPath?: string
   /** Persisted semantic vectors included in complete archives and server migrations. */
   vectors?: LumiMemoryVectorRecord[]
+  /** Actor-scoped cognitive data included only in explicit archives. */
+  cognitive?: LumiCognitivePersistenceArchive
+}
+
+/** Versioned cognitive rows transferred without hydrating them into Renderer state. */
+export interface LumiCognitivePersistenceArchive {
+  version: 1
+  evidence: Record<string, unknown>[]
+  workingMemory: Record<string, unknown>[]
+  feedback: Record<string, unknown>[]
+  beliefs: Record<string, unknown>[]
+  profileProjections: Record<string, unknown>[]
 }
 
 export interface LumiMemoryVectorRecord {
@@ -137,7 +149,7 @@ export interface LumiMemoryBackendVectorStatus {
 }
 
 export interface LumiMemoryPersistenceBridge {
-  getSnapshot: (payload: { userId: string }) => Promise<LumiMemoryPersistenceSnapshot>
+  getSnapshot: (payload: { userId: string, includeCognitive?: boolean }) => Promise<LumiMemoryPersistenceSnapshot>
   replaceSnapshot: (payload: { userId: string, snapshot: LumiMemoryPersistenceSnapshot }) => Promise<LumiMemoryPersistenceSnapshot>
   upsertMemory: (memory: LumiMemoryFragment) => Promise<void>
   deleteMemory: (payload: { id: string, userId: string }) => Promise<void>
@@ -950,7 +962,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     await initializePersistence()
     const bridge = persistenceBridge.value
     if (bridge) {
-      const snapshot = await bridge.getSnapshot({ userId: currentUserId() })
+      const snapshot = await bridge.getSnapshot({ userId: currentUserId(), includeCognitive: true })
       const vectors = bridge.getVectors
         ? await bridge.getVectors({ model: LUMI_MEMORY_EMBEDDING_MODEL, userId: currentUserId() })
         : []
@@ -960,6 +972,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
         seedId: snapshot.seedId,
         dbPath: snapshot.dbPath,
         vectors,
+        cognitive: snapshot.cognitive,
       }
     }
     return {
@@ -980,6 +993,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       seedId: typeof snapshot.seedId === 'string' ? snapshot.seedId : '',
       dbPath: snapshot.dbPath,
       vectors: Array.isArray(snapshot.vectors) ? snapshot.vectors : [],
+      cognitive: snapshot.cognitive?.version === 1 ? snapshot.cognitive : undefined,
     }
 
     const bridge = persistenceBridge.value

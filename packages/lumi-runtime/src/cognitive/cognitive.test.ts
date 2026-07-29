@@ -244,7 +244,7 @@ describe('lumi hypotheses and profile projection', () => {
     expect(projections.some(item => item.layer === 'core')).toBe(false)
   })
 
-  it('raises stability across independent evidence and allows correction to contradict it', () => {
+  it('raises stability across independent messages and immediately adopts an explicit correction', () => {
     let belief: LumiBeliefHypothesis | undefined
     for (const [index, timestamp] of [NOW, LATER, '2026-08-02T00:00:00.000Z'].entries()) {
       belief = observeLumiBeliefHypothesis(belief, {
@@ -252,7 +252,7 @@ describe('lumi hypotheses and profile projection', () => {
         predicate: 'communication_preference',
         value: '简短自然',
         evidence: evidence({
-          id: `session-${index}:message-1`,
+          id: `session-a:message-${index}`,
           occurredAt: timestamp,
           content: '我喜欢简短自然的回复。',
         }),
@@ -262,21 +262,65 @@ describe('lumi hypotheses and profile projection', () => {
     expect(belief?.independentEvidenceCount).toBe(3)
     expect(belief?.status).toBe('stable')
 
+    const correctionEvidence = evidence({
+      id: 'session-a:message-correction',
+      kind: 'user_correction',
+      occurredAt: '2026-08-03T00:00:00.000Z',
+      content: '纠正一下，我现在需要详细解释。',
+      trust: 1,
+    })
     const corrected = observeLumiBeliefHypothesis(belief, {
       subjectId: DOGGY,
       predicate: 'communication_preference',
       value: '需要详细解释',
+      evidence: correctionEvidence,
+    })
+    const projections = projectLumiBeliefsToProfile({
+      subjectId: DOGGY,
+      beliefs: [corrected],
+      evidenceById: new Map([[correctionEvidence.id, correctionEvidence]]),
+      now: correctionEvidence.occurredAt,
+    })
+
+    expect(corrected.value).toBe('需要详细解释')
+    expect(corrected.status).toBe('supported')
+    expect(corrected.evidenceIds).toEqual(['session-a:message-correction'])
+    expect(corrected.counterEvidenceIds).toEqual([
+      'session-a:message-0',
+      'session-a:message-1',
+      'session-a:message-2',
+    ])
+    expect(corrected.independentEvidenceCount).toBe(1)
+    expect(corrected.negativeFeedback).toBe(1)
+    expect(corrected.rejectionCount).toBe(1)
+    expect(projections).toHaveLength(1)
+    expect(projections[0]?.value).toBe('需要详细解释')
+    expect(projections[0]?.evidenceIds).toEqual(['session-a:message-correction'])
+    expect(projections[0]?.status).toBe('pending')
+  })
+
+  it('does not count derived summaries as independent evidence', () => {
+    const primary = evidence({ id: 'session-a:message-1' })
+    const observed = observeLumiBeliefHypothesis(undefined, {
+      subjectId: DOGGY,
+      predicate: 'communication_preference',
+      value: '简短自然',
+      evidence: primary,
+    })
+    const summarized = observeLumiBeliefHypothesis(observed, {
+      subjectId: DOGGY,
+      predicate: 'communication_preference',
+      value: '简短自然',
       evidence: evidence({
-        id: 'session-correction:message-1',
-        kind: 'user_correction',
-        occurredAt: '2026-08-03T00:00:00.000Z',
-        content: '纠正一下，我现在需要详细解释。',
-        trust: 1,
+        id: 'summary:session-a',
+        origin: 'derived',
+        kind: 'conversation_episode',
+        derivedFromEvidenceIds: [primary.id],
       }),
     })
 
-    expect(corrected.status).toBe('contradicted')
-    expect(corrected.counterEvidenceIds).toContain('session-correction:message-1')
+    expect(summarized.evidenceCount).toBe(2)
+    expect(summarized.independentEvidenceCount).toBe(1)
   })
 
   it('expires an unconfirmed hypothesis and excludes it from normal context', () => {

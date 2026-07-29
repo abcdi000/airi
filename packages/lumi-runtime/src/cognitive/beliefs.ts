@@ -32,6 +32,7 @@ export interface LumiHypothesisObservation {
  *
  * Returns:
  * - A tentative, supported, stable, or contradicted hypothesis
+ * - Explicit corrections replace the current value while retaining old support as counter-evidence
  */
 export function observeLumiBeliefHypothesis(
   existing: LumiBeliefHypothesis | undefined,
@@ -40,31 +41,51 @@ export function observeLumiBeliefHypothesis(
   const now = observation.evidence.occurredAt
   const sameValue = existing ? equalValue(existing.value, observation.value) : true
   const isCorrection = observation.evidence.kind === 'user_correction'
-  const supports = sameValue && !isCorrection
-  const evidenceIds = supports
-    ? uniqueStrings([...(existing?.evidenceIds ?? []), observation.evidence.id])
-    : [...(existing?.evidenceIds ?? [])]
-  const counterEvidenceIds = supports
-    ? [...(existing?.counterEvidenceIds ?? [])]
-    : uniqueStrings([...(existing?.counterEvidenceIds ?? []), observation.evidence.id])
+  const replacesValue = Boolean(existing && isCorrection && !sameValue)
+  const supports = !existing || sameValue || replacesValue
+  const evidenceIds = replacesValue
+    ? [observation.evidence.id]
+    : supports
+      ? uniqueStrings([...(existing?.evidenceIds ?? []), observation.evidence.id])
+      : [...(existing?.evidenceIds ?? [])]
+  const counterEvidenceIds = replacesValue
+    ? uniqueStrings([
+        ...(existing?.counterEvidenceIds ?? []),
+        ...(existing?.evidenceIds ?? []),
+      ])
+    : supports
+      ? [...(existing?.counterEvidenceIds ?? [])]
+      : uniqueStrings([...(existing?.counterEvidenceIds ?? []), observation.evidence.id])
   const evidenceCount = evidenceIds.length
-  const independentEvidenceCount = countIndependentEvidenceIds(evidenceIds)
+  const evidenceAlreadyObserved = existing?.evidenceIds.includes(observation.evidence.id) ?? false
+  const independentEvidenceCount = replacesValue
+    ? independentEvidenceContribution(observation.evidence)
+    : (existing?.independentEvidenceCount ?? 0)
+      + (supports && !evidenceAlreadyObserved ? independentEvidenceContribution(observation.evidence) : 0)
   const correctionPenalty = isCorrection && !sameValue ? observation.evidence.trust : 0
-  const confidence = clamp01(
-    (existing?.confidence ?? 0.25)
-    + (supports ? 0.2 * observation.evidence.trust : -0.65 * correctionPenalty),
-  )
-  const stability = clamp01(
-    (existing?.stability ?? 0.1)
-    + (supports ? 0.2 * Math.min(1, independentEvidenceCount) : -0.7 * correctionPenalty),
-  )
-  const status = !supports && (isCorrection || confidence < 0.2)
-    ? 'contradicted'
-    : independentEvidenceCount >= 3 && confidence >= 0.78 && stability >= 0.65
-      ? 'stable'
-      : independentEvidenceCount >= 2 && confidence >= 0.55
-        ? 'supported'
-        : 'tentative'
+  const confidence = replacesValue
+    ? clamp01(0.5 + 0.4 * observation.evidence.trust)
+    : clamp01(
+        (existing?.confidence ?? 0.25)
+        + (supports ? 0.2 * observation.evidence.trust : -0.65 * correctionPenalty),
+      )
+  const stability = replacesValue
+    ? clamp01(0.1 + 0.3 * observation.evidence.trust)
+    : clamp01(
+        (existing?.stability ?? 0.1)
+        + (supports ? 0.2 * Math.min(1, independentEvidenceCount) : -0.7 * correctionPenalty),
+      )
+  const status = replacesValue
+    ? observation.evidence.authorVerified && observation.evidence.trust >= 0.75
+      ? 'supported'
+      : 'tentative'
+    : !supports && (isCorrection || confidence < 0.2)
+        ? 'contradicted'
+        : independentEvidenceCount >= 3 && confidence >= 0.78 && stability >= 0.65
+          ? 'stable'
+          : independentEvidenceCount >= 2 && confidence >= 0.55
+            ? 'supported'
+            : 'tentative'
 
   return {
     id: existing?.id ?? `belief:${observation.subjectId}:${stableKey(observation.predicate)}`,
@@ -88,11 +109,13 @@ export function observeLumiBeliefHypothesis(
     ]),
     evidenceCount,
     independentEvidenceCount,
-    familiarity: clamp01((existing?.familiarity ?? 0) + (supports ? 0.08 : 0)),
+    familiarity: replacesValue
+      ? clamp01((existing?.familiarity ?? 0) * 0.5)
+      : clamp01((existing?.familiarity ?? 0) + (supports ? 0.08 : 0)),
     ownership: existing?.ownership ?? 0,
     positiveFeedback: existing?.positiveFeedback ?? 0,
-    negativeFeedback: (existing?.negativeFeedback ?? 0) + (supports ? 0 : 1),
-    rejectionCount: (existing?.rejectionCount ?? 0) + (isCorrection && !supports ? 1 : 0),
+    negativeFeedback: (existing?.negativeFeedback ?? 0) + (replacesValue || !supports ? 1 : 0),
+    rejectionCount: (existing?.rejectionCount ?? 0) + (replacesValue ? 1 : 0),
     firstSeenAt: existing?.firstSeenAt ?? now,
     lastSeenAt: now,
     lastUsedAt: existing?.lastUsedAt,
@@ -172,11 +195,12 @@ export function projectLumiBeliefsToProfile(input: {
         && (item.kind === 'user_statement' || item.kind === 'user_correction')
         && item.trust >= 0.9,
       )
-      const pending = layer === 'core' && (
-        !explicitConfirmation
-        || belief.stability < 0.8
-        || highImpactPredicate(belief.predicate)
-      )
+      const pending = (layer === 'dynamic' && belief.independentEvidenceCount < 2)
+        || (layer === 'core' && (
+          !explicitConfirmation
+          || belief.stability < 0.8
+          || highImpactPredicate(belief.predicate)
+        ))
       return [{
         id: `profile:${belief.id}:${layer}`,
         subjectId: belief.subjectId,
@@ -204,7 +228,13 @@ function profileLayer(
     return belief.expiresAt ? 'daily' : undefined
   const explicitProjectState = /project|goal|decision|focus|unresolved/i.test(belief.predicate)
     && evidence.some(item => item.authorVerified && item.origin === 'primary')
-  if (belief.independentEvidenceCount >= 2 || explicitProjectState)
+  const explicitCorrection = evidence.some(item =>
+    item.kind === 'user_correction'
+    && item.authorVerified
+    && item.origin === 'primary'
+    && item.trust >= 0.9,
+  )
+  if (belief.independentEvidenceCount >= 2 || explicitProjectState || explicitCorrection)
     return belief.status === 'stable' && belief.independentEvidenceCount >= 3 ? 'core' : 'dynamic'
   return undefined
 }
@@ -213,8 +243,8 @@ function highImpactPredicate(predicate: string) {
   return /identity|personality|boundary|relationship|life_decision|long_term/i.test(predicate)
 }
 
-function countIndependentEvidenceIds(ids: string[]) {
-  return new Set(ids.map(id => id.split(':').slice(0, -1).join(':') || id)).size
+function independentEvidenceContribution(evidence: LumiCognitiveEvidence) {
+  return evidence.origin === 'primary' ? 1 : 0
 }
 
 function equalValue(left: unknown, right: unknown) {

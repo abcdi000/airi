@@ -12,6 +12,7 @@ import type {
 } from '@proj-airi/lumi-runtime'
 
 import type {
+  ElectronLumiCognitiveArchive,
   ElectronLumiCognitivePrepareTurnRequest,
   ElectronLumiCognitiveRecordUseRequest,
 } from '../../../../shared/eventa'
@@ -20,7 +21,10 @@ import type { SqliteDatabase } from './index'
 
 import { defineInvokeHandler } from '@moeru/eventa'
 import {
+  deriveLumiMemoryCognitiveObservation,
+  observeLumiBeliefHypothesis,
   prepareLumiCognitiveTurn,
+  projectLumiBeliefsToProfile,
   selectPlannerSocialBehaviors,
 } from '@proj-airi/lumi-runtime'
 
@@ -88,6 +92,302 @@ export function createLumiDesktopCognitiveService(
     ensureCognitiveSchema(db)
     recordContextUse(db, request)
   })
+}
+
+/** Result of consolidating one model-curated memory through primary evidence. */
+export interface LumiMemoryCognitiveConsolidationResult {
+  /** Whether a hypothesis was updated. */
+  consolidated: boolean
+  /** Stable reason when no update was allowed. */
+  reason?: 'inactive_memory' | 'missing_source_evidence' | 'unsupported_memory_type' | 'missing_semantic_tag' | 'invalid_source_evidence'
+  /** Updated hypothesis identifier. */
+  beliefId?: string
+  /** Materialized profile projection identifiers. */
+  projectionIds: string[]
+  /** Long-term memories invalidated by an explicit correction. */
+  supersededMemoryIds: string[]
+}
+
+/**
+ * Consolidates one curated long-term memory into evidence-backed cognition.
+ *
+ * Use when:
+ * - The main process has durably upserted an auto-curated memory
+ * - Cognitive fast-loop evidence for the same source message already exists
+ *
+ * Expects:
+ * - The memory has passed the existing host scope/classification validator
+ * - `sourceMessageId` and `userId` identify the immutable message actor
+ *
+ * Returns:
+ * - The belief/profile lineage written, or a stable skip reason
+ */
+export function consolidateMemoryIntoCognition(
+  db: SqliteDatabase,
+  memory: LumiMemoryFragment,
+): LumiMemoryCognitiveConsolidationResult {
+  ensureCognitiveSchema(db)
+  const sourceEvidence = sourceEvidenceForMemory(db, memory)
+  if (!sourceEvidence) {
+    return {
+      consolidated: false,
+      reason: 'missing_source_evidence',
+      projectionIds: [],
+      supersededMemoryIds: [],
+    }
+  }
+  const derived = deriveLumiMemoryCognitiveObservation(memory, sourceEvidence)
+  if (!derived.supported) {
+    return {
+      consolidated: false,
+      reason: derived.reason,
+      projectionIds: [],
+      supersededMemoryIds: [],
+    }
+  }
+  const correction = sourceEvidence.kind === 'user_correction'
+  if (memory.status !== 'active' && !correction) {
+    linkMemoryEvidence(db, memory, sourceEvidence)
+    return {
+      consolidated: false,
+      reason: 'inactive_memory',
+      projectionIds: [],
+      supersededMemoryIds: [],
+    }
+  }
+
+  const existing = db.prepare(`
+    SELECT payload_json FROM lumi_cognitive_beliefs
+    WHERE subject_id = ? AND status != 'expired'
+    ORDER BY updated_at DESC
+    LIMIT 500
+  `).all(memory.userId).flatMap(row => parsedPayload<LumiBeliefHypothesis>(row.payload_json)).find(item => item.predicate === derived.observation.predicate)
+  const belief = observeLumiBeliefHypothesis(existing, derived.observation)
+  const supersededMemoryIds = correction
+    ? supersedeMemoriesFromOldBelief(db, memory, existing, sourceEvidence.occurredAt)
+    : []
+  linkMemoryEvidence(db, {
+    ...memory,
+    status: correction ? 'active' : memory.status,
+    supersedesId: supersededMemoryIds[0],
+  }, sourceEvidence)
+
+  db.prepare(`
+    INSERT INTO lumi_cognitive_beliefs (
+      id, subject_id, conversation_id, status, payload_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      conversation_id = excluded.conversation_id,
+      status = excluded.status,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
+  `).run(
+    belief.id,
+    belief.subjectId,
+    belief.conversationId ?? null,
+    belief.status,
+    JSON.stringify(belief),
+    belief.lastObservedAt,
+  )
+
+  const evidenceById = new Map(
+    db.prepare(`
+      SELECT * FROM lumi_cognitive_evidence
+      WHERE id IN (${belief.evidenceIds.map(() => '?').join(', ')})
+    `).all(...belief.evidenceIds).flatMap(rowToEvidence).map(item => [item.id, item] as const),
+  )
+  const projections = projectLumiBeliefsToProfile({
+    subjectId: belief.subjectId,
+    beliefs: [belief],
+    evidenceById,
+    now: sourceEvidence.occurredAt,
+  })
+  retireBeliefProjections(db, belief.id, sourceEvidence.occurredAt)
+  const upsertProjection = db.prepare(`
+    INSERT INTO lumi_cognitive_profile_projections (
+      id, subject_id, layer, status, payload_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      layer = excluded.layer,
+      status = excluded.status,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
+  `)
+  for (const projection of projections) {
+    upsertProjection.run(
+      projection.id,
+      projection.subjectId,
+      projection.layer,
+      projection.status,
+      JSON.stringify(projection),
+      projection.updatedAt,
+    )
+  }
+  return {
+    consolidated: true,
+    beliefId: belief.id,
+    projectionIds: projections.map(item => item.id),
+    supersededMemoryIds,
+  }
+}
+
+/**
+ * Deletes one actor's private cognitive state without touching other people or Lumi-owned data.
+ *
+ * Use when:
+ * - A user invokes the memory clear or account-deletion flow
+ *
+ * Expects:
+ * - `actorId` is the immutable internal Person identifier
+ *
+ * Returns:
+ * - Nothing after actor-scoped cognitive rows are removed
+ */
+export function deleteCognitiveActorData(db: SqliteDatabase, actorId: string): void {
+  const normalizedActorId = actorId.trim()
+  if (!normalizedActorId)
+    throw new Error('Cognitive actor deletion requires an actor id')
+  ensureCognitiveSchema(db)
+  deleteCognitiveActorRows(db, normalizedActorId)
+  markLegacyCognitiveMigration(db, normalizedActorId, { cleared: true })
+}
+
+/** Exports one actor's cognitive rows without loading them during normal renderer startup. */
+export function exportCognitiveActorData(
+  db: SqliteDatabase,
+  actorId: string,
+): ElectronLumiCognitiveArchive {
+  const normalizedActorId = actorId.trim()
+  if (!normalizedActorId)
+    throw new Error('Cognitive actor export requires an actor id')
+  ensureCognitiveSchema(db)
+  return {
+    version: 1,
+    evidence: db.prepare(`
+      SELECT * FROM lumi_cognitive_evidence WHERE actor_id = ? ORDER BY occurred_at, id
+    `).all(normalizedActorId),
+    workingMemory: db.prepare(`
+      SELECT * FROM lumi_cognitive_working_memory WHERE person_id = ? ORDER BY conversation_id
+    `).all(normalizedActorId),
+    feedback: db.prepare(`
+      SELECT * FROM lumi_cognitive_feedback WHERE actor_id = ? ORDER BY occurred_at, id
+    `).all(normalizedActorId),
+    beliefs: db.prepare(`
+      SELECT * FROM lumi_cognitive_beliefs WHERE subject_id = ? ORDER BY updated_at, id
+    `).all(normalizedActorId),
+    profileProjections: db.prepare(`
+      SELECT * FROM lumi_cognitive_profile_projections WHERE subject_id = ? ORDER BY updated_at, id
+    `).all(normalizedActorId),
+  }
+}
+
+/**
+ * Restores a validated actor-scoped cognitive archive transactionally.
+ *
+ * Use when:
+ * - A user explicitly imports a full Lumi memory archive
+ *
+ * Expects:
+ * - Every row belongs to `actorId`
+ * - Belief and profile lineage is complete inside the archive
+ *
+ * Returns:
+ * - Nothing after replacing only that actor's cognitive rows
+ */
+export function importCognitiveActorData(
+  db: SqliteDatabase,
+  actorId: string,
+  archive: ElectronLumiCognitiveArchive,
+): void {
+  const normalizedActorId = actorId.trim()
+  if (!normalizedActorId || archive.version !== 1)
+    throw new Error('Unsupported cognitive actor archive')
+  ensureCognitiveSchema(db)
+  const evidence = archive.evidence.flatMap(rowToEvidence)
+  const workingMemory = archive.workingMemory.flatMap(row => parsedPayload<LumiWorkingMemory>(row.payload_json))
+  const feedback = archive.feedback.flatMap(rowToFeedback)
+  const beliefs = archive.beliefs.flatMap(row => parsedPayload<LumiBeliefHypothesis>(row.payload_json))
+  const projections = archive.profileProjections.flatMap(row => parsedPayload<LumiCognitiveProfileProjection>(row.payload_json))
+  if (
+    evidence.length !== archive.evidence.length
+    || workingMemory.length !== archive.workingMemory.length
+    || feedback.length !== archive.feedback.length
+    || beliefs.length !== archive.beliefs.length
+    || projections.length !== archive.profileProjections.length
+  ) {
+    throw new Error('Cognitive actor archive contains invalid rows')
+  }
+  const evidenceIds = new Set(evidence.map(item => item.id))
+  const beliefIds = new Set(beliefs.map(item => item.id))
+  if (
+    evidence.some(item => item.actorId !== normalizedActorId || !item.subjectUserIds.includes(normalizedActorId))
+    || workingMemory.some(item => item.personId !== normalizedActorId)
+    || feedback.some(item => item.actorId !== normalizedActorId || !evidenceIds.has(item.evidenceId))
+    || beliefs.some(item =>
+      item.subjectId !== normalizedActorId
+      || [...item.evidenceIds, ...item.counterEvidenceIds].some(id => !evidenceIds.has(id)))
+    || projections.some(item =>
+      item.subjectId !== normalizedActorId
+      || item.evidenceIds.some(id => !evidenceIds.has(id))
+      || item.beliefIds.some(id => !beliefIds.has(id)))
+  ) {
+    throw new Error('Cognitive actor archive violates actor or lineage boundaries')
+  }
+
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    deleteCognitiveActorRows(db, normalizedActorId)
+    for (const item of evidence)
+      writeEvidence(db, item)
+    for (const item of workingMemory)
+      writeWorkingMemory(db, item)
+    for (const item of feedback)
+      writeFeedback(db, item)
+    for (const item of beliefs)
+      writeBelief(db, item)
+    for (const item of projections)
+      writeProfileProjection(db, item)
+    markLegacyCognitiveMigration(db, normalizedActorId, { imported: true })
+    db.exec('COMMIT')
+  }
+  catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+function deleteCognitiveActorRows(db: SqliteDatabase, actorId: string): void {
+  db.prepare('DELETE FROM lumi_cognitive_profile_projections WHERE subject_id = ?').run(actorId)
+  db.prepare('DELETE FROM lumi_cognitive_beliefs WHERE subject_id = ?').run(actorId)
+  db.prepare('DELETE FROM lumi_cognitive_feedback WHERE actor_id = ?').run(actorId)
+  db.prepare('DELETE FROM lumi_cognitive_working_memory WHERE person_id = ?').run(actorId)
+  db.prepare('DELETE FROM lumi_cognitive_evidence WHERE actor_id = ?').run(actorId)
+  db.prepare(`
+    DELETE FROM lumi_cognitive_migrations
+    WHERE source_kind = 'legacy_desktop_cognition' AND id = ?
+  `).run(`cognitive-v1-legacy-projections:${actorId}`)
+}
+
+function markLegacyCognitiveMigration(
+  db: SqliteDatabase,
+  actorId: string,
+  report: Record<string, unknown>,
+): void {
+  const now = Date.now()
+  db.prepare(`
+    INSERT INTO lumi_cognitive_migrations (
+      id, source_kind, phase, report_json, created_at, updated_at
+    ) VALUES (?, 'legacy_desktop_cognition', 'active', ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      phase = 'active',
+      report_json = excluded.report_json,
+      updated_at = excluded.updated_at
+  `).run(
+    `cognitive-v1-legacy-projections:${actorId}`,
+    JSON.stringify(report),
+    now,
+    now,
+  )
 }
 
 async function desktopRepository(
@@ -391,6 +691,135 @@ function rowToEvidence(row: Record<string, unknown>): LumiCognitiveEvidence[] {
   }]
 }
 
+function rowToFeedback(row: Record<string, unknown>): LumiFeedbackEvent[] {
+  const kind = cognitiveFeedbackKind(row.kind)
+  const conversationType = cognitiveConversationType(row.conversation_type)
+  const scope = cognitiveScope(row.scope)
+  if (!kind || !conversationType || !scope)
+    return []
+  return [{
+    id: stringValue(row.id),
+    actorId: stringValue(row.actor_id),
+    conversationId: stringValue(row.conversation_id),
+    conversationType,
+    kind,
+    sourceId: stringValue(row.source_id),
+    evidenceId: stringValue(row.evidence_id),
+    targetIds: jsonStringArray(row.target_ids_json),
+    strength: finiteNumber(row.strength),
+    occurredAt: stringValue(row.occurred_at),
+    authorVerified: Number(row.author_verified) === 1,
+    scope,
+    sensitivity: row.sensitivity === 'private' ? 'private' : 'normal',
+  }]
+}
+
+function writeEvidence(db: SqliteDatabase, evidence: LumiCognitiveEvidence): void {
+  db.prepare(`
+    INSERT INTO lumi_cognitive_evidence (
+      id, actor_id, conversation_id, conversation_type, kind, origin,
+      content, source_id, source_message_id, subject_user_ids_json,
+      participant_user_ids_json, derived_from_evidence_ids_json,
+      occurred_at, trust, author_verified, scope, sensitivity,
+      derivation_reason, schema_version, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    evidence.id,
+    evidence.actorId,
+    evidence.conversationId ?? '',
+    evidence.conversationType,
+    evidence.kind,
+    evidence.origin,
+    evidence.content,
+    evidence.sourceId ?? null,
+    evidence.sourceMessageId ?? null,
+    JSON.stringify(evidence.subjectUserIds),
+    JSON.stringify(evidence.participantUserIds),
+    JSON.stringify(evidence.derivedFromEvidenceIds),
+    evidence.occurredAt,
+    evidence.trust,
+    evidence.authorVerified ? 1 : 0,
+    evidence.scope,
+    evidence.sensitivity,
+    evidence.derivationReason ?? null,
+    evidence.schemaVersion,
+    Date.parse(evidence.occurredAt),
+  )
+}
+
+function writeWorkingMemory(db: SqliteDatabase, memory: LumiWorkingMemory): void {
+  db.prepare(`
+    INSERT INTO lumi_cognitive_working_memory (
+      person_id, persona_id, conversation_id, conversation_type,
+      version, payload_json, updated_at, expires_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    memory.personId,
+    memory.personaId,
+    memory.conversationId,
+    memory.conversationType,
+    memory.version,
+    JSON.stringify(memory),
+    memory.updatedAt,
+    memory.expiresAt,
+  )
+}
+
+function writeFeedback(db: SqliteDatabase, feedback: LumiFeedbackEvent): void {
+  db.prepare(`
+    INSERT INTO lumi_cognitive_feedback (
+      id, actor_id, conversation_id, conversation_type, kind, source_id,
+      evidence_id, target_ids_json, strength, occurred_at, author_verified,
+      scope, sensitivity, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    feedback.id,
+    feedback.actorId,
+    feedback.conversationId,
+    feedback.conversationType,
+    feedback.kind,
+    feedback.sourceId,
+    feedback.evidenceId,
+    JSON.stringify(feedback.targetIds),
+    feedback.strength,
+    feedback.occurredAt,
+    feedback.authorVerified ? 1 : 0,
+    feedback.scope,
+    feedback.sensitivity,
+    Date.parse(feedback.occurredAt),
+  )
+}
+
+function writeBelief(db: SqliteDatabase, belief: LumiBeliefHypothesis): void {
+  db.prepare(`
+    INSERT INTO lumi_cognitive_beliefs (
+      id, subject_id, conversation_id, status, payload_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    belief.id,
+    belief.subjectId,
+    belief.conversationId ?? null,
+    belief.status,
+    JSON.stringify(belief),
+    belief.lastObservedAt,
+  )
+}
+
+function writeProfileProjection(db: SqliteDatabase, projection: LumiCognitiveProfileProjection): void {
+  db.prepare(`
+    INSERT INTO lumi_cognitive_profile_projections (
+      id, subject_id, layer, status, payload_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    projection.id,
+    projection.subjectId,
+    projection.layer,
+    projection.status,
+    JSON.stringify(projection),
+    projection.updatedAt,
+  )
+}
+
 function parsedPayload<T>(value: unknown): T[] {
   if (typeof value !== 'string')
     return []
@@ -427,6 +856,26 @@ function cognitiveEvidenceOrigin(value: unknown): LumiCognitiveEvidence['origin'
     : undefined
 }
 
+function cognitiveFeedbackKind(value: unknown): LumiFeedbackEvent['kind'] | undefined {
+  switch (value) {
+    case 'explicit_praise':
+    case 'explicit_rejection':
+    case 'fact_correction':
+    case 'expression_natural':
+    case 'expression_ai_like':
+    case 'expression_repeated':
+    case 'topic_continued':
+    case 'topic_switched':
+    case 'tool_succeeded':
+    case 'tool_failed':
+    case 'decision_confirmed':
+    case 'decision_revoked':
+      return value
+    default:
+      return undefined
+  }
+}
+
 function cognitiveConversationType(value: unknown): LumiCognitiveEvidence['conversationType'] | undefined {
   return value === 'direct' || value === 'group' || value === 'internal'
     ? value
@@ -449,6 +898,92 @@ function stringValue(value: unknown): string {
 
 function finiteNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function sourceEvidenceForMemory(
+  db: SqliteDatabase,
+  memory: LumiMemoryFragment,
+): LumiCognitiveEvidence | undefined {
+  if (!memory.sourceMessageId?.trim() || !memory.userId.trim())
+    return undefined
+  return db.prepare(`
+    SELECT * FROM lumi_cognitive_evidence
+    WHERE actor_id = ? AND source_message_id = ? AND origin = 'primary'
+    ORDER BY occurred_at DESC
+    LIMIT 1
+  `).all(memory.userId, memory.sourceMessageId).flatMap(rowToEvidence).find(evidence =>
+    evidence.subjectUserIds.includes(memory.userId)
+    && (!memory.conversationId || evidence.conversationId === memory.conversationId),
+  )
+}
+
+function linkMemoryEvidence(
+  db: SqliteDatabase,
+  memory: LumiMemoryFragment,
+  evidence: LumiCognitiveEvidence,
+): void {
+  db.prepare(`
+    UPDATE lumi_memories SET
+      derived_from_evidence_ids_json = ?,
+      valid_from = COALESCE(valid_from, ?),
+      last_confirmed_at = ?,
+      supersedes_id = COALESCE(?, supersedes_id),
+      status = ?,
+      evidence_origin = 'derived',
+      updated_at = ?
+    WHERE id = ? AND user_id = ?
+  `).run(
+    JSON.stringify([evidence.id]),
+    evidence.occurredAt,
+    evidence.occurredAt,
+    memory.supersedesId ?? null,
+    memory.status,
+    evidence.occurredAt,
+    memory.id,
+    memory.userId,
+  )
+}
+
+function supersedeMemoriesFromOldBelief(
+  db: SqliteDatabase,
+  memory: LumiMemoryFragment,
+  existing: LumiBeliefHypothesis | undefined,
+  correctedAt: string,
+): string[] {
+  if (!existing?.evidenceIds.length)
+    return []
+  const placeholders = existing.evidenceIds.map(() => '?').join(', ')
+  const oldIds = db.prepare(`
+    SELECT DISTINCT memory.id FROM lumi_memories memory,
+      json_each(memory.derived_from_evidence_ids_json) lineage
+    WHERE memory.user_id = ?
+      AND memory.id != ?
+      AND memory.status = 'active'
+      AND lineage.value IN (${placeholders})
+  `).all(memory.userId, memory.id, ...existing.evidenceIds).map(row => stringValue(row.id)).filter(Boolean)
+  const supersede = db.prepare(`
+    UPDATE lumi_memories SET
+      status = 'contradicted',
+      valid_until = ?,
+      superseded_by_id = ?,
+      updated_at = ?
+    WHERE id = ? AND user_id = ? AND status = 'active'
+  `)
+  for (const id of oldIds)
+    supersede.run(correctedAt, memory.id, correctedAt, id, memory.userId)
+  return oldIds
+}
+
+function retireBeliefProjections(db: SqliteDatabase, beliefId: string, updatedAt: string): void {
+  for (const layer of ['daily', 'dynamic', 'core']) {
+    db.prepare(`
+      UPDATE lumi_cognitive_profile_projections SET
+        status = 'pending',
+        payload_json = json_set(payload_json, '$.status', 'pending'),
+        updated_at = ?
+      WHERE id = ? AND status = 'active'
+    `).run(updatedAt, `profile:${beliefId}:${layer}`)
+  }
 }
 
 function commitFastLoop(db: SqliteDatabase, input: {

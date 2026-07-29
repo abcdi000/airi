@@ -12,7 +12,13 @@ import {
   electronLumiCognitivePrepareTurn,
   electronLumiCognitiveRecordUse,
 } from '../../../../shared/eventa'
-import { createLumiDesktopCognitiveService } from './cognitive'
+import {
+  consolidateMemoryIntoCognition,
+  createLumiDesktopCognitiveService,
+  deleteCognitiveActorData,
+  exportCognitiveActorData,
+  importCognitiveActorData,
+} from './cognitive'
 
 const identity = {
   actorId: 'lumi-user-doggy-test',
@@ -22,13 +28,22 @@ const identity = {
   participantUserIds: ['lumi-user-doggy-test'],
 }
 
-function memory(id: string): LumiMemoryFragment {
+const moussyIdentity = {
+  actorId: 'lumi-user-moussy-test',
+  personaId: 'lumi',
+  conversationId: 'direct:moussy',
+  conversationType: 'direct' as const,
+  participantUserIds: ['lumi-user-moussy-test'],
+}
+
+function memory(id: string, patch: Partial<LumiMemoryFragment> = {}): LumiMemoryFragment {
   const now = new Date().toISOString()
   return {
     id,
     userId: identity.actorId,
     personaId: identity.personaId,
     conversationId: identity.conversationId,
+    sourceMessageId: 'message:1',
     type: 'user_preference',
     content: '浏览器自动化默认使用 Patchright，特殊情况才使用 Playwright。',
     confidence: 0.9,
@@ -49,6 +64,7 @@ function memory(id: string): LumiMemoryFragment {
     sensitivity: 'private',
     sourceActorId: identity.actorId,
     sourceConversationType: 'direct',
+    ...patch,
   }
 }
 
@@ -60,7 +76,8 @@ function database(): DatabaseSync {
       user_id TEXT NOT NULL,
       status TEXT NOT NULL,
       scope TEXT NOT NULL,
-      last_used_at TEXT
+      last_used_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT ''
     );
   `)
   return db
@@ -220,5 +237,224 @@ describe('desktop cognitive service', () => {
       platform: 'lumi-desktop',
     })).rejects.toThrow('Desktop cognitive identity is invalid')
     expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_evidence').get()?.count).toBe(0)
+  })
+
+  it('consolidates curated memory and supersedes the old value after an explicit correction', async () => {
+    const db = database()
+    const context = createContext()
+    createLumiDesktopCognitiveService({
+      context: context as never,
+      getDatabase: async () => ({ db: db as SqliteDatabase }),
+      recall: async () => ({
+        memories: [],
+        trace: {
+          ran: true,
+          reusedPreviousState: false,
+          aclInputCount: 0,
+          aclOutputCount: 0,
+          lexicalCandidateCount: 0,
+          annCandidateCount: 0,
+          mergedCandidateCount: 0,
+          rerankedCandidateCount: 0,
+          thresholdRejectedCount: 0,
+          conflictRejectedCount: 0,
+          injectedCount: 0,
+          durationMs: 0,
+        },
+      }),
+      loadMemoriesByIds: async () => [],
+      getSocialLanguageSnapshot: async () => migrateSocialLanguageSnapshot({}),
+    })
+    const prepareTurn = defineInvoke(context, electronLumiCognitivePrepareTurn)
+    await prepareTurn({
+      identity,
+      sourceMessageId: 'message:preference-old',
+      userText: '我喜欢简短自然的回复。',
+      recentTurns: [{
+        id: 'message:preference-old',
+        role: 'user',
+        content: '我喜欢简短自然的回复。',
+      }],
+      platform: 'lumi-desktop',
+    })
+    const oldMemory = memory('memory:preference-old', {
+      sourceMessageId: 'message:preference-old',
+      content: 'Doggy 喜欢简短自然的回复。',
+      tags: ['communication'],
+    })
+    db.prepare(`
+      INSERT INTO lumi_memories (id, user_id, status, scope, last_used_at, updated_at)
+      VALUES (?, ?, 'active', 'private', NULL, ?)
+    `).run(oldMemory.id, identity.actorId, oldMemory.updatedAt)
+    const first = consolidateMemoryIntoCognition(db as SqliteDatabase, oldMemory)
+
+    await prepareTurn({
+      identity,
+      sourceMessageId: 'message:preference-correction',
+      userText: '纠正一下，我现在需要详细解释。',
+      recentTurns: [{
+        id: 'message:preference-correction',
+        role: 'user',
+        content: '纠正一下，我现在需要详细解释。',
+      }],
+      platform: 'lumi-desktop',
+    })
+    const correctedMemory = memory('memory:preference-correction', {
+      sourceMessageId: 'message:preference-correction',
+      content: 'Doggy 现在需要详细解释。',
+      tags: ['communication'],
+      status: 'candidate',
+    })
+    db.prepare(`
+      INSERT INTO lumi_memories (id, user_id, status, scope, last_used_at, updated_at)
+      VALUES (?, ?, 'candidate', 'private', NULL, ?)
+    `).run(correctedMemory.id, identity.actorId, correctedMemory.updatedAt)
+    const corrected = consolidateMemoryIntoCognition(db as SqliteDatabase, correctedMemory)
+    if (!first.beliefId || !correctedMemory.sourceMessageId)
+      throw new Error('Expected the tested memory to retain cognitive lineage')
+
+    const beliefRow = db.prepare('SELECT payload_json FROM lumi_cognitive_beliefs WHERE id = ?').get(first.beliefId)
+    const belief = JSON.parse(String(beliefRow?.payload_json))
+    const correctionEvidenceRow = db.prepare(`
+      SELECT kind, origin, trust, author_verified FROM lumi_cognitive_evidence
+      WHERE source_message_id = ?
+    `).get(correctedMemory.sourceMessageId)
+    expect(first.consolidated).toBe(true)
+    expect(corrected.consolidated).toBe(true)
+    expect(belief.status).toBe('supported')
+    expect(correctionEvidenceRow).toMatchObject({
+      kind: 'user_correction',
+      origin: 'primary',
+      trust: 1,
+      author_verified: 1,
+    })
+    expect(corrected.projectionIds).toEqual([`profile:${corrected.beliefId}:dynamic`])
+    expect(corrected.supersededMemoryIds).toEqual([oldMemory.id])
+
+    const oldRow = db.prepare('SELECT status, superseded_by_id FROM lumi_memories WHERE id = ?').get(oldMemory.id)
+    const correctedRow = db.prepare('SELECT status, supersedes_id, evidence_origin FROM lumi_memories WHERE id = ?').get(correctedMemory.id)
+    const projectionRow = db.prepare(`
+      SELECT status, payload_json FROM lumi_cognitive_profile_projections
+      WHERE subject_id = ? ORDER BY updated_at DESC LIMIT 1
+    `).get(identity.actorId)
+    const projection = JSON.parse(String(projectionRow?.payload_json))
+
+    expect(belief.value).toBe('Doggy 现在需要详细解释。')
+    expect(belief.status).toBe('supported')
+    expect(belief.evidenceIds).toEqual(['evidence:message:direct:doggy:message:preference-correction'])
+    expect(belief.counterEvidenceIds).toEqual(['evidence:message:direct:doggy:message:preference-old'])
+    expect(oldRow?.status).toBe('contradicted')
+    expect(oldRow?.superseded_by_id).toBe(correctedMemory.id)
+    expect(correctedRow?.status).toBe('active')
+    expect(correctedRow?.supersedes_id).toBe(oldMemory.id)
+    expect(correctedRow?.evidence_origin).toBe('derived')
+    expect(projectionRow?.status).toBe('pending')
+    expect(projection.value).toBe('Doggy 现在需要详细解释。')
+  })
+
+  it('deletes only the requested actor cognitive state', async () => {
+    const db = database()
+    const context = createContext()
+    createLumiDesktopCognitiveService({
+      context: context as never,
+      getDatabase: async () => ({ db: db as SqliteDatabase }),
+      recall: async () => ({
+        memories: [],
+        trace: {
+          ran: true,
+          reusedPreviousState: false,
+          aclInputCount: 0,
+          aclOutputCount: 0,
+          lexicalCandidateCount: 0,
+          annCandidateCount: 0,
+          mergedCandidateCount: 0,
+          rerankedCandidateCount: 0,
+          thresholdRejectedCount: 0,
+          conflictRejectedCount: 0,
+          injectedCount: 0,
+          durationMs: 0,
+        },
+      }),
+      loadMemoriesByIds: async () => [],
+      getSocialLanguageSnapshot: async () => migrateSocialLanguageSnapshot({}),
+    })
+    const prepareTurn = defineInvoke(context, electronLumiCognitivePrepareTurn)
+    for (const actorIdentity of [identity, moussyIdentity]) {
+      await prepareTurn({
+        identity: actorIdentity,
+        sourceMessageId: `message:${actorIdentity.actorId}`,
+        userText: '这是一条私聊状态。',
+        recentTurns: [],
+        platform: 'lumi-desktop',
+      })
+    }
+
+    deleteCognitiveActorData(db as SqliteDatabase, identity.actorId)
+
+    expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_evidence WHERE actor_id = ?').get(identity.actorId)?.count).toBe(0)
+    expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_working_memory WHERE person_id = ?').get(identity.actorId)?.count).toBe(0)
+    expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_evidence WHERE actor_id = ?').get(moussyIdentity.actorId)?.count).toBe(1)
+    expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_working_memory WHERE person_id = ?').get(moussyIdentity.actorId)?.count).toBe(1)
+  })
+
+  it('round-trips actor cognitive lineage without including another actor', async () => {
+    const db = database()
+    const context = createContext()
+    createLumiDesktopCognitiveService({
+      context: context as never,
+      getDatabase: async () => ({ db: db as SqliteDatabase }),
+      recall: async () => ({
+        memories: [],
+        trace: {
+          ran: true,
+          reusedPreviousState: false,
+          aclInputCount: 0,
+          aclOutputCount: 0,
+          lexicalCandidateCount: 0,
+          annCandidateCount: 0,
+          mergedCandidateCount: 0,
+          rerankedCandidateCount: 0,
+          thresholdRejectedCount: 0,
+          conflictRejectedCount: 0,
+          injectedCount: 0,
+          durationMs: 0,
+        },
+      }),
+      loadMemoriesByIds: async () => [],
+      getSocialLanguageSnapshot: async () => migrateSocialLanguageSnapshot({}),
+    })
+    const prepareTurn = defineInvoke(context, electronLumiCognitivePrepareTurn)
+    for (const actorIdentity of [identity, moussyIdentity]) {
+      await prepareTurn({
+        identity: actorIdentity,
+        sourceMessageId: `message:archive:${actorIdentity.actorId}`,
+        userText: '我喜欢有证据来源的回答。',
+        recentTurns: [],
+        platform: 'lumi-desktop',
+      })
+    }
+    const archivedMemory = memory('memory:archive', {
+      sourceMessageId: `message:archive:${identity.actorId}`,
+      content: 'Doggy 喜欢有证据来源的回答。',
+      tags: ['evidence-backed-reply'],
+    })
+    db.prepare(`
+      INSERT INTO lumi_memories (id, user_id, status, scope, last_used_at, updated_at)
+      VALUES (?, ?, 'active', 'private', NULL, ?)
+    `).run(archivedMemory.id, identity.actorId, archivedMemory.updatedAt)
+    consolidateMemoryIntoCognition(db as SqliteDatabase, archivedMemory)
+    const archive = exportCognitiveActorData(db as SqliteDatabase, identity.actorId)
+
+    deleteCognitiveActorData(db as SqliteDatabase, identity.actorId)
+    importCognitiveActorData(db as SqliteDatabase, identity.actorId, archive)
+
+    expect(archive.version).toBe(1)
+    expect(archive.evidence).toHaveLength(1)
+    expect(archive.workingMemory).toHaveLength(1)
+    expect(archive.beliefs).toHaveLength(1)
+    expect(archive.evidence.every(row => row.actor_id === identity.actorId)).toBe(true)
+    expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_evidence WHERE actor_id = ?').get(identity.actorId)?.count).toBe(1)
+    expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_beliefs WHERE subject_id = ?').get(identity.actorId)?.count).toBe(1)
+    expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_evidence WHERE actor_id = ?').get(moussyIdentity.actorId)?.count).toBe(1)
   })
 })

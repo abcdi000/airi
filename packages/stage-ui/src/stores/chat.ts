@@ -11,7 +11,7 @@ import type {
   SocialLanguageGroupObservation,
 } from '../../../lumi-runtime/src'
 import type { ChatAssistantMessage, ChatHistoryItem, ChatInteractionContext, ChatStreamEventContext } from '../types/chat'
-import type { LumiUserProfileEntry, LumiUserProfilePendingUpdate, LumiUserProfileSourceKind } from './lumi-user-profile'
+import type { LumiUserProfileEntry, LumiUserProfilePendingUpdate } from './lumi-user-profile'
 
 import { errorMessageFrom } from '@moeru/std'
 import { createChatOrchestratorRuntime } from '@proj-airi/core-agent'
@@ -86,8 +86,6 @@ import { useLumiOnlineStore } from './lumi-online'
 import { useLumiSocialLanguageStore } from './lumi-social-language'
 import { bindLumiToolMeshToolsForTurn } from './lumi-tool-mesh'
 import {
-  buildLumiUserProfileCuratorPrompt,
-  buildLumiUserProfileCuratorUserPayload,
   buildLumiUserProfilePendingAutoReviewPrompt,
   buildLumiUserProfilePendingAutoReviewUserPayload,
   parseLumiUserProfilePendingAutoReviewOutput,
@@ -413,13 +411,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     onAssistantTurnReady: (event) => {
       const { messageText, sessionMessages, hasAttachments, hiddenUserMessage, interaction } = event
       const sessionId = getRuntimeEventSessionId(event)
-      void runLumiUserProfileAfterTurn(
-        messageText,
-        sessionMessages,
-        hiddenUserMessage ? 'screen_observation' : 'chat',
-        interaction,
-      )
-      void runLumiCurrentStateAfterTurn(sessionMessages, false, interaction)
       if (hiddenUserMessage)
         return
       const artistry = cardStore.activeCard?.extensions?.airi?.modules?.artistry
@@ -1554,71 +1545,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     ], sessionId)
   }
 
-  async function runLumiUserProfileAfterTurn(
-    assistantText: string,
-    sessionMessages: ChatHistoryItem[],
-    sourceKind: LumiUserProfileSourceKind,
-    interaction?: ChatInteractionContext,
-  ) {
-    if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
-      return
-    if (!interaction?.actorId)
-      return
-    if (interaction.conversationType === 'group')
-      return
-
-    const userId = interaction.actorId
-    await lumiUserProfileStore.ensureUserProfileLoaded(userId)
-    if (!lumiUserProfileStore.isAutoUpdateEnabledForUser(userId))
-      return
-
-    const userMessage = findLatestUserMessage(sessionMessages)
-    if (!userMessage)
-      return
-
-    const userText = extractMessageText(userMessage).trim()
-    if (!shouldConsiderForProfile(userText)) {
-      await runLumiUserProfileBacklogReviewNotice(sessionMessages, userId)
-      return
-    }
-
-    const curated = await curateLumiUserProfileWithLlm({
-      userText,
-      assistantText,
-      sessionMessages,
-      sourceKind,
-    })
-    const candidates = dedupeProfileCandidates(curated)
-    if (!candidates.length) {
-      await runLumiUserProfileBacklogReviewNotice(sessionMessages, userId)
-      return
-    }
-
-    const results = await lumiUserProfileStore.applyCandidatesForUser(userId, candidates, {
-      sourceKind,
-      sourceMessageId: userMessage.id,
-    })
-    const autoReview = userId === lumiIdentityStore.activeUserId
-      ? await runLumiUserProfilePendingAutoReview(sessionMessages)
-      : { consolidated: 0, reviewed: 0, approved: 0, rejected: 0, kept: 0 }
-    const stored = results.filter(result => result.status === 'stored').length
-    const pending = results.filter(result => result.status === 'pending').length
-    const skipped = results.filter(result => result.status === 'skipped').length
-
-    appendLumiSystemNotice([
-      'title: 用户画像更新',
-      `status: ${stored || pending ? 'updated' : 'skipped'}`,
-      `source: ${sourceKind}`,
-      `candidates: ${candidates.length}`,
-      `stored: ${stored}`,
-      `pending: ${pending}`,
-      `auto_reviewed: ${autoReview.reviewed}`,
-      `auto_approved: ${autoReview.approved}`,
-      `skipped: ${skipped}`,
-      ...candidates.slice(0, 4).map(candidate => `- ${candidate.layer}/${candidate.key}: ${previewText(candidate.value, 80)}`),
-    ])
-  }
-
   async function runLumiCurrentStateAfterTurn(
     sessionMessages: ChatHistoryItem[],
     force = false,
@@ -1707,67 +1633,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     }
   }
 
-  async function runLumiUserProfileBacklogReviewNotice(sessionMessages: ChatHistoryItem[], userId: string) {
-    if (userId !== lumiIdentityStore.activeUserId)
-      return
-    const autoReview = await runLumiUserProfilePendingAutoReview(sessionMessages)
-    if (!autoReview.reviewed && !autoReview.consolidated)
-      return
-
-    appendLumiSystemNotice([
-      'title: 用户画像待处理印象整理',
-      `status: ${autoReview.approved || autoReview.rejected ? 'updated' : 'reviewed'}`,
-      `consolidated: ${autoReview.consolidated}`,
-      `auto_reviewed: ${autoReview.reviewed}`,
-      `auto_approved: ${autoReview.approved}`,
-      `auto_rejected: ${autoReview.rejected}`,
-      `kept_pending: ${autoReview.kept}`,
-    ])
-  }
-
-  async function runLumiUserProfilePendingAutoReview(sessionMessages: ChatHistoryItem[]) {
-    const consolidated = lumiUserProfileStore.consolidatePendingUpdates().merged
-    const pending = lumiUserProfileStore.autoReviewPendingUpdates.slice(0, 2)
-    if (!pending.length)
-      return { consolidated, reviewed: 0, approved: 0, rejected: 0, kept: 0 }
-
-    let reviewed = 0
-    let approved = 0
-    let rejected = 0
-    let kept = 0
-
-    for (const update of pending) {
-      const currentEntry = lumiUserProfileStore.coreEntries.find(entry =>
-        entry.id === update.targetEntryId || entry.key === update.key,
-      )
-      const decision = await reviewLumiUserProfilePendingWithLlm({
-        pending: update,
-        currentEntry,
-        sessionMessages,
-      })
-      if (!decision)
-        continue
-
-      reviewed += 1
-      if (decision.decision === 'approve') {
-        const entry = lumiUserProfileStore.approvePendingAutomatically(update.id, decision)
-        if (entry)
-          approved += 1
-      }
-      else if (decision.decision === 'reject') {
-        lumiUserProfileStore.markPendingAutoReview(update.id, decision)
-        if (lumiUserProfileStore.rejectPending(update.id))
-          rejected += 1
-      }
-      else {
-        lumiUserProfileStore.markPendingAutoReview(update.id, decision)
-        kept += 1
-      }
-    }
-
-    return { consolidated, reviewed, approved, rejected, kept }
-  }
-
   async function reviewAndApproveLumiUserProfilePending(pendingId: string) {
     const pending = lumiUserProfileStore.pendingActiveUpdates.find(update => update.id === pendingId)
     if (!pending)
@@ -1838,48 +1703,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     catch (error) {
       console.warn('[lumi-user-profile] pending auto review failed', error)
       return null
-    }
-  }
-
-  async function curateLumiUserProfileWithLlm(input: {
-    userText: string
-    assistantText: string
-    sessionMessages: ChatHistoryItem[]
-    sourceKind: LumiUserProfileSourceKind
-  }) {
-    const providerId = activeProvider.value
-    const modelId = activeModel.value
-    if (!providerId || !modelId)
-      return []
-
-    try {
-      const chatProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
-      const buffer = await generateSocialLanguageTextWithProvider({
-        model: modelId,
-        chatProvider,
-        purpose: 'profile_curator',
-        messages: [
-          {
-            role: 'system',
-            content: buildLumiUserProfileCuratorPrompt(),
-          },
-          {
-            role: 'user',
-            content: buildLumiUserProfileCuratorUserPayload({
-              userMessage: input.userText,
-              assistantResponse: input.assistantText,
-              recentMessages: toRecentMemoryCuratorMessages(input.sessionMessages),
-              sourceKind: input.sourceKind,
-            }),
-          },
-        ],
-      })
-
-      return lumiUserProfileStore.parseCuratorOutput(buffer)
-    }
-    catch (error) {
-      console.warn('[lumi-user-profile] profile curator failed', error)
-      return []
     }
   }
 
@@ -2182,29 +2005,6 @@ function buildLumiMemorySourceSignals(text: string): string[] {
     signals.push('correction_turn_review_carefully')
 
   return [...new Set(signals)]
-}
-
-function shouldConsiderForProfile(text: string) {
-  if (text.length < 4)
-    return false
-  if (/^(?:hi|hello|hey|ok|thanks|\u597D\u7684|\u8C22\u8C22|\u55EF|\u54C8{2,})$/i.test(text.trim()))
-    return false
-  if (isLumiQuestionLikeMemorySource(text) && !/我现在|我最近|我目前|我今天|我在|压力|难受|崩溃|废了/.test(text))
-    return false
-  return true
-}
-
-function dedupeProfileCandidates<T extends { layer: string, key: string, value: string }>(candidates: T[]) {
-  const seen = new Set<string>()
-  const unique: T[] = []
-  for (const candidate of candidates) {
-    const key = `${candidate.layer}:${candidate.key}:${candidate.value.toLowerCase().replace(/\s+/g, ' ').trim()}`
-    if (seen.has(key))
-      continue
-    seen.add(key)
-    unique.push(candidate)
-  }
-  return unique
 }
 
 function toRecentMemoryCuratorMessages(messages: ChatHistoryItem[], retrievedMemories: Array<{ content: string }> = []) {

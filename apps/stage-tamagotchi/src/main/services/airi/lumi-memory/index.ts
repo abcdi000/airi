@@ -51,7 +51,13 @@ import {
 } from '../../../../shared/eventa'
 import { loadCurrentStateFromDatabase } from '../lumi-current-state'
 import { loadProfileFromDatabase } from '../lumi-user-profile'
-import { createLumiDesktopCognitiveService } from './cognitive'
+import {
+  consolidateMemoryIntoCognition,
+  createLumiDesktopCognitiveService,
+  deleteCognitiveActorData,
+  exportCognitiveActorData,
+  importCognitiveActorData,
+} from './cognitive'
 
 type SqliteValue = string | number | null
 const LUMI_MEMORY_EMBEDDING_MODEL = 'BAAI/bge-small-zh-v1.5'
@@ -489,7 +495,7 @@ function findLumiSelfBirthday(rows: Record<string, any>[]) {
 export function createLumiMemoryService(params: {
   context: ReturnType<typeof createContext>['context']
 }) {
-  defineInvokeHandler(params.context, electronLumiMemoryGetSnapshot, async ({ userId }) => getSnapshot(userId))
+  defineInvokeHandler(params.context, electronLumiMemoryGetSnapshot, async ({ userId, includeCognitive }) => getSnapshot(userId, includeCognitive))
   defineInvokeHandler(params.context, electronLumiMemoryReplaceSnapshot, async ({ userId, snapshot }) => replaceSnapshot(userId, snapshot))
   defineInvokeHandler(params.context, electronLumiMemoryUpsertMemory, async memory => upsertMemory(memory))
   defineInvokeHandler(params.context, electronLumiMemoryDeleteMemory, async ({ id, userId }) => deleteMemory(id, userId))
@@ -554,7 +560,7 @@ async function replaceSocialLanguageSnapshot(snapshot: ElectronLumiSocialLanguag
   `).run('default', JSON.stringify(plain), plain.updatedAt)
 }
 
-async function getSnapshot(userId: string): Promise<ElectronLumiMemorySnapshot> {
+async function getSnapshot(userId: string, includeCognitive = false): Promise<ElectronLumiMemorySnapshot> {
   const { db, path } = await getDatabase()
   const fragments = db.prepare(`
     SELECT m.* FROM lumi_memories m
@@ -574,6 +580,7 @@ async function getSnapshot(userId: string): Promise<ElectronLumiMemorySnapshot> 
     events,
     seedId,
     dbPath: path,
+    cognitive: includeCognitive ? exportCognitiveActorData(db, userId) : undefined,
   } satisfies ElectronLumiMemorySnapshot
 }
 
@@ -791,12 +798,15 @@ async function replaceSnapshot(userId: string, snapshot: ElectronLumiMemorySnaps
     db.exec('ROLLBACK')
     throw error
   }
-  return await getSnapshot(userId)
+  if (snapshot.cognitive)
+    importCognitiveActorData(db, userId, snapshot.cognitive)
+  return await getSnapshot(userId, Boolean(snapshot.cognitive))
 }
 
 async function upsertMemory(memory: Record<string, any>) {
   const { db } = await getDatabase()
   upsertMemoryWithDb(db, memory)
+  consolidateMemoryIntoCognition(db, rowLikeMemory(memory))
   void syncVectorForMemory(memory).catch(error => console.warn('[lumi-memory] failed to sync vector after memory upsert', error))
 }
 
@@ -1546,6 +1556,7 @@ function getMeta(db: SqliteDatabase, key: string) {
 
 async function clearDatabase(userId: string) {
   const { db } = await getDatabase()
+  deleteCognitiveActorData(db, userId)
   db.prepare('DELETE FROM lumi_memory_events WHERE user_id = ?').run(userId)
   db.prepare(`DELETE FROM lumi_memory_vectors WHERE memory_id IN (
     SELECT id FROM lumi_memories WHERE user_id = ? AND scope IN ('relationship', 'shared', 'private')

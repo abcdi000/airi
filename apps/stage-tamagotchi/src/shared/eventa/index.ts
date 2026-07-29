@@ -608,6 +608,18 @@ export interface ElectronLumiMemorySnapshot {
   events: Record<string, any>[]
   seedId: string
   dbPath?: string
+  /** Actor-scoped cognitive rows, included only for explicit export/import. */
+  cognitive?: ElectronLumiCognitiveArchive
+}
+
+/** Versioned actor-scoped cognitive archive kept out of normal renderer hydration. */
+export interface ElectronLumiCognitiveArchive {
+  version: 1
+  evidence: Record<string, unknown>[]
+  workingMemory: Record<string, unknown>[]
+  feedback: Record<string, unknown>[]
+  beliefs: Record<string, unknown>[]
+  profileProjections: Record<string, unknown>[]
 }
 
 export interface ElectronLumiMemoryVectorRecord {
@@ -641,7 +653,7 @@ export interface ElectronLumiMemoryVectorSearchResult {
   status: ElectronLumiMemoryVectorStatus
 }
 
-export const electronLumiMemoryGetSnapshot = defineInvokeEventa<ElectronLumiMemorySnapshot, { userId: string }>('eventa:invoke:electron:lumi-memory:get-snapshot')
+export const electronLumiMemoryGetSnapshot = defineInvokeEventa<ElectronLumiMemorySnapshot, { userId: string, includeCognitive?: boolean }>('eventa:invoke:electron:lumi-memory:get-snapshot')
 export const electronLumiMemoryReplaceSnapshot = defineInvokeEventa<ElectronLumiMemorySnapshot, { userId: string, snapshot: ElectronLumiMemorySnapshot }>('eventa:invoke:electron:lumi-memory:replace-snapshot')
 export const electronLumiMemoryUpsertMemory = defineInvokeEventa<void, Record<string, any>>('eventa:invoke:electron:lumi-memory:upsert-memory')
 export const electronLumiMemoryDeleteMemory = defineInvokeEventa<void, { id: string, userId: string }>('eventa:invoke:electron:lumi-memory:delete-memory')

@@ -34,8 +34,11 @@ import {
   classifyLumiMemoryCandidate,
   createEmptySocialLanguageSnapshot,
   decideLumiMemoryStatus,
+  deriveLumiMemoryCognitiveObservation,
   migrateSocialLanguageSnapshot,
   normalizeMemoryScores,
+  observeLumiBeliefHypothesis,
+  projectLumiBeliefsToProfile,
 } from '@proj-airi/lumi-runtime'
 
 export const DOGGY_PERSON_ID = 'lumi-user-00000000-0000-4000-8000-000000000001'
@@ -873,16 +876,94 @@ export class LumiServerDatabase {
       evidenceOrigin: 'derived',
       ...classification,
     })
-    for (const contradictedId of decision.contradictedMemoryIds)
-      this.database.prepare('UPDATE lumi_memories SET status = \'contradicted\', updated_at = ? WHERE id = ?').run(now, contradictedId)
     this.writeMemory(memory)
+    const consolidatedMemory = this.consolidateStoredMemoryCognition(memory, conversation)
     this.audit('memory-candidate-stored', {
-      memoryId: memory.id,
+      memoryId: consolidatedMemory.id,
       actorPersonId,
       scope: requiredMemoryPolicy(memory.scope, 'scope'),
       ownerId: requiredMemoryPolicy(memory.ownerId, 'ownerId'),
     })
-    return memory
+    return consolidatedMemory
+  }
+
+  private consolidateStoredMemoryCognition(
+    memory: LumiMemoryFragment,
+    conversation: LumiOnlineConversation | undefined,
+  ): LumiMemoryFragment {
+    const lineage = memory.derivedFromEvidenceIds ?? []
+    if (conversation?.type !== 'direct' || !memory.sourceMessageId || lineage.length !== 1)
+      return memory
+    const identity: LumiCognitiveIdentity = {
+      actorId: memory.userId,
+      personaId: memory.personaId,
+      conversationId: conversation.id,
+      conversationType: 'direct',
+      participantUserIds: conversation.participantPersonIds,
+    }
+    const evidence = this.loadCognitiveEvidenceByIds(identity, lineage)[0]
+    if (!evidence)
+      return memory
+    const derived = deriveLumiMemoryCognitiveObservation(memory, evidence)
+    if (!derived.supported)
+      return memory
+    const existingRow = this.row(`
+      SELECT * FROM lumi_cognitive_beliefs
+      WHERE subject_id = ? AND predicate = ? AND status != 'expired'
+      ORDER BY updated_at DESC LIMIT 1
+    `, memory.userId, derived.observation.predicate)
+    const existing = existingRow ? this.cognitiveBeliefFromRow(existingRow) : undefined
+    const correction = evidence.kind === 'user_correction'
+    if (memory.status !== 'active' && !correction)
+      return memory
+    const belief = observeLumiBeliefHypothesis(existing, derived.observation)
+    let consolidatedMemory = memory
+    if (correction) {
+      const supersededMemoryIds = existing?.evidenceIds.length
+        ? this.rows(`
+            SELECT DISTINCT memory.id FROM lumi_memories memory,
+              json_each(memory.derived_from_evidence_ids_json) lineage
+            WHERE memory.user_id = ?
+              AND memory.id != ?
+              AND memory.status = 'active'
+              AND lineage.value IN (${existing.evidenceIds.map(() => '?').join(', ')})
+          `, memory.userId, memory.id, ...existing.evidenceIds).map(row => String(row.id))
+        : []
+      const correctedAt = evidence.occurredAt
+      for (const id of supersededMemoryIds) {
+        this.database.prepare(`
+          UPDATE lumi_memories SET status = 'contradicted', valid_until = ?,
+            superseded_by_id = ?, updated_at = ? WHERE id = ? AND user_id = ?
+        `).run(correctedAt, memory.id, correctedAt, id, memory.userId)
+      }
+      consolidatedMemory = {
+        ...memory,
+        status: 'active',
+        validFrom: memory.validFrom ?? correctedAt,
+        lastConfirmedAt: correctedAt,
+        supersedesId: supersededMemoryIds[0],
+      }
+      this.writeMemory(consolidatedMemory)
+    }
+    this.upsertCognitiveBelief(identity, belief)
+    for (const layer of ['daily', 'dynamic', 'core']) {
+      this.database.prepare(`
+        UPDATE lumi_cognitive_profile_projections SET status = 'pending', updated_at = ?
+        WHERE id = ? AND status = 'active'
+      `).run(evidence.occurredAt, `profile:${belief.id}:${layer}`)
+    }
+    const evidenceById = new Map(
+      this.loadCognitiveEvidenceByIds(identity, belief.evidenceIds).map(item => [item.id, item] as const),
+    )
+    for (const projection of projectLumiBeliefsToProfile({
+      subjectId: memory.userId,
+      beliefs: [belief],
+      evidenceById,
+      now: evidence.occurredAt,
+    })) {
+      this.upsertCognitiveProfileProjection(identity, projection)
+    }
+    return consolidatedMemory
   }
 
   /** Changes curation status without weakening the server-assigned access scope. */

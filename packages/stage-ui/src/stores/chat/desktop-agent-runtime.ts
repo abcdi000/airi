@@ -859,6 +859,36 @@ function appendVisibleUserMessage(envelope: DirectPerceptionEnvelope, interactio
 }
 
 function appendDesktopAgentToolNotice(sessionId: string, event: AgentTraceEvent): void {
+  if (event.type === 'automatic_recall') {
+    const recall = event.recall
+    useChatSessionStore().appendSessionMessage(sessionId, {
+      id: `agent-recall:${event.turnId}:${event.status}`,
+      role: 'system',
+      content: [
+        '[memory_search]',
+        'title: 自动浅召回',
+        `status: ${event.status === 'completed' ? 'completed' : 'fallback'}`,
+        'source: cognitive_context',
+        `ran: ${recall.ran}`,
+        `query_reason: ${recall.queryReason ?? 'none'}`,
+        `reused_previous: ${recall.reusedPreviousState}`,
+        `acl_candidates: ${recall.aclInputCount} -> ${recall.aclOutputCount}`,
+        `lexical_candidates: ${recall.lexicalCandidateCount}`,
+        `ann_candidates: ${recall.annCandidateCount}`,
+        `merged_candidates: ${recall.mergedCandidateCount}`,
+        `reranked_candidates: ${recall.rerankedCandidateCount}`,
+        `threshold_rejected: ${recall.thresholdRejectedCount}`,
+        `conflict_rejected: ${recall.conflictRejectedCount}`,
+        `injected: ${recall.injectedCount}`,
+        `duration_ms: ${recall.durationMs}`,
+        `embedding_ms: ${recall.embeddingDurationMs ?? 0}`,
+        `vector_index: ${recall.vectorIndexStatus ?? 'unavailable'}`,
+        ...(recall.fallbackReason ? [`fallback_reason: ${recall.fallbackReason}`] : []),
+      ].join('\n'),
+      createdAt: event.timestamp,
+    })
+    return
+  }
   if (event.type !== 'tool_execution' || event.toolName === 'reply')
     return
   const status = {

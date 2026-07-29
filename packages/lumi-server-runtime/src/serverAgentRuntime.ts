@@ -632,6 +632,28 @@ function recordTrace(database: LumiServerDatabase, event: AgentTraceEvent): void
     timestamp: String(event.timestamp),
     ...('round' in event ? { round: String(event.round) } : {}),
     ...('reason' in event ? { reason: event.reason } : {}),
+    ...(event.type === 'automatic_recall'
+      ? {
+          status: event.status,
+          ran: String(event.recall.ran),
+          queryReason: event.recall.queryReason ?? '',
+          reusedPreviousState: String(event.recall.reusedPreviousState),
+          aclInputCount: String(event.recall.aclInputCount),
+          aclOutputCount: String(event.recall.aclOutputCount),
+          lexicalCandidateCount: String(event.recall.lexicalCandidateCount),
+          annCandidateCount: String(event.recall.annCandidateCount),
+          mergedCandidateCount: String(event.recall.mergedCandidateCount),
+          rerankedCandidateCount: String(event.recall.rerankedCandidateCount),
+          thresholdRejectedCount: String(event.recall.thresholdRejectedCount),
+          conflictRejectedCount: String(event.recall.conflictRejectedCount),
+          injectedCount: String(event.recall.injectedCount),
+          durationMs: String(event.recall.durationMs),
+          embeddingDurationMs: String(event.recall.embeddingDurationMs ?? ''),
+          vectorIndexStatus: event.recall.vectorIndexStatus ?? '',
+          fallbackReason: event.recall.fallbackReason ?? '',
+          ...(event.recall.query ? { query: event.recall.query } : {}),
+        }
+      : {}),
     ...(event.type === 'model_request'
       ? {
           purpose: event.purpose,

@@ -765,4 +765,92 @@ describe('lumiServerDatabase', () => {
       database.close()
     }
   })
+
+  /** @example Erasing Doggy cognition leaves Moussy cognition and both timelines intact. */
+  it('atomically deletes only the requested actor cognitive data', () => {
+    const database = LumiServerDatabase.open(':memory:')
+    try {
+      const actors = [
+        { actorId: DOGGY_PERSON_ID, conversationId: doggyDirectId },
+        { actorId: MOUSSY_PERSON_ID, conversationId: moussyDirectId },
+      ]
+      const memories = actors.map(({ actorId, conversationId }, index) => {
+        const messageId = `cognitive-erasure-${index}`
+        const content = `${actorId} private cognitive material`
+        database.acceptUserMessage({
+          conversationId,
+          actorPersonId: actorId,
+          messageId,
+          idempotencyKey: messageId,
+          content,
+          createdAt: Date.parse('2026-07-29T12:00:00.000Z') + index,
+        })
+        const identity = cognitiveIdentity(actorId, conversationId)
+        database.commitCognitiveFastLoop({
+          identity,
+          evidence: cognitiveEvidence(messageId, content, {
+            id: `evidence:message:${conversationId}:${messageId}`,
+            actorId,
+            subjectUserIds: [actorId],
+            conversationId,
+            participantUserIds: [actorId],
+          }),
+          feedback: [],
+          workingMemory: createLumiWorkingMemory({
+            personId: actorId,
+            personaId: identity.personaId,
+            conversationId,
+            conversationType: 'direct',
+            now: '2026-07-29T12:00:00.000Z',
+          }),
+        })
+        database.writePersonState({
+          personId: actorId,
+          kind: 'relationship',
+          payload: { trust: index + 1 },
+        })
+        const memory = database.storeMemoryCandidate({
+          actorPersonId: actorId,
+          conversationId,
+          candidate: memoryCandidate({ content, sourceMessageId: messageId }),
+        })
+        database.upsertMemoryVector({
+          memoryId: memory.id,
+          model: 'test-model',
+          dimensions: 2,
+          vector: [1, index],
+          contentDigest: `digest-${index}`,
+          updatedAt: Date.now(),
+        })
+        return memory
+      })
+
+      const report = database.deleteCognitiveActorData(DOGGY_PERSON_ID)
+      const backup = database.exportBackup()
+
+      expect(report).toMatchObject({
+        actorPersonId: DOGGY_PERSON_ID,
+        evidenceCount: 1,
+        workingMemoryCount: 1,
+        memoryCount: 1,
+        memoryVectorCount: 1,
+        personStateCount: 1,
+      })
+      expect(backup.sections.cognitiveEvidence?.some(row => row.actor_id === DOGGY_PERSON_ID)).toBe(false)
+      expect(backup.sections.cognitiveWorkingMemory?.some(row => row.person_id === DOGGY_PERSON_ID)).toBe(false)
+      expect(backup.sections.memories.some(row => row.user_id === DOGGY_PERSON_ID)).toBe(false)
+      expect(backup.sections.memoryVectors.some(row => row.memory_id === memories[0].id)).toBe(false)
+      expect(backup.sections.personStates.some(row => row.person_id === DOGGY_PERSON_ID)).toBe(false)
+      expect(backup.sections.cognitiveEvidence?.some(row => row.actor_id === MOUSSY_PERSON_ID)).toBe(true)
+      expect(backup.sections.cognitiveWorkingMemory?.some(row => row.person_id === MOUSSY_PERSON_ID)).toBe(true)
+      expect(backup.sections.memories.some(row => row.id === memories[1].id)).toBe(true)
+      expect(backup.sections.memoryVectors.some(row => row.memory_id === memories[1].id)).toBe(true)
+      expect(backup.sections.personStates.some(row => row.person_id === MOUSSY_PERSON_ID)).toBe(true)
+      expect(database.replay(doggyDirectId, DOGGY_PERSON_ID, 0).messages).toHaveLength(1)
+      expect(database.replay(moussyDirectId, MOUSSY_PERSON_ID, 0).messages).toHaveLength(1)
+    }
+    finally {
+      database.close()
+    }
+  })
 })

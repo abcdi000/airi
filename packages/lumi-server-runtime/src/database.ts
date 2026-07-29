@@ -218,6 +218,19 @@ export interface LumiCognitiveMaintenanceReport {
   completedAt: string
 }
 
+/** Counts removed by one actor-scoped cognitive erasure transaction. */
+export interface LumiCognitiveActorDeletionReport {
+  actorPersonId: string
+  evidenceCount: number
+  workingMemoryCount: number
+  beliefCount: number
+  feedbackCount: number
+  profileProjectionCount: number
+  memoryCount: number
+  memoryVectorCount: number
+  personStateCount: number
+}
+
 export interface LumiMigrationMessage {
   id: string
   conversationId: string
@@ -2410,6 +2423,73 @@ export class LumiServerDatabase {
       expiredWorkingMemoryCount: Number(expiredWorkingMemory.changes),
       completedAt,
     }
+  }
+
+  /**
+   * Deletes one person's private cognitive material without deleting identity or timelines.
+   *
+   * Use when:
+   * - A verified account owner requests memory erasure
+   * - An administrator resets one person's learned state before a clean re-import
+   *
+   * Expects:
+   * - `actorPersonId` is an existing immutable internal Person identifier
+   * - Cross-person cognitive lineage does not reference the actor's private evidence
+   *
+   * Returns:
+   * - Exact row counts removed by the atomic operation
+   */
+  deleteCognitiveActorData(actorPersonId: string): LumiCognitiveActorDeletionReport {
+    const actorId = requiredText(actorPersonId, 'actorPersonId', 160)
+    this.assertPerson(actorId)
+    return this.transaction(() => {
+      const count = (table: string, column: string) => Number(this.row(
+        `SELECT COUNT(*) AS count FROM ${quotedIdentifier(table)} WHERE ${quotedIdentifier(column)} = ?`,
+        actorId,
+      )?.count ?? 0)
+      const evidenceCount = count('lumi_cognitive_evidence', 'actor_id')
+      const workingMemoryCount = count('lumi_cognitive_working_memory', 'person_id')
+      const beliefCount = count('lumi_cognitive_beliefs', 'subject_id')
+      const feedbackCount = count('lumi_cognitive_feedback', 'actor_id')
+      const profileProjectionCount = count('lumi_cognitive_profile_projections', 'subject_id')
+      const memoryCount = count('lumi_memories', 'user_id')
+      const personStateCount = count('lumi_person_state', 'person_id')
+      const memoryVectorCount = Number(this.row(`
+        SELECT COUNT(*) AS count
+        FROM lumi_memory_vectors vector
+        JOIN lumi_memories memory ON memory.id = vector.memory_id
+        WHERE memory.user_id = ?
+      `, actorId)?.count ?? 0)
+
+      this.database.prepare('DELETE FROM lumi_cognitive_profile_projections WHERE subject_id = ?').run(actorId)
+      this.database.prepare('DELETE FROM lumi_cognitive_beliefs WHERE subject_id = ?').run(actorId)
+      this.database.prepare('DELETE FROM lumi_cognitive_feedback WHERE actor_id = ?').run(actorId)
+      this.database.prepare('DELETE FROM lumi_cognitive_working_memory WHERE person_id = ?').run(actorId)
+      this.database.prepare(`
+        DELETE FROM lumi_cognitive_evidence_lineage
+        WHERE evidence_id IN (SELECT id FROM lumi_cognitive_evidence WHERE actor_id = ?)
+          AND parent_evidence_id IN (SELECT id FROM lumi_cognitive_evidence WHERE actor_id = ?)
+      `).run(actorId, actorId)
+      this.database.prepare('DELETE FROM lumi_memories WHERE user_id = ?').run(actorId)
+      this.database.prepare('DELETE FROM lumi_cognitive_evidence WHERE actor_id = ?').run(actorId)
+      this.database.prepare('DELETE FROM lumi_person_state WHERE person_id = ?').run(actorId)
+
+      const report: LumiCognitiveActorDeletionReport = {
+        actorPersonId: actorId,
+        evidenceCount,
+        workingMemoryCount,
+        beliefCount,
+        feedbackCount,
+        profileProjectionCount,
+        memoryCount,
+        memoryVectorCount,
+        personStateCount,
+      }
+      this.audit('person-cognitive-data-deleted', Object.fromEntries(
+        Object.entries(report).map(([key, value]) => [key, String(value)]),
+      ))
+      return report
+    })
   }
 
   /** Loads evidence-backed beliefs and profile projections for one direct actor. */

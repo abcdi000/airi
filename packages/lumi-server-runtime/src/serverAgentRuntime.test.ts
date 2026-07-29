@@ -96,6 +96,22 @@ describe('lumiServerAgentRuntime', () => {
         ]))
       expect(database.exportBackup().sections.cognitiveEvidence).toHaveLength(1)
       expect(database.exportBackup().sections.cognitiveWorkingMemory).toHaveLength(1)
+      const recallAudit = database.exportBackup().sections.audits.find(row => row.action === 'agent-automatic_recall')
+      expect(recallAudit).toBeDefined()
+      expect(JSON.parse(String(recallAudit?.metadata_json))).toMatchObject({
+        status: 'completed',
+        ran: 'true',
+        reusedPreviousState: 'false',
+        aclInputCount: '0',
+        aclOutputCount: '0',
+        lexicalCandidateCount: '0',
+        annCandidateCount: '0',
+        mergedCandidateCount: '0',
+        injectedCount: '0',
+        vectorIndexStatus: 'structured_lexical_fallback',
+        fallbackReason: 'semantic_recall_unconfigured',
+      })
+      expect(JSON.parse(String(recallAudit?.metadata_json))).not.toHaveProperty('query')
     }
     finally {
       database.close()

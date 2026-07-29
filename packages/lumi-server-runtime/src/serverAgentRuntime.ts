@@ -43,6 +43,7 @@ import {
 
 import { createServerSocialLanguagePort } from './agentSocialLanguage'
 import { LUMI_PERSONA_ID } from './database'
+import { createServerCognitiveContextPort } from './serverCognitive'
 
 export interface LumiServerAgentRuntimeOptions {
   database: LumiServerDatabase
@@ -108,6 +109,7 @@ export function createLumiServerAgentReplyGenerator(
     languageModel: options.languageModel,
     persistence: databasePersistence(options.database),
     identity,
+    cognitive: createServerCognitiveContextPort(options),
     memory: createMemoryPort(options),
     replyPolicy: createReplyPolicy(options.database),
     socialLanguage,

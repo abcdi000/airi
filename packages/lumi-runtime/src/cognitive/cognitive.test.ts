@@ -326,6 +326,41 @@ describe('lumi hypotheses and profile projection', () => {
     expect(prompt).toContain('暂时假设（不确定，不得当作事实）')
     expect(prompt).toContain('可能焦虑')
   })
+
+  it('rejects a hypothesis whose claimed evidence lineage is missing', () => {
+    const workingMemory = createLumiWorkingMemory({
+      personId: DOGGY,
+      personaId: 'lumi',
+      conversationId: 'direct-doggy',
+      conversationType: 'direct',
+      now: NOW,
+    })
+    const hypothesis = observeLumiBeliefHypothesis(undefined, {
+      subjectId: DOGGY,
+      predicate: 'current_mood',
+      value: '可能焦虑',
+      evidence: evidence({ id: 'missing-evidence' }),
+    })
+
+    const bundle = assembleLumiCognitiveContext({
+      identity: {
+        actorId: DOGGY,
+        personaId: 'lumi',
+        conversationId: 'direct-doggy',
+        conversationType: 'direct',
+        participantUserIds: [DOGGY],
+      },
+      workingMemory,
+      evidence: [],
+      memories: [],
+      hypotheses: [hypothesis],
+      profile: [],
+      recallTrace: emptyTrace(),
+      now: NOW,
+    })
+
+    expect(bundle.tentativeImpressions).toEqual([])
+  })
 })
 
 describe('lumi cognitive privacy and feedback', () => {

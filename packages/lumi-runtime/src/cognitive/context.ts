@@ -203,9 +203,11 @@ function canAccessHypothesis(
     return hypothesis.sensitivity !== 'private'
   if (!hypothesis.participantUserIds.includes(identity.actorId))
     return false
+  if (hypothesis.evidenceIds.length === 0)
+    return false
   return hypothesis.evidenceIds.every((id) => {
     const evidence = evidenceById.get(id)
-    return !evidence || canAccessEvidence(evidence, identity)
+    return evidence !== undefined && canAccessEvidence(evidence, identity)
   })
 }
 

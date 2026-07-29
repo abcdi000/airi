@@ -13,6 +13,11 @@ import type {
   LumiSendMessageRequest,
   LumiSendMessageResponse,
 } from '@proj-airi/lumi-online'
+import type {
+  LumiCognitiveContextBundle,
+  LumiCognitiveDialogueTurn,
+  LumiCognitiveIdentity,
+} from '@proj-airi/lumi-runtime'
 import type { ServerOptions } from '@proj-airi/server-runtime/server'
 import type {
   ShortcutBinding,
@@ -650,6 +655,35 @@ export const electronLumiMemorySyncVector = defineInvokeEventa<ElectronLumiMemor
 export const electronLumiMemorySaveEvent = defineInvokeEventa<void, { userId: string, event: Record<string, any> }>('eventa:invoke:electron:lumi-memory:save-event')
 export const electronLumiMemorySetSeedId = defineInvokeEventa<void, { userId: string, seedId: string }>('eventa:invoke:electron:lumi-memory:set-seed-id')
 export const electronLumiMemoryClear = defineInvokeEventa<void, { userId: string }>('eventa:invoke:electron:lumi-memory:clear')
+
+/** Trusted desktop request for one Planner-before cognitive fast loop. */
+export interface ElectronLumiCognitivePrepareTurnRequest {
+  /** Immutable actor and conversation resolved from the Agent envelope. */
+  identity: LumiCognitiveIdentity
+  /** Current committed source message identifier. */
+  sourceMessageId: string
+  /** Current visible user text. */
+  userText: string
+  /** Recent complete dialogue used for contextual recall. */
+  recentTurns: LumiCognitiveDialogueTurn[]
+  /** Platform name used only for social-language affinity. */
+  platform: string
+}
+
+/** Records context usage only after the first Planner request accepted it. */
+export interface ElectronLumiCognitiveRecordUseRequest {
+  /** Immutable actor and conversation resolved from the same Agent envelope. */
+  identity: LumiCognitiveIdentity
+  /** Long-term memories injected into Planner. */
+  memoryIds: string[]
+  /** Tentative hypotheses injected into Planner. */
+  hypothesisIds: string[]
+  /** ISO timestamp of actual use. */
+  usedAt: string
+}
+
+export const electronLumiCognitivePrepareTurn = defineInvokeEventa<LumiCognitiveContextBundle, ElectronLumiCognitivePrepareTurnRequest>('eventa:invoke:electron:lumi-cognitive:prepare-turn')
+export const electronLumiCognitiveRecordUse = defineInvokeEventa<void, ElectronLumiCognitiveRecordUseRequest>('eventa:invoke:electron:lumi-cognitive:record-use')
 
 export interface ElectronLumiSocialLanguageSnapshot {
   version: 1 | 2 | 3 | 4

@@ -1,5 +1,11 @@
 import type { PersistedSessionState } from '@proj-airi/lumi-agent-runtime'
+import type {
+  LumiBeliefHypothesis,
+  LumiCognitiveEvidence,
+  LumiCognitiveIdentity,
+} from '@proj-airi/lumi-runtime'
 
+import { createLumiWorkingMemory } from '@proj-airi/lumi-runtime'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -39,6 +45,79 @@ function memoryRequest(userId: string, conversationId: string, conversationType:
     viewerUserId: userId,
     conversationId,
   } as const
+}
+
+function cognitiveIdentity(
+  actorId = DOGGY_PERSON_ID,
+  conversationId = doggyDirectId,
+  conversationType: LumiCognitiveIdentity['conversationType'] = 'direct',
+  participantUserIds = [actorId],
+): LumiCognitiveIdentity {
+  return {
+    actorId,
+    personaId: 'lumi',
+    conversationId,
+    conversationType,
+    participantUserIds,
+  }
+}
+
+function cognitiveEvidence(
+  sourceMessageId: string,
+  content = '继续处理 Patchright 的默认浏览器方案。',
+): LumiCognitiveEvidence {
+  const identity = cognitiveIdentity()
+  return {
+    id: `evidence:message:${identity.conversationId}:${sourceMessageId}`,
+    actorId: identity.actorId,
+    subjectUserIds: [identity.actorId],
+    conversationId: identity.conversationId,
+    conversationType: identity.conversationType,
+    kind: 'user_statement',
+    origin: 'primary',
+    content,
+    sourceId: sourceMessageId,
+    sourceMessageId,
+    occurredAt: '2026-07-29T06:00:00.000Z',
+    trust: 1,
+    authorVerified: true,
+    scope: 'private',
+    sensitivity: 'private',
+    participantUserIds: [...identity.participantUserIds],
+    derivedFromEvidenceIds: [],
+    schemaVersion: 1,
+  }
+}
+
+function belief(evidenceId: string): LumiBeliefHypothesis {
+  return {
+    id: 'belief:doggy:browser-default',
+    subjectId: DOGGY_PERSON_ID,
+    predicate: 'browser.default_engine',
+    value: 'patchright',
+    confidence: 0.82,
+    stability: 0.66,
+    evidenceIds: [evidenceId],
+    counterEvidenceIds: [],
+    firstObservedAt: '2026-07-29T06:00:00.000Z',
+    lastObservedAt: '2026-07-29T06:00:00.000Z',
+    expiresAt: '2026-08-29T06:00:00.000Z',
+    status: 'supported',
+    scope: 'private',
+    sensitivity: 'private',
+    conversationId: doggyDirectId,
+    participantUserIds: [DOGGY_PERSON_ID],
+    evidenceCount: 1,
+    independentEvidenceCount: 1,
+    familiarity: 0.5,
+    ownership: 0,
+    positiveFeedback: 0,
+    negativeFeedback: 0,
+    rejectionCount: 0,
+    firstSeenAt: '2026-07-29T06:00:00.000Z',
+    lastSeenAt: '2026-07-29T06:00:00.000Z',
+    decay: 0.05,
+  }
 }
 
 describe('lumiServerDatabase', () => {
@@ -275,6 +354,199 @@ describe('lumiServerDatabase', () => {
     }
     finally {
       database.close()
+    }
+  })
+
+  it('atomically persists cognitive evidence and working memory through backup restore', () => {
+    const source = LumiServerDatabase.open(':memory:')
+    const restored = LumiServerDatabase.open(':memory:')
+    try {
+      source.acceptUserMessage({
+        conversationId: doggyDirectId,
+        actorPersonId: DOGGY_PERSON_ID,
+        messageId: 'cognitive-source',
+        idempotencyKey: 'cognitive-source',
+        content: '继续处理 Patchright 的默认浏览器方案。',
+        createdAt: Date.parse('2026-07-29T06:00:00.000Z'),
+      })
+      const identity = cognitiveIdentity()
+      const evidence = cognitiveEvidence('cognitive-source')
+      const workingMemory = {
+        ...createLumiWorkingMemory({
+          personId: identity.actorId,
+          personaId: identity.personaId,
+          conversationId: identity.conversationId,
+          conversationType: identity.conversationType,
+          now: evidence.occurredAt,
+        }),
+        continuationPoint: '默认使用 Patchright，特殊情况使用 Playwright。',
+      }
+      source.commitCognitiveFastLoop({ identity, evidence, feedback: [], workingMemory })
+
+      expect(source.loadCognitiveWorkingMemory(identity)?.continuationPoint)
+        .toBe('默认使用 Patchright，特殊情况使用 Playwright。')
+      const backup = source.exportBackup()
+      expect(backup.sections.cognitiveEvidence).toHaveLength(1)
+      expect(backup.sections.cognitiveWorkingMemory).toHaveLength(1)
+      expect(backup.sections.cognitiveMigrations?.[0]?.phase).toBe('active')
+
+      restored.restoreBackup(backup)
+      expect(restored.loadCognitiveWorkingMemory(identity)).toEqual(workingMemory)
+      expect(restored.exportBackup().sections.cognitiveEvidence).toEqual(backup.sections.cognitiveEvidence)
+    }
+    finally {
+      source.close()
+      restored.close()
+    }
+  })
+
+  it('rejects cognitive id reuse and keeps direct cognition out of other users and groups', () => {
+    const database = LumiServerDatabase.open(':memory:')
+    try {
+      database.acceptUserMessage({
+        conversationId: doggyDirectId,
+        actorPersonId: DOGGY_PERSON_ID,
+        messageId: 'private-cognitive-source',
+        idempotencyKey: 'private-cognitive-source',
+        content: '默认使用 Patchright。',
+        createdAt: Date.parse('2026-07-29T06:00:00.000Z'),
+      })
+      const identity = cognitiveIdentity()
+      const evidence = cognitiveEvidence('private-cognitive-source', '默认使用 Patchright。')
+      const workingMemory = createLumiWorkingMemory({
+        personId: identity.actorId,
+        personaId: identity.personaId,
+        conversationId: identity.conversationId,
+        conversationType: identity.conversationType,
+        now: evidence.occurredAt,
+      })
+      database.commitCognitiveFastLoop({ identity, evidence, feedback: [], workingMemory })
+      expect(() => database.commitCognitiveFastLoop({
+        identity,
+        evidence: { ...evidence, content: '篡改后的内容' },
+        feedback: [],
+        workingMemory,
+      })).toThrow('id was reused for different content')
+
+      const hypothesis = belief(evidence.id)
+      database.upsertCognitiveBelief(identity, hypothesis)
+      database.upsertCognitiveProfileProjection(identity, {
+        id: 'profile:doggy:daily-browser',
+        subjectId: DOGGY_PERSON_ID,
+        layer: 'daily',
+        key: 'current_browser_work',
+        value: '正在处理 Patchright 默认方案',
+        beliefIds: [hypothesis.id],
+        evidenceIds: [evidence.id],
+        confidence: 0.8,
+        stability: 0.6,
+        expiresAt: '2026-08-01T06:00:00.000Z',
+        status: 'active',
+        scope: 'private',
+        sensitivity: 'private',
+        updatedAt: '2026-07-29T06:00:00.000Z',
+      })
+
+      expect(database.loadCognitiveProjectionState(cognitiveIdentity(
+        MOUSSY_PERSON_ID,
+        moussyDirectId,
+      )).hypotheses).toEqual([])
+      const group = database.loadCognitiveProjectionState(cognitiveIdentity(
+        DOGGY_PERSON_ID,
+        DOGGY_MOUSSY_GROUP_ID,
+        'group',
+        [DOGGY_PERSON_ID, MOUSSY_PERSON_ID],
+      ))
+      expect(group.hypotheses).toEqual([])
+      expect(group.profile).toEqual([])
+      expect(group.relationshipState).toBeUndefined()
+    }
+    finally {
+      database.close()
+    }
+  })
+
+  it('marks injected memory use and migrates legacy state without claiming primary evidence', () => {
+    const source = LumiServerDatabase.open(':memory:')
+    const restored = LumiServerDatabase.open(':memory:')
+    try {
+      source.acceptUserMessage({
+        conversationId: doggyDirectId,
+        actorPersonId: DOGGY_PERSON_ID,
+        messageId: 'memory-evidence-source',
+        idempotencyKey: 'memory-evidence-source',
+        content: '我喜欢合作游戏。',
+        createdAt: Date.parse('2026-07-29T06:00:00.000Z'),
+      })
+      const identity = cognitiveIdentity()
+      const evidence = cognitiveEvidence('memory-evidence-source', '我喜欢合作游戏。')
+      source.commitCognitiveFastLoop({
+        identity,
+        evidence,
+        feedback: [],
+        workingMemory: createLumiWorkingMemory({
+          personId: identity.actorId,
+          personaId: identity.personaId,
+          conversationId: identity.conversationId,
+          conversationType: identity.conversationType,
+          now: evidence.occurredAt,
+        }),
+      })
+      const memory = source.storeMemoryCandidate({
+        actorPersonId: DOGGY_PERSON_ID,
+        conversationId: doggyDirectId,
+        candidate: memoryCandidate({ sourceMessageId: 'memory-evidence-source' }),
+      })
+      source.setMemoryStatus(memory.id, 'active')
+      source.recordCognitiveContextUse({
+        identity,
+        memoryIds: [memory.id],
+        hypothesisIds: [],
+        usedAt: '2026-07-29T06:05:00.000Z',
+      })
+      expect(source.loadAccessibleMemoriesByIds(identity, [memory.id])[0]).toMatchObject({
+        useCount: 1,
+        lastUsedAt: '2026-07-29T06:05:00.000Z',
+        evidenceOrigin: 'derived',
+        derivedFromEvidenceIds: [evidence.id],
+      })
+
+      source.writePersonState({
+        personId: DOGGY_PERSON_ID,
+        kind: 'profile',
+        payload: { oldInference: 'legacy only' },
+      })
+      const legacyBackup = source.exportBackup()
+      legacyBackup.sections.memories = []
+      legacyBackup.sections.memoryVectors = []
+      legacyBackup.sections.cognitiveEvidence = []
+      legacyBackup.sections.cognitiveEvidenceSubjects = []
+      legacyBackup.sections.cognitiveEvidenceLineage = []
+      legacyBackup.sections.cognitiveWorkingMemory = []
+      legacyBackup.sections.cognitiveBeliefs = []
+      legacyBackup.sections.cognitiveBeliefEvidence = []
+      legacyBackup.sections.cognitiveFeedback = []
+      legacyBackup.sections.cognitiveFeedbackTargets = []
+      legacyBackup.sections.cognitiveProfileProjections = []
+      legacyBackup.sections.cognitiveProjectionBeliefs = []
+      legacyBackup.sections.cognitiveProjectionEvidence = []
+      legacyBackup.sections.cognitiveMigrations = []
+      restored.restoreBackup(legacyBackup)
+
+      const migrated = restored.exportBackup()
+      expect(migrated.sections.cognitiveEvidence).toEqual([
+        expect.objectContaining({
+          actor_id: 'lumi',
+          kind: 'legacy_import',
+          origin: 'legacy_import',
+          author_verified: 0,
+        }),
+      ])
+      expect(migrated.sections.cognitiveMigrations?.[0]).toMatchObject({ phase: 'active' })
+    }
+    finally {
+      source.close()
+      restored.close()
     }
   })
 })

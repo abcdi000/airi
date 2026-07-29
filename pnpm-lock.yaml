@@ -1289,6 +1289,9 @@ importers:
       '@proj-airi/lumi-online':
         specifier: workspace:*
         version: link:../../packages/lumi-online
+      '@proj-airi/lumi-runtime':
+        specifier: workspace:*
+        version: link:../../packages/lumi-runtime
       '@proj-airi/lumi-server':
         specifier: workspace:*
         version: link:../lumi-server

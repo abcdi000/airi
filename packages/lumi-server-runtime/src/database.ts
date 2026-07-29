@@ -5,11 +5,21 @@ import type {
   LumiOnlinePerson,
 } from '@proj-airi/lumi-online'
 import type {
+  LumiBeliefHypothesis,
+  LumiCognitiveEvidence,
+  LumiCognitiveIdentity,
+  LumiCognitiveLifecycle,
+  LumiCognitiveProfileProjection,
+  LumiCognitiveProjectionState,
   LumiConversationSummary,
+  LumiFeedbackEvent,
   LumiMemoryCandidate,
   LumiMemoryFragment,
+  LumiMemoryScope,
   LumiMemorySearchRequest,
+  LumiMemorySensitivity,
   LumiMemoryStatus,
+  LumiWorkingMemory,
   SocialLanguageSnapshot,
 } from '@proj-airi/lumi-runtime'
 
@@ -69,6 +79,18 @@ export interface LumiServerBackupV1 {
     deliveryReceipts: SqliteRow[]
     memories: SqliteRow[]
     memoryVectors: SqliteRow[]
+    cognitiveEvidence?: SqliteRow[]
+    cognitiveEvidenceSubjects?: SqliteRow[]
+    cognitiveEvidenceLineage?: SqliteRow[]
+    cognitiveWorkingMemory?: SqliteRow[]
+    cognitiveBeliefs?: SqliteRow[]
+    cognitiveBeliefEvidence?: SqliteRow[]
+    cognitiveFeedback?: SqliteRow[]
+    cognitiveFeedbackTargets?: SqliteRow[]
+    cognitiveProfileProjections?: SqliteRow[]
+    cognitiveProjectionBeliefs?: SqliteRow[]
+    cognitiveProjectionEvidence?: SqliteRow[]
+    cognitiveMigrations?: SqliteRow[]
     personStates: SqliteRow[]
     diaryEntries: SqliteRow[]
     privateNotes: SqliteRow[]
@@ -169,6 +191,14 @@ export interface LumiMemoryVectorStatus {
   missingCount: number
 }
 
+/** Atomic payload persisted by the deterministic cognitive fast loop. */
+export interface LumiCognitiveFastLoopCommit {
+  identity: LumiCognitiveIdentity
+  evidence: LumiCognitiveEvidence
+  feedback: readonly LumiFeedbackEvent[]
+  workingMemory: LumiWorkingMemory
+}
+
 export interface LumiMigrationMessage {
   id: string
   conversationId: string
@@ -256,6 +286,7 @@ export class LumiServerDatabase {
     const result = new LumiServerDatabase(database, path)
     result.migrate()
     result.seedKnownPeopleAndConversations()
+    result.migrateLegacyCognitiveState()
     return result
   }
 
@@ -833,6 +864,13 @@ export class LumiServerDatabase {
       decay: input.candidate.decay,
       status: decision.status,
       tags: [...input.candidate.tags, decision.status === 'candidate' ? 'needs_review' : 'auto_memory'],
+      derivedFromEvidenceIds: input.candidate.sourceMessageId && conversation
+        ? [`evidence:message:${conversation.id}:${input.candidate.sourceMessageId}`]
+        : [],
+      validFrom: now,
+      lastConfirmedAt: now,
+      useCount: 0,
+      evidenceOrigin: 'derived',
       ...classification,
     })
     for (const contradictedId of decision.contradictedMemoryIds)
@@ -1167,6 +1205,18 @@ export class LumiServerDatabase {
         deliveryReceipts: this.rows('SELECT * FROM lumi_delivery_receipts ORDER BY accepted_at ASC'),
         memories: this.rows('SELECT * FROM lumi_memories ORDER BY created_at ASC'),
         memoryVectors: this.rows('SELECT * FROM lumi_memory_vectors ORDER BY memory_id ASC'),
+        cognitiveEvidence: this.rows('SELECT * FROM lumi_cognitive_evidence ORDER BY occurred_at ASC, id ASC'),
+        cognitiveEvidenceSubjects: this.rows('SELECT * FROM lumi_cognitive_evidence_subjects ORDER BY evidence_id, subject_id'),
+        cognitiveEvidenceLineage: this.rows('SELECT * FROM lumi_cognitive_evidence_lineage ORDER BY evidence_id, parent_evidence_id'),
+        cognitiveWorkingMemory: this.rows('SELECT * FROM lumi_cognitive_working_memory ORDER BY person_id, conversation_id'),
+        cognitiveBeliefs: this.rows('SELECT * FROM lumi_cognitive_beliefs ORDER BY last_observed_at, id'),
+        cognitiveBeliefEvidence: this.rows('SELECT * FROM lumi_cognitive_belief_evidence ORDER BY belief_id, evidence_id'),
+        cognitiveFeedback: this.rows('SELECT * FROM lumi_cognitive_feedback ORDER BY occurred_at, id'),
+        cognitiveFeedbackTargets: this.rows('SELECT * FROM lumi_cognitive_feedback_targets ORDER BY feedback_id, target_id'),
+        cognitiveProfileProjections: this.rows('SELECT * FROM lumi_cognitive_profile_projections ORDER BY subject_id, layer, key'),
+        cognitiveProjectionBeliefs: this.rows('SELECT * FROM lumi_cognitive_projection_beliefs ORDER BY projection_id, belief_id'),
+        cognitiveProjectionEvidence: this.rows('SELECT * FROM lumi_cognitive_projection_evidence ORDER BY projection_id, evidence_id'),
+        cognitiveMigrations: this.rows('SELECT * FROM lumi_cognitive_migrations ORDER BY created_at, id'),
         personStates: this.rows('SELECT * FROM lumi_person_state ORDER BY person_id, kind'),
         diaryEntries: this.rows('SELECT * FROM lumi_diary_entries ORDER BY entry_date, created_at'),
         privateNotes: this.rows('SELECT * FROM lumi_private_notes ORDER BY created_at'),
@@ -1200,6 +1250,18 @@ export class LumiServerDatabase {
           'lumi_conversation_members',
           'lumi_memory_vectors',
           'lumi_memories',
+          'lumi_cognitive_feedback_targets',
+          'lumi_cognitive_feedback',
+          'lumi_cognitive_projection_evidence',
+          'lumi_cognitive_projection_beliefs',
+          'lumi_cognitive_profile_projections',
+          'lumi_cognitive_belief_evidence',
+          'lumi_cognitive_beliefs',
+          'lumi_cognitive_evidence_lineage',
+          'lumi_cognitive_evidence_subjects',
+          'lumi_cognitive_working_memory',
+          'lumi_cognitive_evidence',
+          'lumi_cognitive_migrations',
           'lumi_person_state',
           'lumi_diary_entries',
           'lumi_private_notes',
@@ -1240,6 +1302,18 @@ export class LumiServerDatabase {
         this.insertRows('lumi_delivery_receipts', sections.deliveryReceipts)
         this.insertRows('lumi_memories', sections.memories)
         this.insertRows('lumi_memory_vectors', sections.memoryVectors)
+        this.insertRows('lumi_cognitive_evidence', sections.cognitiveEvidence ?? [])
+        this.insertRows('lumi_cognitive_evidence_subjects', sections.cognitiveEvidenceSubjects ?? [])
+        this.insertRows('lumi_cognitive_evidence_lineage', sections.cognitiveEvidenceLineage ?? [])
+        this.insertRows('lumi_cognitive_working_memory', sections.cognitiveWorkingMemory ?? [])
+        this.insertRows('lumi_cognitive_beliefs', sections.cognitiveBeliefs ?? [])
+        this.insertRows('lumi_cognitive_belief_evidence', sections.cognitiveBeliefEvidence ?? [])
+        this.insertRows('lumi_cognitive_feedback', sections.cognitiveFeedback ?? [])
+        this.insertRows('lumi_cognitive_feedback_targets', sections.cognitiveFeedbackTargets ?? [])
+        this.insertRows('lumi_cognitive_profile_projections', sections.cognitiveProfileProjections ?? [])
+        this.insertRows('lumi_cognitive_projection_beliefs', sections.cognitiveProjectionBeliefs ?? [])
+        this.insertRows('lumi_cognitive_projection_evidence', sections.cognitiveProjectionEvidence ?? [])
+        this.insertRows('lumi_cognitive_migrations', sections.cognitiveMigrations ?? [])
         this.insertRows('lumi_person_state', sections.personStates)
         this.insertRows('lumi_diary_entries', sections.diaryEntries)
         this.insertRows('lumi_private_notes', sections.privateNotes)
@@ -1260,6 +1334,7 @@ export class LumiServerDatabase {
     const integrity = this.row('PRAGMA integrity_check')
     if (String(integrity?.integrity_check) !== 'ok')
       throw new Error(`Restored database integrity check failed: ${String(integrity?.integrity_check)}`)
+    this.migrateLegacyCognitiveState()
   }
 
   recordStagedMigration(input: { id: string, sourceDigest: string, manifest: Record<string, unknown>, report: Record<string, unknown> }) {
@@ -1522,6 +1597,18 @@ export class LumiServerDatabase {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         last_used_at TEXT,
+        derived_from_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+        valid_from TEXT,
+        valid_until TEXT,
+        last_confirmed_at TEXT,
+        supersedes_id TEXT,
+        superseded_by_id TEXT,
+        contradicts_ids_json TEXT NOT NULL DEFAULT '[]',
+        source_episode_start_message_id TEXT,
+        source_episode_end_message_id TEXT,
+        use_count INTEGER NOT NULL DEFAULT 0,
+        evidence_origin TEXT NOT NULL DEFAULT 'legacy_import'
+          CHECK(evidence_origin IN ('primary', 'derived', 'legacy_import')),
         FOREIGN KEY(user_id) REFERENCES lumi_people(id) ON DELETE CASCADE,
         FOREIGN KEY(conversation_id) REFERENCES lumi_conversations(id) ON DELETE SET NULL
       );
@@ -1535,6 +1622,158 @@ export class LumiServerDatabase {
         device TEXT,
         updated_at INTEGER NOT NULL,
         FOREIGN KEY(memory_id) REFERENCES lumi_memories(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_evidence (
+        id TEXT PRIMARY KEY,
+        actor_id TEXT NOT NULL,
+        conversation_id TEXT,
+        conversation_type TEXT NOT NULL CHECK(conversation_type IN ('direct', 'group', 'internal')),
+        kind TEXT NOT NULL CHECK(kind IN (
+          'user_statement', 'user_correction', 'observed_behavior', 'tool_result',
+          'screen_observation', 'lumi_action', 'user_feedback', 'relationship_event',
+          'conversation_episode', 'legacy_import'
+        )),
+        origin TEXT NOT NULL CHECK(origin IN ('primary', 'derived', 'legacy_import')),
+        content TEXT NOT NULL,
+        source_id TEXT,
+        source_message_id TEXT,
+        occurred_at TEXT NOT NULL,
+        trust REAL NOT NULL CHECK(trust >= 0 AND trust <= 1),
+        author_verified INTEGER NOT NULL CHECK(author_verified IN (0, 1)),
+        scope TEXT NOT NULL CHECK(scope IN ('global', 'shared', 'relationship', 'group', 'private')),
+        sensitivity TEXT NOT NULL CHECK(sensitivity IN ('normal', 'private')),
+        participant_user_ids_json TEXT NOT NULL,
+        derivation_reason TEXT,
+        schema_version INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY(conversation_id) REFERENCES lumi_conversations(id) ON DELETE SET NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_evidence_subjects (
+        evidence_id TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        PRIMARY KEY(evidence_id, subject_id),
+        FOREIGN KEY(evidence_id) REFERENCES lumi_cognitive_evidence(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_evidence_lineage (
+        evidence_id TEXT NOT NULL,
+        parent_evidence_id TEXT NOT NULL,
+        PRIMARY KEY(evidence_id, parent_evidence_id),
+        FOREIGN KEY(evidence_id) REFERENCES lumi_cognitive_evidence(id) ON DELETE CASCADE,
+        FOREIGN KEY(parent_evidence_id) REFERENCES lumi_cognitive_evidence(id) ON DELETE RESTRICT
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_working_memory (
+        person_id TEXT NOT NULL,
+        persona_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        conversation_type TEXT NOT NULL CHECK(conversation_type IN ('direct', 'group', 'internal')),
+        version INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        PRIMARY KEY(person_id, persona_id, conversation_id),
+        FOREIGN KEY(person_id) REFERENCES lumi_people(id) ON DELETE CASCADE,
+        FOREIGN KEY(conversation_id) REFERENCES lumi_conversations(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_beliefs (
+        id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL,
+        predicate TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        stability REAL NOT NULL,
+        lifecycle_json TEXT NOT NULL,
+        counter_evidence_ids_json TEXT NOT NULL,
+        first_observed_at TEXT NOT NULL,
+        last_observed_at TEXT NOT NULL,
+        expires_at TEXT,
+        status TEXT NOT NULL CHECK(status IN ('tentative', 'supported', 'stable', 'contradicted', 'expired')),
+        scope TEXT NOT NULL CHECK(scope IN ('global', 'shared', 'relationship', 'group', 'private')),
+        sensitivity TEXT NOT NULL CHECK(sensitivity IN ('normal', 'private')),
+        conversation_id TEXT,
+        participant_user_ids_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(conversation_id) REFERENCES lumi_conversations(id) ON DELETE SET NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_belief_evidence (
+        belief_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        relation TEXT NOT NULL CHECK(relation IN ('support', 'counter')),
+        PRIMARY KEY(belief_id, evidence_id, relation),
+        FOREIGN KEY(belief_id) REFERENCES lumi_cognitive_beliefs(id) ON DELETE CASCADE,
+        FOREIGN KEY(evidence_id) REFERENCES lumi_cognitive_evidence(id) ON DELETE RESTRICT
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_feedback (
+        id TEXT PRIMARY KEY,
+        actor_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        conversation_type TEXT NOT NULL CHECK(conversation_type IN ('direct', 'group', 'internal')),
+        kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        strength REAL NOT NULL CHECK(strength >= 0 AND strength <= 1),
+        occurred_at TEXT NOT NULL,
+        author_verified INTEGER NOT NULL CHECK(author_verified IN (0, 1)),
+        scope TEXT NOT NULL CHECK(scope IN ('global', 'shared', 'relationship', 'group', 'private')),
+        sensitivity TEXT NOT NULL CHECK(sensitivity IN ('normal', 'private')),
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY(conversation_id) REFERENCES lumi_conversations(id) ON DELETE CASCADE,
+        FOREIGN KEY(evidence_id) REFERENCES lumi_cognitive_evidence(id) ON DELETE RESTRICT
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_feedback_targets (
+        feedback_id TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        PRIMARY KEY(feedback_id, target_id),
+        FOREIGN KEY(feedback_id) REFERENCES lumi_cognitive_feedback(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_profile_projections (
+        id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL,
+        layer TEXT NOT NULL CHECK(layer IN ('daily', 'dynamic', 'core')),
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        stability REAL NOT NULL,
+        expires_at TEXT,
+        status TEXT NOT NULL CHECK(status IN ('active', 'pending')),
+        scope TEXT NOT NULL CHECK(scope IN ('global', 'shared', 'relationship', 'group', 'private')),
+        sensitivity TEXT NOT NULL CHECK(sensitivity IN ('normal', 'private')),
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_projection_beliefs (
+        projection_id TEXT NOT NULL,
+        belief_id TEXT NOT NULL,
+        PRIMARY KEY(projection_id, belief_id),
+        FOREIGN KEY(projection_id) REFERENCES lumi_cognitive_profile_projections(id) ON DELETE CASCADE,
+        FOREIGN KEY(belief_id) REFERENCES lumi_cognitive_beliefs(id) ON DELETE RESTRICT
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_projection_evidence (
+        projection_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        PRIMARY KEY(projection_id, evidence_id),
+        FOREIGN KEY(projection_id) REFERENCES lumi_cognitive_profile_projections(id) ON DELETE CASCADE,
+        FOREIGN KEY(evidence_id) REFERENCES lumi_cognitive_evidence(id) ON DELETE RESTRICT
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_cognitive_migrations (
+        id TEXT PRIMARY KEY,
+        source_kind TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK(phase IN ('copied', 'verified', 'active', 'failed')),
+        copied_count INTEGER NOT NULL DEFAULT 0,
+        verified_count INTEGER NOT NULL DEFAULT 0,
+        report_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS lumi_person_state (
@@ -1677,9 +1916,38 @@ export class LumiServerDatabase {
         ON lumi_memories(status, scope, owner_id, updated_at);
       CREATE INDEX IF NOT EXISTS idx_lumi_memories_source_actor
         ON lumi_memories(source_actor_id, status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_evidence_actor_time
+        ON lumi_cognitive_evidence(actor_id, occurred_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_evidence_conversation_time
+        ON lumi_cognitive_evidence(conversation_id, occurred_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_evidence_subject
+        ON lumi_cognitive_evidence_subjects(subject_id, evidence_id);
+      CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_working_memory_expiry
+        ON lumi_cognitive_working_memory(expires_at, person_id, conversation_id);
+      CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_beliefs_subject_status_time
+        ON lumi_cognitive_beliefs(subject_id, status, last_observed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_beliefs_conversation
+        ON lumi_cognitive_beliefs(conversation_id, status, last_observed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_feedback_actor_time
+        ON lumi_cognitive_feedback(actor_id, occurred_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_feedback_conversation_time
+        ON lumi_cognitive_feedback(conversation_id, occurred_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_profile_subject_status
+        ON lumi_cognitive_profile_projections(subject_id, status, layer, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_lumi_jobs_schedule
         ON lumi_jobs(status, scheduled_at);
     `)
+    this.addColumnIfMissing('lumi_memories', 'derived_from_evidence_ids_json', 'TEXT NOT NULL DEFAULT \'[]\'')
+    this.addColumnIfMissing('lumi_memories', 'valid_from', 'TEXT')
+    this.addColumnIfMissing('lumi_memories', 'valid_until', 'TEXT')
+    this.addColumnIfMissing('lumi_memories', 'last_confirmed_at', 'TEXT')
+    this.addColumnIfMissing('lumi_memories', 'supersedes_id', 'TEXT')
+    this.addColumnIfMissing('lumi_memories', 'superseded_by_id', 'TEXT')
+    this.addColumnIfMissing('lumi_memories', 'contradicts_ids_json', 'TEXT NOT NULL DEFAULT \'[]\'')
+    this.addColumnIfMissing('lumi_memories', 'source_episode_start_message_id', 'TEXT')
+    this.addColumnIfMissing('lumi_memories', 'source_episode_end_message_id', 'TEXT')
+    this.addColumnIfMissing('lumi_memories', 'use_count', 'INTEGER NOT NULL DEFAULT 0')
+    this.addColumnIfMissing('lumi_memories', 'evidence_origin', 'TEXT NOT NULL DEFAULT \'legacy_import\'')
     this.addColumnIfMissing('lumi_memory_vectors', 'device', 'TEXT')
     this.addColumnIfMissing('lumi_devices', 'session_id', 'TEXT')
   }
@@ -1699,9 +1967,434 @@ export class LumiServerDatabase {
     this.ensureConversation(DOGGY_MOUSSY_GROUP_ID, 'group', 'Doggy、Moussy 与 Lumi', [DOGGY_PERSON_ID, MOUSSY_PERSON_ID], now)
     this.database.prepare(`
       INSERT INTO lumi_server_meta (key, value, updated_at)
-      VALUES ('schema_version', '2', ?)
+      VALUES ('schema_version', '3', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
     `).run(now)
+  }
+
+  /**
+   * Copies legacy derived state into auditable low-trust evidence before activating schema v3.
+   *
+   * The migration never promotes old profile/current-state payloads to primary user evidence.
+   * Separate copy, verify, and activate transactions make interrupted upgrades resumable.
+   */
+  private migrateLegacyCognitiveState() {
+    const migrationId = 'cognitive-v1-from-legacy-state'
+    const current = this.row('SELECT phase FROM lumi_cognitive_migrations WHERE id = ?', migrationId)
+    if (!current) {
+      this.transaction(() => {
+        const states = this.rows('SELECT * FROM lumi_person_state ORDER BY person_id, kind')
+        const insertEvidence = this.database.prepare(`
+          INSERT OR IGNORE INTO lumi_cognitive_evidence (
+            id, actor_id, conversation_id, conversation_type, kind, origin,
+            content, source_id, source_message_id, occurred_at, trust,
+            author_verified, scope, sensitivity, participant_user_ids_json,
+            derivation_reason, schema_version, created_at
+          ) VALUES (?, ?, NULL, 'internal', 'legacy_import', 'legacy_import', ?, ?, NULL, ?, 0.2, 0,
+            'private', 'private', ?, 'Copied from legacy derived person_state; not primary evidence', 1, ?)
+        `)
+        const insertSubject = this.database.prepare(`
+          INSERT OR IGNORE INTO lumi_cognitive_evidence_subjects (evidence_id, subject_id)
+          VALUES (?, ?)
+        `)
+        for (const state of states) {
+          const personId = String(state.person_id)
+          const kind = String(state.kind)
+          const evidenceId = `evidence:legacy:person-state:${digest(`${personId}:${kind}`)}`
+          const occurredAt = new Date(Number(state.updated_at)).toISOString()
+          insertEvidence.run(
+            evidenceId,
+            LUMI_PERSONA_ID,
+            String(state.payload_json),
+            `legacy:person-state:${personId}:${kind}`,
+            occurredAt,
+            JSON.stringify([personId]),
+            Number(state.updated_at),
+          )
+          insertSubject.run(evidenceId, personId)
+        }
+        this.database.prepare(`
+          UPDATE lumi_memories
+          SET evidence_origin = 'legacy_import'
+          WHERE evidence_origin IS NULL OR evidence_origin = ''
+        `).run()
+        const now = Date.now()
+        this.database.prepare(`
+          INSERT INTO lumi_cognitive_migrations (
+            id, source_kind, phase, copied_count, verified_count,
+            report_json, created_at, updated_at
+          ) VALUES (?, 'legacy_person_state_and_memory', 'copied', ?, 0, ?, ?, ?)
+        `).run(
+          migrationId,
+          states.length,
+          JSON.stringify({ personStateRows: states.length, memoryOrigin: 'legacy_import' }),
+          now,
+          now,
+        )
+      })
+    }
+
+    const copied = this.row('SELECT phase, copied_count FROM lumi_cognitive_migrations WHERE id = ?', migrationId)
+    if (copied?.phase === 'copied') {
+      this.transaction(() => {
+        const expected = Number(copied.copied_count)
+        const verified = Number(this.row(`
+          SELECT COUNT(*) AS count
+          FROM lumi_cognitive_evidence
+          WHERE origin = 'legacy_import' AND source_id LIKE 'legacy:person-state:%'
+        `)?.count ?? 0)
+        const invalidMemoryOrigins = Number(this.row(`
+          SELECT COUNT(*) AS count FROM lumi_memories
+          WHERE evidence_origin IS NULL OR evidence_origin = ''
+        `)?.count ?? 0)
+        if (verified < expected || invalidMemoryOrigins > 0)
+          throw new Error('Legacy cognitive migration verification failed')
+        this.database.prepare(`
+          UPDATE lumi_cognitive_migrations
+          SET phase = 'verified', verified_count = ?, report_json = ?, updated_at = ?
+          WHERE id = ? AND phase = 'copied'
+        `).run(
+          verified,
+          JSON.stringify({ expected, verified, invalidMemoryOrigins }),
+          Date.now(),
+          migrationId,
+        )
+      })
+    }
+
+    const verified = this.row('SELECT phase FROM lumi_cognitive_migrations WHERE id = ?', migrationId)
+    if (verified?.phase === 'verified') {
+      this.transaction(() => {
+        const now = Date.now()
+        this.database.prepare(`
+          UPDATE lumi_cognitive_migrations
+          SET phase = 'active', updated_at = ?
+          WHERE id = ? AND phase = 'verified'
+        `).run(now, migrationId)
+        this.database.prepare(`
+          INSERT INTO lumi_server_meta (key, value, updated_at)
+          VALUES ('schema_version', '3', ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        `).run(now)
+      })
+    }
+  }
+
+  /** Loads only the working state owned by the immutable turn identity. */
+  loadCognitiveWorkingMemory(identity: LumiCognitiveIdentity): LumiWorkingMemory | undefined {
+    this.assertCognitiveIdentity(identity)
+    const row = this.row(`
+      SELECT payload_json FROM lumi_cognitive_working_memory
+      WHERE person_id = ? AND persona_id = ? AND conversation_id = ?
+    `, identity.actorId, identity.personaId, identity.conversationId)
+    if (!row)
+      return undefined
+    const memory = cognitiveWorkingMemoryFromJson(row.payload_json)
+    assertWorkingMemoryIdentity(memory, identity)
+    return Date.parse(memory.expiresAt) > Date.now() ? memory : undefined
+  }
+
+  /** Atomically commits primary evidence, explicit feedback, and working memory. */
+  commitCognitiveFastLoop(input: LumiCognitiveFastLoopCommit): void {
+    this.assertCognitiveIdentity(input.identity)
+    assertCognitiveFastLoopPayload(input)
+    const source = this.row(`
+      SELECT conversation_id, actor_person_id FROM lumi_messages WHERE id = ?
+    `, input.evidence.sourceMessageId ?? '')
+    if (
+      !source
+      || source.conversation_id !== input.identity.conversationId
+      || source.actor_person_id !== input.identity.actorId
+    ) {
+      throw new Error('Cognitive evidence source message does not match the immutable turn actor')
+    }
+
+    this.transaction(() => {
+      this.writeCognitiveEvidence(input.evidence)
+      for (const feedback of input.feedback)
+        this.writeCognitiveFeedback(feedback)
+      const existing = this.row(`
+        SELECT version FROM lumi_cognitive_working_memory
+        WHERE person_id = ? AND persona_id = ? AND conversation_id = ?
+      `, input.identity.actorId, input.identity.personaId, input.identity.conversationId)
+      const version = Number(existing?.version ?? 0) + 1
+      this.database.prepare(`
+        INSERT INTO lumi_cognitive_working_memory (
+          person_id, persona_id, conversation_id, conversation_type,
+          version, payload_json, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(person_id, persona_id, conversation_id) DO UPDATE SET
+          conversation_type = excluded.conversation_type,
+          version = excluded.version,
+          payload_json = excluded.payload_json,
+          updated_at = excluded.updated_at,
+          expires_at = excluded.expires_at
+      `).run(
+        input.identity.actorId,
+        input.identity.personaId,
+        input.identity.conversationId,
+        input.identity.conversationType,
+        version,
+        JSON.stringify(input.workingMemory),
+        input.workingMemory.updatedAt,
+        input.workingMemory.expiresAt,
+      )
+    })
+  }
+
+  /** Loads evidence-backed beliefs and profile projections for one direct actor. */
+  loadCognitiveProjectionState(identity: LumiCognitiveIdentity): LumiCognitiveProjectionState {
+    this.assertCognitiveIdentity(identity)
+    const now = new Date().toISOString()
+    const hypothesisCandidates = this.rows(`
+      SELECT * FROM lumi_cognitive_beliefs
+      WHERE subject_id = ?
+        AND status IN ('tentative', 'supported', 'stable')
+        AND (expires_at IS NULL OR expires_at > ?)
+        AND (conversation_id IS NULL OR conversation_id = ?)
+      ORDER BY stability DESC, confidence DESC, last_observed_at DESC
+      LIMIT 100
+    `, identity.actorId, now, identity.conversationId)
+      .map(row => this.cognitiveBeliefFromRow(row))
+      .filter(item => canAccessCognitiveBelief(item, identity))
+    const profileCandidates = identity.conversationType === 'group'
+      ? []
+      : this.rows(`
+          SELECT * FROM lumi_cognitive_profile_projections
+          WHERE subject_id = ? AND status = 'active'
+            AND (expires_at IS NULL OR expires_at > ?)
+          ORDER BY CASE layer WHEN 'core' THEN 0 WHEN 'dynamic' THEN 1 ELSE 2 END,
+            stability DESC, confidence DESC, updated_at DESC
+          LIMIT 100
+        `, identity.actorId, now).map(row => this.cognitiveProfileFromRow(row))
+    const evidenceIds = new Set([
+      ...hypothesisCandidates.flatMap(item => [...item.evidenceIds, ...item.counterEvidenceIds]),
+      ...profileCandidates.flatMap(item => item.evidenceIds),
+    ])
+    const evidence = this.loadCognitiveEvidenceByIds(identity, [...evidenceIds])
+    const authorizedEvidenceIds = new Set(evidence.map(item => item.id))
+    const hypotheses = hypothesisCandidates.filter(item =>
+      [...item.evidenceIds, ...item.counterEvidenceIds]
+        .every(evidenceId => authorizedEvidenceIds.has(evidenceId)),
+    )
+    const authorizedBeliefIds = new Set(hypotheses.map(item => item.id))
+    const profile = profileCandidates.filter(item =>
+      item.evidenceIds.every(evidenceId => authorizedEvidenceIds.has(evidenceId))
+      && item.beliefIds.every(beliefId => authorizedBeliefIds.has(beliefId)),
+    )
+    const relationship = identity.conversationType === 'direct'
+      ? this.readPersonState(identity.actorId, 'relationship')?.payload
+      : undefined
+    const emotion = this.readPersonState(identity.actorId, 'emotion')?.payload
+    return {
+      evidence,
+      hypotheses,
+      profile,
+      relationshipState: relationship,
+      currentEmotion: emotion,
+      interactionStrategies: [],
+      expressionAssets: [],
+      contradictions: hypotheses
+        .filter(item => item.counterEvidenceIds.length > 0)
+        .map(item => `${item.predicate} 存在尚未解决的反证`),
+    }
+  }
+
+  /** Reloads a bounded memory-id set and revalidates every item against current ACL. */
+  loadAccessibleMemoriesByIds(
+    identity: LumiCognitiveIdentity,
+    memoryIds: readonly string[],
+  ): LumiMemoryFragment[] {
+    this.assertCognitiveIdentity(identity)
+    const ids = uniqueRequiredTexts(memoryIds, 'memoryId', 160, 100)
+    if (ids.length === 0)
+      return []
+    const placeholders = ids.map(() => '?').join(', ')
+    const byId = new Map(this.rows(`
+      SELECT * FROM lumi_memories
+      WHERE id IN (${placeholders}) AND status = 'active'
+    `, ...ids).map(memoryFromRow).map(memory => [memory.id, memory]))
+    const request = cognitiveMemoryRequest(identity)
+    return ids.flatMap((id) => {
+      const memory = byId.get(id)
+      return memory && !memory.supersededById && canAccessLumiMemory(memory, request)
+        ? [memory]
+        : []
+    })
+  }
+
+  /** Marks only ACL-authorized context records after they reached Planner. */
+  recordCognitiveContextUse(input: {
+    identity: LumiCognitiveIdentity
+    memoryIds: readonly string[]
+    hypothesisIds: readonly string[]
+    usedAt: string
+  }): void {
+    this.assertCognitiveIdentity(input.identity)
+    const usedAt = requiredIsoTimestamp(input.usedAt, 'usedAt')
+    const memories = this.loadAccessibleMemoriesByIds(input.identity, input.memoryIds)
+    const requestedHypothesisIds = uniqueRequiredTexts(input.hypothesisIds, 'hypothesisId', 160, 100)
+    const authorizedHypothesisIds = new Set(
+      this.loadCognitiveProjectionState(input.identity).hypotheses.map(item => item.id),
+    )
+    this.transaction(() => {
+      const updateMemory = this.database.prepare(`
+        UPDATE lumi_memories
+        SET last_used_at = ?, use_count = use_count + 1
+        WHERE id = ? AND status = 'active'
+      `)
+      for (const memory of memories)
+        updateMemory.run(usedAt, memory.id)
+
+      const updateBelief = this.database.prepare(`
+        UPDATE lumi_cognitive_beliefs SET lifecycle_json = ?, updated_at = ?
+        WHERE id = ? AND subject_id = ?
+      `)
+      for (const id of requestedHypothesisIds.filter(item => authorizedHypothesisIds.has(item))) {
+        const row = this.row(`
+          SELECT * FROM lumi_cognitive_beliefs
+          WHERE id = ? AND subject_id = ? AND status IN ('tentative', 'supported', 'stable')
+        `, id, input.identity.actorId)
+        if (!row)
+          continue
+        const belief = this.cognitiveBeliefFromRow(row)
+        updateBelief.run(JSON.stringify({
+          ...cognitiveLifecycleFromBelief(belief),
+          lastUsedAt: usedAt,
+        }), usedAt, id, input.identity.actorId)
+      }
+    })
+  }
+
+  /** Stores one host-validated hypothesis with normalized evidence lineage. */
+  upsertCognitiveBelief(identity: LumiCognitiveIdentity, belief: LumiBeliefHypothesis): void {
+    this.assertCognitiveIdentity(identity)
+    assertCognitiveBelief(belief, identity)
+    const evidence = this.loadCognitiveEvidenceByIds(identity, [
+      ...belief.evidenceIds,
+      ...belief.counterEvidenceIds,
+    ])
+    if (evidence.length !== new Set([...belief.evidenceIds, ...belief.counterEvidenceIds]).size)
+      throw new Error('Cognitive belief lineage contains missing or unauthorized evidence')
+    this.transaction(() => {
+      this.database.prepare(`
+        INSERT INTO lumi_cognitive_beliefs (
+          id, subject_id, predicate, value_json, confidence, stability,
+          lifecycle_json, counter_evidence_ids_json, first_observed_at,
+          last_observed_at, expires_at, status, scope, sensitivity,
+          conversation_id, participant_user_ids_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          predicate = excluded.predicate,
+          value_json = excluded.value_json,
+          confidence = excluded.confidence,
+          stability = excluded.stability,
+          lifecycle_json = excluded.lifecycle_json,
+          counter_evidence_ids_json = excluded.counter_evidence_ids_json,
+          first_observed_at = excluded.first_observed_at,
+          last_observed_at = excluded.last_observed_at,
+          expires_at = excluded.expires_at,
+          status = excluded.status,
+          scope = excluded.scope,
+          sensitivity = excluded.sensitivity,
+          conversation_id = excluded.conversation_id,
+          participant_user_ids_json = excluded.participant_user_ids_json,
+          updated_at = excluded.updated_at
+      `).run(
+        belief.id,
+        belief.subjectId,
+        belief.predicate,
+        JSON.stringify(belief.value),
+        belief.confidence,
+        belief.stability,
+        JSON.stringify(cognitiveLifecycleFromBelief(belief)),
+        JSON.stringify(belief.counterEvidenceIds),
+        belief.firstObservedAt,
+        belief.lastObservedAt,
+        belief.expiresAt ?? null,
+        belief.status,
+        belief.scope,
+        belief.sensitivity,
+        belief.conversationId ?? null,
+        JSON.stringify(belief.participantUserIds),
+        belief.lastObservedAt,
+      )
+      this.database.prepare('DELETE FROM lumi_cognitive_belief_evidence WHERE belief_id = ?').run(belief.id)
+      const insert = this.database.prepare(`
+        INSERT INTO lumi_cognitive_belief_evidence (belief_id, evidence_id, relation)
+        VALUES (?, ?, ?)
+      `)
+      for (const evidenceId of belief.evidenceIds)
+        insert.run(belief.id, evidenceId, 'support')
+      for (const evidenceId of belief.counterEvidenceIds)
+        insert.run(belief.id, evidenceId, 'counter')
+    })
+  }
+
+  /** Stores a materialized profile only when all belief and evidence lineage exists. */
+  upsertCognitiveProfileProjection(
+    identity: LumiCognitiveIdentity,
+    projection: LumiCognitiveProfileProjection,
+  ): void {
+    this.assertCognitiveIdentity(identity)
+    assertCognitiveProfileProjection(projection, identity)
+    const evidence = this.loadCognitiveEvidenceByIds(identity, projection.evidenceIds)
+    if (evidence.length !== new Set(projection.evidenceIds).size)
+      throw new Error('Cognitive profile projection has missing or unauthorized evidence')
+    const beliefIds = uniqueRequiredTexts(projection.beliefIds, 'beliefId', 160, 100)
+    if (beliefIds.length === 0)
+      throw new Error('Cognitive profile projection requires at least one source belief')
+    const placeholders = beliefIds.map(() => '?').join(', ')
+    const beliefCount = Number(this.row(`
+      SELECT COUNT(*) AS count FROM lumi_cognitive_beliefs
+      WHERE subject_id = ? AND id IN (${placeholders})
+    `, identity.actorId, ...beliefIds)?.count ?? 0)
+    if (beliefCount !== beliefIds.length)
+      throw new Error('Cognitive profile projection has missing source beliefs')
+    this.transaction(() => {
+      this.database.prepare(`
+        INSERT INTO lumi_cognitive_profile_projections (
+          id, subject_id, layer, key, value, confidence, stability,
+          expires_at, status, scope, sensitivity, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          layer = excluded.layer,
+          key = excluded.key,
+          value = excluded.value,
+          confidence = excluded.confidence,
+          stability = excluded.stability,
+          expires_at = excluded.expires_at,
+          status = excluded.status,
+          scope = excluded.scope,
+          sensitivity = excluded.sensitivity,
+          updated_at = excluded.updated_at
+      `).run(
+        projection.id,
+        projection.subjectId,
+        projection.layer,
+        projection.key,
+        projection.value,
+        projection.confidence,
+        projection.stability,
+        projection.expiresAt ?? null,
+        projection.status,
+        projection.scope,
+        projection.sensitivity,
+        projection.updatedAt,
+      )
+      this.database.prepare('DELETE FROM lumi_cognitive_projection_beliefs WHERE projection_id = ?').run(projection.id)
+      this.database.prepare('DELETE FROM lumi_cognitive_projection_evidence WHERE projection_id = ?').run(projection.id)
+      const insertBelief = this.database.prepare(`
+        INSERT INTO lumi_cognitive_projection_beliefs (projection_id, belief_id) VALUES (?, ?)
+      `)
+      for (const beliefId of beliefIds)
+        insertBelief.run(projection.id, beliefId)
+      const insertEvidence = this.database.prepare(`
+        INSERT INTO lumi_cognitive_projection_evidence (projection_id, evidence_id) VALUES (?, ?)
+      `)
+      for (const evidenceId of projection.evidenceIds)
+        insertEvidence.run(projection.id, evidenceId)
+    })
   }
 
   private ensureConversation(id: string, type: 'direct' | 'group', title: string, people: string[], now: number) {
@@ -1752,8 +2445,15 @@ export class LumiServerDatabase {
         tags_json, status, scope, owner_type, owner_id, visibility,
         participant_user_ids_json, subject_user_ids_json, sensitivity,
         source_actor_id, source_conversation_type, classification_reason,
-        disclosure_reason, created_at, updated_at, last_used_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        disclosure_reason, created_at, updated_at, last_used_at,
+        derived_from_evidence_ids_json, valid_from, valid_until, last_confirmed_at,
+        supersedes_id, superseded_by_id, contradicts_ids_json,
+        source_episode_start_message_id, source_episode_end_message_id,
+        use_count, evidence_origin
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      )
     `).run(
       normalized.id,
       normalized.userId,
@@ -1783,6 +2483,17 @@ export class LumiServerDatabase {
       normalized.createdAt,
       normalized.updatedAt,
       normalized.lastUsedAt ?? null,
+      JSON.stringify(normalized.derivedFromEvidenceIds ?? []),
+      normalized.validFrom ?? null,
+      normalized.validUntil ?? null,
+      normalized.lastConfirmedAt ?? null,
+      normalized.supersedesId ?? null,
+      normalized.supersededById ?? null,
+      JSON.stringify(normalized.contradictsIds ?? []),
+      normalized.sourceEpisodeStartMessageId ?? null,
+      normalized.sourceEpisodeEndMessageId ?? null,
+      normalized.useCount ?? 0,
+      normalized.evidenceOrigin ?? 'derived',
     )
   }
 
@@ -1794,6 +2505,225 @@ export class LumiServerDatabase {
   private assertMemory(memoryId: string) {
     if (!this.row('SELECT id FROM lumi_memories WHERE id = ?', memoryId))
       throw new Error('Memory was not found')
+  }
+
+  private assertCognitiveIdentity(identity: LumiCognitiveIdentity): void {
+    const actorId = requiredText(identity.actorId, 'cognitive actorId', 160)
+    const conversationId = requiredText(identity.conversationId, 'cognitive conversationId', 240)
+    if (requiredText(identity.personaId, 'cognitive personaId', 160) !== LUMI_PERSONA_ID)
+      throw new Error('Cognitive identity does not belong to the Lumi persona')
+    this.assertPerson(actorId)
+    const conversation = this.row('SELECT type FROM lumi_conversations WHERE id = ?', conversationId)
+    if (!conversation || conversation.type !== identity.conversationType)
+      throw new Error('Cognitive conversation boundary does not match server state')
+    const participants = this.rows(`
+      SELECT person_id FROM lumi_conversation_members
+      WHERE conversation_id = ? AND revoked_at IS NULL
+      ORDER BY person_id
+    `, conversationId).map(row => String(row.person_id))
+    if (!participants.includes(actorId))
+      throw new Error('Cognitive actor is not an active conversation member')
+    if (!sameStringSet(participants, identity.participantUserIds))
+      throw new Error('Cognitive participants do not match the immutable conversation membership')
+  }
+
+  private writeCognitiveEvidence(evidence: LumiCognitiveEvidence): void {
+    assertCognitiveEvidence(evidence)
+    for (const parentId of evidence.derivedFromEvidenceIds) {
+      if (!this.row('SELECT id FROM lumi_cognitive_evidence WHERE id = ?', parentId))
+        throw new Error('Derived cognitive evidence has missing lineage')
+    }
+    this.database.prepare(`
+      INSERT OR IGNORE INTO lumi_cognitive_evidence (
+        id, actor_id, conversation_id, conversation_type, kind, origin,
+        content, source_id, source_message_id, occurred_at, trust,
+        author_verified, scope, sensitivity, participant_user_ids_json,
+        derivation_reason, schema_version, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      evidence.id,
+      evidence.actorId,
+      evidence.conversationId ?? null,
+      evidence.conversationType,
+      evidence.kind,
+      evidence.origin,
+      evidence.content,
+      evidence.sourceId ?? null,
+      evidence.sourceMessageId ?? null,
+      evidence.occurredAt,
+      evidence.trust,
+      evidence.authorVerified ? 1 : 0,
+      evidence.scope,
+      evidence.sensitivity,
+      JSON.stringify(evidence.participantUserIds),
+      evidence.derivationReason ?? null,
+      evidence.schemaVersion,
+      Date.parse(evidence.occurredAt),
+    )
+    const insertSubject = this.database.prepare(`
+      INSERT OR IGNORE INTO lumi_cognitive_evidence_subjects (evidence_id, subject_id)
+      VALUES (?, ?)
+    `)
+    for (const subjectId of evidence.subjectUserIds)
+      insertSubject.run(evidence.id, subjectId)
+    const insertLineage = this.database.prepare(`
+      INSERT OR IGNORE INTO lumi_cognitive_evidence_lineage (evidence_id, parent_evidence_id)
+      VALUES (?, ?)
+    `)
+    for (const parentId of evidence.derivedFromEvidenceIds)
+      insertLineage.run(evidence.id, parentId)
+    const row = this.row('SELECT * FROM lumi_cognitive_evidence WHERE id = ?', evidence.id)
+    if (!row)
+      throw new Error('Cognitive evidence was not persisted')
+    const existing = this.cognitiveEvidenceFromRow(row)
+    if (!sameCognitiveEvidence(existing, evidence))
+      throw new Error('Cognitive evidence id was reused for different content')
+  }
+
+  private writeCognitiveFeedback(feedback: LumiFeedbackEvent): void {
+    assertCognitiveFeedback(feedback)
+    if (!this.row('SELECT id FROM lumi_cognitive_evidence WHERE id = ?', feedback.evidenceId))
+      throw new Error('Cognitive feedback evidence was not persisted')
+    this.database.prepare(`
+      INSERT OR IGNORE INTO lumi_cognitive_feedback (
+        id, actor_id, conversation_id, conversation_type, kind, source_id,
+        evidence_id, strength, occurred_at, author_verified, scope,
+        sensitivity, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      feedback.id,
+      feedback.actorId,
+      feedback.conversationId,
+      feedback.conversationType,
+      feedback.kind,
+      feedback.sourceId,
+      feedback.evidenceId,
+      feedback.strength,
+      feedback.occurredAt,
+      feedback.authorVerified ? 1 : 0,
+      feedback.scope,
+      feedback.sensitivity,
+      Date.parse(feedback.occurredAt),
+    )
+    const row = this.row('SELECT * FROM lumi_cognitive_feedback WHERE id = ?', feedback.id)
+    if (!row || !sameCognitiveFeedback(row, feedback))
+      throw new Error('Cognitive feedback id was reused for different content')
+    const insertTarget = this.database.prepare(`
+      INSERT OR IGNORE INTO lumi_cognitive_feedback_targets (feedback_id, target_id)
+      VALUES (?, ?)
+    `)
+    for (const targetId of feedback.targetIds)
+      insertTarget.run(feedback.id, targetId)
+    const storedTargets = this.rows(`
+      SELECT target_id FROM lumi_cognitive_feedback_targets
+      WHERE feedback_id = ? ORDER BY target_id
+    `, feedback.id).map(item => String(item.target_id))
+    if (!sameStringSet(storedTargets, feedback.targetIds))
+      throw new Error('Cognitive feedback id was reused with different targets')
+  }
+
+  private loadCognitiveEvidenceByIds(
+    identity: LumiCognitiveIdentity,
+    evidenceIds: readonly string[],
+  ): LumiCognitiveEvidence[] {
+    const ids = uniqueRequiredTexts(evidenceIds, 'evidenceId', 240, 500)
+    if (ids.length === 0)
+      return []
+    const placeholders = ids.map(() => '?').join(', ')
+    const byId = new Map(this.rows(`
+      SELECT * FROM lumi_cognitive_evidence WHERE id IN (${placeholders})
+    `, ...ids).map(row => this.cognitiveEvidenceFromRow(row)).map(item => [item.id, item]))
+    return ids.flatMap((id) => {
+      const evidence = byId.get(id)
+      return evidence && canAccessCognitiveEvidence(evidence, identity) ? [evidence] : []
+    })
+  }
+
+  private cognitiveEvidenceFromRow(row: SqliteRow): LumiCognitiveEvidence {
+    const id = String(row.id)
+    return {
+      id,
+      actorId: String(row.actor_id),
+      subjectUserIds: this.rows(`
+        SELECT subject_id FROM lumi_cognitive_evidence_subjects
+        WHERE evidence_id = ? ORDER BY subject_id
+      `, id).map(item => String(item.subject_id)),
+      conversationId: optionalText(row.conversation_id, 240),
+      conversationType: cognitiveConversationType(row.conversation_type),
+      kind: cognitiveEvidenceKind(row.kind),
+      origin: cognitiveEvidenceOrigin(row.origin),
+      content: String(row.content),
+      sourceId: optionalText(row.source_id, 240),
+      sourceMessageId: optionalText(row.source_message_id, 240),
+      occurredAt: requiredIsoTimestamp(String(row.occurred_at), 'stored evidence occurredAt'),
+      trust: boundedNumber(row.trust, 'stored evidence trust'),
+      authorVerified: Number(row.author_verified) === 1,
+      scope: cognitiveMemoryScope(row.scope),
+      sensitivity: cognitiveMemorySensitivity(row.sensitivity),
+      participantUserIds: parseJsonStringArray(row.participant_user_ids_json),
+      derivedFromEvidenceIds: this.rows(`
+        SELECT parent_evidence_id FROM lumi_cognitive_evidence_lineage
+        WHERE evidence_id = ? ORDER BY parent_evidence_id
+      `, id).map(item => String(item.parent_evidence_id)),
+      derivationReason: optionalText(row.derivation_reason, 2_000),
+      schemaVersion: 1,
+    }
+  }
+
+  private cognitiveBeliefFromRow(row: SqliteRow): LumiBeliefHypothesis {
+    const id = String(row.id)
+    const lifecycle = parseJsonObject(row.lifecycle_json)
+    const supportIds = this.rows(`
+      SELECT evidence_id FROM lumi_cognitive_belief_evidence
+      WHERE belief_id = ? AND relation = 'support' ORDER BY evidence_id
+    `, id).map(item => String(item.evidence_id))
+    const counterIds = this.rows(`
+      SELECT evidence_id FROM lumi_cognitive_belief_evidence
+      WHERE belief_id = ? AND relation = 'counter' ORDER BY evidence_id
+    `, id).map(item => String(item.evidence_id))
+    return {
+      id,
+      subjectId: String(row.subject_id),
+      predicate: String(row.predicate),
+      value: JSON.parse(String(row.value_json)) as unknown,
+      evidenceIds: supportIds,
+      counterEvidenceIds: counterIds,
+      firstObservedAt: requiredIsoTimestamp(String(row.first_observed_at), 'stored belief firstObservedAt'),
+      lastObservedAt: requiredIsoTimestamp(String(row.last_observed_at), 'stored belief lastObservedAt'),
+      expiresAt: optionalIsoTimestamp(row.expires_at, 'stored belief expiresAt'),
+      status: cognitiveBeliefStatus(row.status),
+      scope: cognitiveMemoryScope(row.scope),
+      sensitivity: cognitiveMemorySensitivity(row.sensitivity),
+      conversationId: optionalText(row.conversation_id, 240),
+      participantUserIds: parseJsonStringArray(row.participant_user_ids_json),
+      ...cognitiveLifecycleFromJson(lifecycle),
+    }
+  }
+
+  private cognitiveProfileFromRow(row: SqliteRow): LumiCognitiveProfileProjection {
+    const id = String(row.id)
+    return {
+      id,
+      subjectId: String(row.subject_id),
+      layer: cognitiveProfileLayer(row.layer),
+      key: String(row.key),
+      value: String(row.value),
+      beliefIds: this.rows(`
+        SELECT belief_id FROM lumi_cognitive_projection_beliefs
+        WHERE projection_id = ? ORDER BY belief_id
+      `, id).map(item => String(item.belief_id)),
+      evidenceIds: this.rows(`
+        SELECT evidence_id FROM lumi_cognitive_projection_evidence
+        WHERE projection_id = ? ORDER BY evidence_id
+      `, id).map(item => String(item.evidence_id)),
+      confidence: boundedNumber(row.confidence, 'stored projection confidence'),
+      stability: boundedNumber(row.stability, 'stored projection stability'),
+      expiresAt: optionalIsoTimestamp(row.expires_at, 'stored projection expiresAt'),
+      status: row.status === 'pending' ? 'pending' : 'active',
+      scope: cognitiveMemoryScope(row.scope),
+      sensitivity: cognitiveMemorySensitivity(row.sensitivity),
+      updatedAt: requiredIsoTimestamp(String(row.updated_at), 'stored projection updatedAt'),
+    }
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string) {
@@ -1920,6 +2850,17 @@ function memoryFromRow(row: SqliteRow): LumiMemoryFragment {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     lastUsedAt: optionalText(row.last_used_at, 64),
+    derivedFromEvidenceIds: parseJsonStringArray(row.derived_from_evidence_ids_json ?? '[]'),
+    validFrom: optionalText(row.valid_from, 64),
+    validUntil: optionalText(row.valid_until, 64),
+    lastConfirmedAt: optionalText(row.last_confirmed_at, 64),
+    supersedesId: optionalText(row.supersedes_id, 160),
+    supersededById: optionalText(row.superseded_by_id, 160),
+    contradictsIds: parseJsonStringArray(row.contradicts_ids_json ?? '[]'),
+    sourceEpisodeStartMessageId: optionalText(row.source_episode_start_message_id, 240),
+    sourceEpisodeEndMessageId: optionalText(row.source_episode_end_message_id, 240),
+    useCount: Number(row.use_count ?? 0),
+    evidenceOrigin: cognitiveEvidenceOrigin(row.evidence_origin),
   })
 }
 
@@ -1999,6 +2940,452 @@ function parsePersistedAgentSession(
     waitState: parsed.waitState as PersistedSessionState['waitState'],
     completedEvents: parsed.completedEvents as PersistedSessionState['completedEvents'],
   }
+}
+
+function cognitiveWorkingMemoryFromJson(value: SqliteValue): LumiWorkingMemory {
+  const parsed = parseJsonObject(value)
+  if (parsed.version !== 1)
+    throw new Error('Stored cognitive working-memory version is invalid')
+  return {
+    version: 1,
+    personId: requiredText(parsed.personId, 'stored working-memory personId', 160),
+    personaId: requiredText(parsed.personaId, 'stored working-memory personaId', 160),
+    conversationId: requiredText(parsed.conversationId, 'stored working-memory conversationId', 240),
+    conversationType: cognitiveConversationType(parsed.conversationType),
+    activeTopics: cognitiveWorkingItems(parsed.activeTopics, 'activeTopics'),
+    topicStack: cognitiveWorkingItems(parsed.topicStack, 'topicStack'),
+    entityBindings: cognitiveEntityBindings(parsed.entityBindings),
+    goals: cognitiveWorkingItems(parsed.goals, 'goals'),
+    openLoops: cognitiveWorkingItems(parsed.openLoops, 'openLoops'),
+    projects: cognitiveWorkingItems(parsed.projects, 'projects'),
+    temporaryUserStates: cognitiveWorkingItems(parsed.temporaryUserStates, 'temporaryUserStates'),
+    relationshipContext: parsed.relationshipContext === undefined
+      ? undefined
+      : cognitiveWorkingItem(parsed.relationshipContext, 'relationshipContext'),
+    continuationPoint: optionalText(parsed.continuationPoint, 20_000),
+    recallState: parsed.recallState === undefined ? undefined : cognitiveRecallState(parsed.recallState),
+    sourceMessageIds: stringArrayValue(parsed.sourceMessageIds, 'sourceMessageIds', 100),
+    updatedAt: requiredIsoTimestamp(parsed.updatedAt, 'stored working-memory updatedAt'),
+    expiresAt: requiredIsoTimestamp(parsed.expiresAt, 'stored working-memory expiresAt'),
+  }
+}
+
+function cognitiveWorkingItems(value: unknown, field: string) {
+  if (!Array.isArray(value) || value.length > 100)
+    throw new Error(`Stored cognitive working-memory ${field} is invalid`)
+  return value.map((item, index) => cognitiveWorkingItem(item, `${field}[${index}]`))
+}
+
+function cognitiveWorkingItem(value: unknown, field: string) {
+  const item = recordValue(value, `stored working-memory ${field}`)
+  return {
+    id: requiredText(item.id, `${field}.id`, 240),
+    value: requiredText(item.value, `${field}.value`, 20_000),
+    evidenceIds: stringArrayValue(item.evidenceIds, `${field}.evidenceIds`, 100),
+    sourceMessageIds: stringArrayValue(item.sourceMessageIds, `${field}.sourceMessageIds`, 100),
+    updatedAt: requiredIsoTimestamp(item.updatedAt, `${field}.updatedAt`),
+    expiresAt: requiredIsoTimestamp(item.expiresAt, `${field}.expiresAt`),
+  }
+}
+
+function cognitiveEntityBindings(value: unknown) {
+  if (!Array.isArray(value) || value.length > 100)
+    throw new Error('Stored cognitive working-memory entityBindings are invalid')
+  return value.map((entry, index) => {
+    const item = recordValue(entry, `stored entityBindings[${index}]`)
+    return {
+      key: requiredText(item.key, `entityBindings[${index}].key`, 240),
+      value: requiredText(item.value, `entityBindings[${index}].value`, 2_000),
+      sourceMessageId: requiredText(item.sourceMessageId, `entityBindings[${index}].sourceMessageId`, 240),
+      updatedAt: requiredIsoTimestamp(item.updatedAt, `entityBindings[${index}].updatedAt`),
+      expiresAt: requiredIsoTimestamp(item.expiresAt, `entityBindings[${index}].expiresAt`),
+    }
+  })
+}
+
+function cognitiveRecallState(value: unknown) {
+  const state = recordValue(value, 'stored recallState')
+  const reuseCount = Number(state.reuseCount)
+  if (!Number.isInteger(reuseCount) || reuseCount < 0)
+    throw new Error('Stored recallState reuseCount is invalid')
+  return {
+    query: requiredText(state.query, 'recallState.query', 50_000),
+    memoryIds: stringArrayValue(state.memoryIds, 'recallState.memoryIds', 100),
+    activeTopics: stringArrayValue(state.activeTopics, 'recallState.activeTopics', 100),
+    sourceMessageIds: stringArrayValue(state.sourceMessageIds, 'recallState.sourceMessageIds', 100),
+    updatedAt: requiredIsoTimestamp(state.updatedAt, 'recallState.updatedAt'),
+    expiresAt: requiredIsoTimestamp(state.expiresAt, 'recallState.expiresAt'),
+    reuseCount,
+  }
+}
+
+function assertWorkingMemoryIdentity(
+  memory: LumiWorkingMemory,
+  identity: LumiCognitiveIdentity,
+): void {
+  if (
+    memory.personId !== identity.actorId
+    || memory.personaId !== identity.personaId
+    || memory.conversationId !== identity.conversationId
+    || memory.conversationType !== identity.conversationType
+  ) {
+    throw new Error('Cognitive working memory does not belong to the immutable turn identity')
+  }
+}
+
+function assertCognitiveFastLoopPayload(input: LumiCognitiveFastLoopCommit): void {
+  const { identity, evidence, workingMemory } = input
+  if (identity.conversationType !== 'direct')
+    throw new Error('Cognitive fast-loop commits currently require a direct conversation')
+  assertWorkingMemoryIdentity(workingMemory, identity)
+  assertCognitiveEvidence(evidence)
+  if (
+    evidence.actorId !== identity.actorId
+    || evidence.conversationId !== identity.conversationId
+    || evidence.conversationType !== identity.conversationType
+    || evidence.origin !== 'primary'
+    || !evidence.authorVerified
+    || evidence.scope !== 'private'
+    || evidence.sensitivity !== 'private'
+    || !sameStringSet(evidence.participantUserIds, identity.participantUserIds)
+  ) {
+    throw new Error('Cognitive fast-loop evidence does not match the immutable direct identity')
+  }
+  for (const feedback of input.feedback) {
+    assertCognitiveFeedback(feedback)
+    if (
+      feedback.actorId !== identity.actorId
+      || feedback.conversationId !== identity.conversationId
+      || feedback.conversationType !== identity.conversationType
+      || feedback.evidenceId !== evidence.id
+      || feedback.sourceId !== evidence.sourceMessageId
+      || feedback.scope !== evidence.scope
+      || feedback.sensitivity !== evidence.sensitivity
+      || !feedback.authorVerified
+    ) {
+      throw new Error('Cognitive feedback does not match its verified source evidence')
+    }
+  }
+}
+
+function assertCognitiveEvidence(evidence: LumiCognitiveEvidence): void {
+  requiredText(evidence.id, 'cognitive evidence id', 240)
+  requiredText(evidence.actorId, 'cognitive evidence actorId', 160)
+  requiredText(evidence.content, 'cognitive evidence content', 1_000_000)
+  requiredIsoTimestamp(evidence.occurredAt, 'cognitive evidence occurredAt')
+  boundedNumber(evidence.trust, 'cognitive evidence trust')
+  stringArrayValue(evidence.subjectUserIds, 'cognitive evidence subjectUserIds', 100)
+  stringArrayValue(evidence.participantUserIds, 'cognitive evidence participantUserIds', 100)
+  stringArrayValue(evidence.derivedFromEvidenceIds, 'cognitive evidence derivedFromEvidenceIds', 500)
+  if (evidence.schemaVersion !== 1)
+    throw new Error('Unsupported cognitive evidence schema version')
+  if (evidence.origin === 'primary' && evidence.derivedFromEvidenceIds.length > 0)
+    throw new Error('Primary cognitive evidence cannot claim derived lineage')
+  if (evidence.origin === 'derived' && evidence.derivedFromEvidenceIds.length === 0)
+    throw new Error('Derived cognitive evidence requires source lineage')
+  if (evidence.origin === 'legacy_import' && evidence.authorVerified)
+    throw new Error('Legacy cognitive evidence cannot claim a verified author')
+}
+
+function assertCognitiveFeedback(feedback: LumiFeedbackEvent): void {
+  requiredText(feedback.id, 'cognitive feedback id', 240)
+  requiredText(feedback.actorId, 'cognitive feedback actorId', 160)
+  requiredText(feedback.conversationId, 'cognitive feedback conversationId', 240)
+  requiredText(feedback.sourceId, 'cognitive feedback sourceId', 240)
+  requiredText(feedback.evidenceId, 'cognitive feedback evidenceId', 240)
+  requiredIsoTimestamp(feedback.occurredAt, 'cognitive feedback occurredAt')
+  boundedNumber(feedback.strength, 'cognitive feedback strength')
+  stringArrayValue(feedback.targetIds, 'cognitive feedback targetIds', 100)
+}
+
+function assertCognitiveBelief(
+  belief: LumiBeliefHypothesis,
+  identity: LumiCognitiveIdentity,
+): void {
+  if (belief.subjectId !== identity.actorId)
+    throw new Error('Cognitive belief subject does not match the immutable actor')
+  requiredText(belief.id, 'cognitive belief id', 160)
+  requiredText(belief.predicate, 'cognitive belief predicate', 500)
+  boundedNumber(belief.confidence, 'cognitive belief confidence')
+  boundedNumber(belief.stability, 'cognitive belief stability')
+  requiredIsoTimestamp(belief.firstObservedAt, 'cognitive belief firstObservedAt')
+  requiredIsoTimestamp(belief.lastObservedAt, 'cognitive belief lastObservedAt')
+  if (belief.expiresAt)
+    requiredIsoTimestamp(belief.expiresAt, 'cognitive belief expiresAt')
+  if (belief.evidenceIds.length === 0)
+    throw new Error('Cognitive belief requires supporting evidence')
+  if (!sameStringSet(belief.participantUserIds, identity.participantUserIds))
+    throw new Error('Cognitive belief participants do not match the turn identity')
+  if (belief.scope === 'group' || (belief.conversationId && belief.conversationId !== identity.conversationId))
+    throw new Error('Direct cognitive belief has an invalid conversation scope')
+}
+
+function assertCognitiveProfileProjection(
+  projection: LumiCognitiveProfileProjection,
+  identity: LumiCognitiveIdentity,
+): void {
+  if (projection.subjectId !== identity.actorId)
+    throw new Error('Cognitive profile subject does not match the immutable actor')
+  requiredText(projection.id, 'cognitive profile id', 160)
+  requiredText(projection.key, 'cognitive profile key', 500)
+  requiredText(projection.value, 'cognitive profile value', 20_000)
+  requiredIsoTimestamp(projection.updatedAt, 'cognitive profile updatedAt')
+  boundedNumber(projection.confidence, 'cognitive profile confidence')
+  boundedNumber(projection.stability, 'cognitive profile stability')
+  if (projection.expiresAt)
+    requiredIsoTimestamp(projection.expiresAt, 'cognitive profile expiresAt')
+  if (projection.layer === 'daily' && !projection.expiresAt)
+    throw new Error('Daily cognitive profile projections require an expiry')
+  if (projection.layer === 'dynamic' && projection.status === 'active' && projection.evidenceIds.length < 2)
+    throw new Error('Active Dynamic profile projections require multiple evidence records')
+  if (
+    projection.layer === 'core'
+    && projection.status === 'active'
+    && (projection.evidenceIds.length < 2 || projection.confidence < 0.75 || projection.stability < 0.75)
+  ) {
+    throw new Error('Active Core profile projections require stable cross-evidence cognition')
+  }
+  if (projection.scope === 'group')
+    throw new Error('Private profile projections cannot use group scope')
+}
+
+function cognitiveLifecycleFromBelief(belief: LumiBeliefHypothesis): LumiCognitiveLifecycle {
+  return {
+    evidenceCount: belief.evidenceCount,
+    independentEvidenceCount: belief.independentEvidenceCount,
+    confidence: belief.confidence,
+    familiarity: belief.familiarity,
+    stability: belief.stability,
+    ownership: belief.ownership,
+    positiveFeedback: belief.positiveFeedback,
+    negativeFeedback: belief.negativeFeedback,
+    rejectionCount: belief.rejectionCount,
+    firstSeenAt: belief.firstSeenAt,
+    lastSeenAt: belief.lastSeenAt,
+    lastUsedAt: belief.lastUsedAt,
+    decay: belief.decay,
+  }
+}
+
+function cognitiveLifecycleFromJson(value: Record<string, unknown>): LumiCognitiveLifecycle {
+  const count = (field: string) => {
+    const result = Number(value[field])
+    if (!Number.isInteger(result) || result < 0)
+      throw new Error(`Stored cognitive lifecycle ${field} is invalid`)
+    return result
+  }
+  return {
+    evidenceCount: count('evidenceCount'),
+    independentEvidenceCount: count('independentEvidenceCount'),
+    confidence: boundedNumber(value.confidence, 'stored lifecycle confidence'),
+    familiarity: boundedNumber(value.familiarity, 'stored lifecycle familiarity'),
+    stability: boundedNumber(value.stability, 'stored lifecycle stability'),
+    ownership: boundedNumber(value.ownership, 'stored lifecycle ownership'),
+    positiveFeedback: count('positiveFeedback'),
+    negativeFeedback: count('negativeFeedback'),
+    rejectionCount: count('rejectionCount'),
+    firstSeenAt: requiredIsoTimestamp(value.firstSeenAt, 'stored lifecycle firstSeenAt'),
+    lastSeenAt: requiredIsoTimestamp(value.lastSeenAt, 'stored lifecycle lastSeenAt'),
+    lastUsedAt: optionalIsoTimestamp(value.lastUsedAt, 'stored lifecycle lastUsedAt'),
+    decay: boundedNumber(value.decay, 'stored lifecycle decay'),
+  }
+}
+
+function cognitiveMemoryRequest(identity: LumiCognitiveIdentity): LumiMemorySearchRequest {
+  return {
+    query: '',
+    userId: identity.actorId,
+    viewerUserId: identity.actorId,
+    personaId: identity.personaId,
+    limit: 100,
+    conversationType: identity.conversationType === 'group' ? 'group' : 'direct',
+    conversationId: identity.conversationId,
+    participantUserIds: [...identity.participantUserIds],
+  }
+}
+
+function canAccessCognitiveEvidence(
+  evidence: LumiCognitiveEvidence,
+  identity: LumiCognitiveIdentity,
+): boolean {
+  if (identity.conversationType === 'group') {
+    if (evidence.scope === 'private' || evidence.scope === 'relationship')
+      return false
+    if (evidence.scope === 'group')
+      return evidence.conversationId === identity.conversationId
+  }
+  else if (evidence.scope === 'group') {
+    return false
+  }
+  if (evidence.scope === 'global' || evidence.scope === 'shared')
+    return evidence.sensitivity !== 'private'
+  return evidence.participantUserIds.includes(identity.actorId)
+    && (!evidence.conversationId || evidence.conversationId === identity.conversationId)
+}
+
+function canAccessCognitiveBelief(
+  belief: LumiBeliefHypothesis,
+  identity: LumiCognitiveIdentity,
+): boolean {
+  if (belief.subjectId !== identity.actorId)
+    return false
+  if (identity.conversationType === 'group') {
+    if (belief.scope === 'private' || belief.scope === 'relationship')
+      return false
+    if (belief.scope === 'group')
+      return belief.conversationId === identity.conversationId
+  }
+  else if (belief.scope === 'group') {
+    return false
+  }
+  if (belief.scope === 'global' || belief.scope === 'shared')
+    return belief.sensitivity !== 'private'
+  return belief.participantUserIds.includes(identity.actorId)
+    && (!belief.conversationId || belief.conversationId === identity.conversationId)
+}
+
+function sameCognitiveEvidence(left: LumiCognitiveEvidence, right: LumiCognitiveEvidence): boolean {
+  return left.id === right.id
+    && left.actorId === right.actorId
+    && left.conversationId === right.conversationId
+    && left.conversationType === right.conversationType
+    && left.kind === right.kind
+    && left.origin === right.origin
+    && left.content === right.content
+    && left.sourceId === right.sourceId
+    && left.sourceMessageId === right.sourceMessageId
+    && left.occurredAt === right.occurredAt
+    && left.trust === right.trust
+    && left.authorVerified === right.authorVerified
+    && left.scope === right.scope
+    && left.sensitivity === right.sensitivity
+    && left.derivationReason === right.derivationReason
+    && sameStringSet(left.subjectUserIds, right.subjectUserIds)
+    && sameStringSet(left.participantUserIds, right.participantUserIds)
+    && sameStringSet(left.derivedFromEvidenceIds, right.derivedFromEvidenceIds)
+}
+
+function sameCognitiveFeedback(row: SqliteRow, feedback: LumiFeedbackEvent): boolean {
+  return row.id === feedback.id
+    && row.actor_id === feedback.actorId
+    && row.conversation_id === feedback.conversationId
+    && row.conversation_type === feedback.conversationType
+    && row.kind === feedback.kind
+    && row.source_id === feedback.sourceId
+    && row.evidence_id === feedback.evidenceId
+    && Number(row.strength) === feedback.strength
+    && row.occurred_at === feedback.occurredAt
+    && Number(row.author_verified) === (feedback.authorVerified ? 1 : 0)
+    && row.scope === feedback.scope
+    && row.sensitivity === feedback.sensitivity
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length)
+    return false
+  const normalizedLeft = [...new Set(left)].sort()
+  const normalizedRight = [...new Set(right)].sort()
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index])
+}
+
+function uniqueRequiredTexts(
+  values: readonly string[],
+  field: string,
+  maxLength: number,
+  maximum: number,
+): string[] {
+  if (values.length > maximum)
+    throw new Error(`${field} list exceeds ${maximum} records`)
+  return [...new Set(values.map(value => requiredText(value, field, maxLength)))]
+}
+
+function stringArrayValue(value: unknown, field: string, maximum: number): string[] {
+  if (!Array.isArray(value) || value.length > maximum || !value.every(item => typeof item === 'string'))
+    throw new Error(`${field} is not a valid string array`)
+  const normalized = value.map(item => requiredText(item, field, 20_000))
+  if (new Set(normalized).size !== normalized.length)
+    throw new Error(`${field} contains duplicate values`)
+  return normalized
+}
+
+function recordValue(value: unknown, field: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error(`${field} is not an object`)
+  return value as Record<string, unknown>
+}
+
+function requiredIsoTimestamp(value: unknown, field: string): string {
+  const normalized = requiredText(value, field, 64)
+  const timestamp = Date.parse(normalized)
+  if (!Number.isFinite(timestamp))
+    throw new Error(`${field} is not a valid timestamp`)
+  return new Date(timestamp).toISOString()
+}
+
+function optionalIsoTimestamp(value: unknown, field: string): string | undefined {
+  return value === undefined || value === null || value === ''
+    ? undefined
+    : requiredIsoTimestamp(value, field)
+}
+
+function boundedNumber(value: unknown, field: string): number {
+  const result = Number(value)
+  if (!Number.isFinite(result) || result < 0 || result > 1)
+    throw new Error(`${field} must be between zero and one`)
+  return result
+}
+
+function cognitiveConversationType(value: unknown): LumiCognitiveIdentity['conversationType'] {
+  if (value === 'direct' || value === 'group' || value === 'internal')
+    return value
+  throw new Error('Stored cognitive conversation type is invalid')
+}
+
+function cognitiveEvidenceKind(value: unknown): LumiCognitiveEvidence['kind'] {
+  const allowed: LumiCognitiveEvidence['kind'][] = [
+    'user_statement',
+    'user_correction',
+    'observed_behavior',
+    'tool_result',
+    'screen_observation',
+    'lumi_action',
+    'user_feedback',
+    'relationship_event',
+    'conversation_episode',
+    'legacy_import',
+  ]
+  if (typeof value === 'string' && allowed.includes(value as LumiCognitiveEvidence['kind']))
+    return value as LumiCognitiveEvidence['kind']
+  throw new Error('Stored cognitive evidence kind is invalid')
+}
+
+function cognitiveEvidenceOrigin(value: unknown): LumiCognitiveEvidence['origin'] {
+  return value === 'primary' || value === 'derived' ? value : 'legacy_import'
+}
+
+function cognitiveMemoryScope(value: unknown): LumiMemoryScope {
+  if (value === 'global' || value === 'shared' || value === 'relationship' || value === 'group' || value === 'private')
+    return value
+  throw new Error('Stored cognitive memory scope is invalid')
+}
+
+function cognitiveMemorySensitivity(value: unknown): LumiMemorySensitivity {
+  if (value === 'normal' || value === 'private')
+    return value
+  throw new Error('Stored cognitive memory sensitivity is invalid')
+}
+
+function cognitiveBeliefStatus(value: unknown): LumiBeliefHypothesis['status'] {
+  if (value === 'tentative' || value === 'supported' || value === 'stable' || value === 'contradicted' || value === 'expired')
+    return value
+  throw new Error('Stored cognitive belief status is invalid')
+}
+
+function cognitiveProfileLayer(value: unknown): LumiCognitiveProfileProjection['layer'] {
+  if (value === 'daily' || value === 'dynamic' || value === 'core')
+    return value
+  throw new Error('Stored cognitive profile layer is invalid')
 }
 
 function finiteVector(value: unknown): number[] {

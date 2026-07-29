@@ -66,13 +66,13 @@ const MEMORY_ACCESS_SQL = `(
   )
 )`
 
-interface SqliteStatement {
+export interface SqliteStatement {
   all: (...values: SqliteValue[]) => Record<string, any>[]
   get: (...values: SqliteValue[]) => Record<string, any> | undefined
   run: (...values: SqliteValue[]) => void
 }
 
-interface SqliteDatabase {
+export interface SqliteDatabase {
   close?: () => void
   exec: (sql: string) => void
   prepare: (sql: string) => SqliteStatement

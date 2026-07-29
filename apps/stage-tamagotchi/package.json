@@ -69,6 +69,7 @@
     "@proj-airi/font-xiaolai": "workspace:^",
     "@proj-airi/i18n": "workspace:^",
     "@proj-airi/lumi-online": "workspace:*",
+    "@proj-airi/lumi-runtime": "workspace:*",
     "@proj-airi/lumi-server": "workspace:*",
     "@proj-airi/lumi-server-runtime": "workspace:*",
     "@proj-airi/playwright-extra-mcp": "workspace:^",

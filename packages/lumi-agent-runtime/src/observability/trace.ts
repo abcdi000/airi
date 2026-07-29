@@ -1,3 +1,5 @@
+import type { LumiRecallTrace } from '@proj-airi/lumi-runtime'
+
 import type { ModelUsage, PlannerToolCall } from '../ports/model'
 import type { LumiPromptTemplateMetadata } from '../prompts/templates'
 
@@ -33,6 +35,14 @@ export type AgentTraceEvent
     toolCalls: readonly Pick<PlannerToolCall, 'id' | 'name' | 'dependsOn'>[]
     usage?: ModelUsage
     modelName?: string
+    timestamp: number
+  }
+  | {
+    type: 'automatic_recall'
+    turnId: string
+    status: 'completed' | 'fallback'
+    /** Privacy-safe recall diagnostics. Query text is present only when prompt logging is enabled. */
+    recall: LumiRecallTrace
     timestamp: number
   }
   | {

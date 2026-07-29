@@ -2,6 +2,7 @@ import type {
   LumiBeliefHypothesis,
   LumiCognitiveEvidence,
   LumiCognitiveLifecycle,
+  LumiCognitiveTurnRepository,
   LumiFeedbackEvent,
   LumiMemoryFragment,
 } from '../index'
@@ -16,6 +17,7 @@ import {
   decayLumiBeliefHypothesis,
   formatLumiPlannerCognitiveContext,
   observeLumiBeliefHypothesis,
+  prepareLumiCognitiveTurn,
   projectLumiBeliefsToProfile,
   reduceLumiFeedbackLifecycle,
   reduceLumiWorkingMemory,
@@ -47,6 +49,63 @@ function evidence(patch: Partial<LumiCognitiveEvidence> = {}): LumiCognitiveEvid
     derivedFromEvidenceIds: [],
     schemaVersion: 1,
     ...patch,
+  }
+}
+
+function cognitiveRepository(input: {
+  workingMemory?: ReturnType<typeof createLumiWorkingMemory>
+  recalledMemories?: LumiMemoryFragment[]
+}) {
+  const commits: Parameters<LumiCognitiveTurnRepository['commitFastLoop']>[0][] = []
+  let recallCount = 0
+  let reuseCount = 0
+  const repository: LumiCognitiveTurnRepository = {
+    async loadWorkingMemory() {
+      return input.workingMemory
+    },
+    async commitFastLoop(commit) {
+      commits.push(commit)
+      input.workingMemory = commit.workingMemory
+    },
+    async recall() {
+      recallCount += 1
+      const memories = input.recalledMemories ?? []
+      return {
+        memories,
+        trace: {
+          ran: true,
+          reusedPreviousState: false,
+          aclInputCount: memories.length,
+          aclOutputCount: memories.length,
+          lexicalCandidateCount: memories.length,
+          annCandidateCount: memories.length,
+          mergedCandidateCount: memories.length,
+          rerankedCandidateCount: memories.length,
+          thresholdRejectedCount: 0,
+          conflictRejectedCount: 0,
+          injectedCount: memories.length,
+          durationMs: 4,
+          vectorIndexStatus: 'test',
+        },
+      }
+    },
+    async loadMemoriesByIds({ memoryIds }) {
+      reuseCount += 1
+      return (input.recalledMemories ?? []).filter(item => memoryIds.includes(item.id))
+    },
+    async loadProjectionState() {
+      return {
+        evidence: [],
+        hypotheses: [],
+        profile: [],
+      }
+    },
+  }
+  return {
+    repository,
+    commits,
+    recallCount: () => recallCount,
+    reuseCount: () => reuseCount,
   }
 }
 
@@ -401,6 +460,131 @@ describe('lumi cognitive privacy and feedback', () => {
     expect(result.positiveFeedback).toBe(1)
     expect(result.confidence).toBeGreaterThan(lifecycle.confidence)
     expect(result.ownership).toBe(lifecycle.ownership)
+  })
+})
+
+describe('lumi cognitive fast loop', () => {
+  /** @example One verified user turn becomes evidence before Planner context is assembled. */
+  it('commits primary evidence, working memory, and authorized shallow recall together', async () => {
+    const recalled = memory({ id: 'memory-project' })
+    const host = cognitiveRepository({ recalledMemories: [recalled] })
+
+    const bundle = await prepareLumiCognitiveTurn({
+      identity: {
+        actorId: DOGGY,
+        personaId: 'lumi',
+        conversationId: 'direct-doggy',
+        conversationType: 'direct',
+        participantUserIds: [DOGGY],
+      },
+      sourceMessageId: 'message-current',
+      userText: 'Patchright 项目现在怎么样了',
+      recentTurns: [
+        { id: 'assistant-before', role: 'assistant', content: '我刚检查了浏览器链路。' },
+        { id: 'message-current', role: 'user', content: 'Patchright 项目现在怎么样了' },
+      ],
+      repository: host.repository,
+      now: NOW,
+    })
+
+    expect(host.recallCount()).toBe(1)
+    expect(host.reuseCount()).toBe(0)
+    expect(host.commits).toHaveLength(1)
+    expect(host.commits[0]?.evidence).toMatchObject({
+      actorId: DOGGY,
+      sourceMessageId: 'message-current',
+      origin: 'primary',
+      kind: 'user_statement',
+      scope: 'private',
+    })
+    expect(bundle.stableFacts.map(item => item.id)).toEqual(['memory-project'])
+    expect(bundle.recallTrace).toMatchObject({
+      ran: true,
+      reusedPreviousState: false,
+      injectedCount: 1,
+    })
+  })
+
+  /** @example “对” reloads previous memory IDs without another semantic recall. */
+  it('reuses persisted RecallState for a pure acknowledgement without a new embedding path', async () => {
+    const workingMemory = createLumiWorkingMemory({
+      personId: DOGGY,
+      personaId: 'lumi',
+      conversationId: 'direct-doggy',
+      conversationType: 'direct',
+      now: NOW,
+    })
+    workingMemory.recallState = {
+      query: '默认使用 Patchright，特殊情况使用 Playwright',
+      memoryIds: ['memory-browser'],
+      activeTopics: ['浏览器工具'],
+      sourceMessageIds: ['assistant-before'],
+      updatedAt: NOW,
+      expiresAt: LATER,
+      reuseCount: 0,
+    }
+    const host = cognitiveRepository({
+      workingMemory,
+      recalledMemories: [memory({ id: 'memory-browser' })],
+    })
+
+    const bundle = await prepareLumiCognitiveTurn({
+      identity: {
+        actorId: DOGGY,
+        personaId: 'lumi',
+        conversationId: 'direct-doggy',
+        conversationType: 'direct',
+        participantUserIds: [DOGGY],
+      },
+      sourceMessageId: 'message-confirm',
+      userText: '对',
+      recentTurns: [
+        { id: 'assistant-before', role: 'assistant', content: '默认使用 Patchright，特殊情况才用 Playwright。' },
+        { id: 'message-confirm', role: 'user', content: '对' },
+      ],
+      repository: host.repository,
+      now: NOW,
+    })
+
+    expect(host.recallCount()).toBe(0)
+    expect(host.reuseCount()).toBe(1)
+    expect(bundle.recallTrace).toMatchObject({
+      reusedPreviousState: true,
+      vectorIndexStatus: 'reused_previous_recall',
+    })
+    expect(bundle.workingMemory.continuationPoint).toBe('默认使用 Patchright，特殊情况才用 Playwright。')
+    expect(bundle.workingMemory.recallState?.reuseCount).toBe(1)
+  })
+
+  /** @example Explicit naturalness feedback is persisted, while a plain acknowledgement is not. */
+  it('writes explicit feedback events without treating an acknowledgement as praise', async () => {
+    const host = cognitiveRepository({ recalledMemories: [] })
+    const identity = {
+      actorId: DOGGY,
+      personaId: 'lumi',
+      conversationId: 'direct-doggy',
+      conversationType: 'direct' as const,
+      participantUserIds: [DOGGY],
+    }
+    await prepareLumiCognitiveTurn({
+      identity,
+      sourceMessageId: 'message-feedback',
+      userText: '你这样说自然多了',
+      recentTurns: [{ id: 'assistant-before', role: 'assistant', content: '这次简短说。' }],
+      repository: host.repository,
+      now: NOW,
+    })
+    await prepareLumiCognitiveTurn({
+      identity,
+      sourceMessageId: 'message-ack',
+      userText: '嗯',
+      recentTurns: [{ id: 'assistant-after', role: 'assistant', content: '知道了。' }],
+      repository: host.repository,
+      now: NOW,
+    })
+
+    expect(host.commits[0]?.feedback.map(item => item.kind)).toEqual(['expression_natural'])
+    expect(host.commits[1]?.feedback).toEqual([])
   })
 })
 

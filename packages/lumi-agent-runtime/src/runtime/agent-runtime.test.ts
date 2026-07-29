@@ -1,9 +1,10 @@
-import type { LumiReplyIntent } from '@proj-airi/lumi-runtime'
+import type { LumiCognitiveContextBundle, LumiReplyIntent } from '@proj-airi/lumi-runtime'
 
 import type {
   AgentPersistencePort,
   AgentToolsPort,
   AgentTraceEvent,
+  CognitiveContextPort,
   DirectOutboundAdapter,
   DirectPerceptionEnvelope,
   LanguageModelPort,
@@ -18,6 +19,7 @@ import type {
   StickerPort,
 } from '../index'
 
+import { createLumiWorkingMemory } from '@proj-airi/lumi-runtime'
 import { describe, expect, it, vi } from 'vitest'
 
 import { PlannerResponseFormatError } from '../ports/model'
@@ -38,6 +40,84 @@ function envelope(index: number, text: string): DirectPerceptionEnvelope {
     sourceMessageId: `message-${index}`,
     participantPersonIds: ['doggy'],
     conversationType: 'direct',
+  }
+}
+
+function cognitiveBundle(
+  currentEnvelope: DirectPerceptionEnvelope,
+  overrides: Partial<LumiCognitiveContextBundle> = {},
+): LumiCognitiveContextBundle {
+  const now = new Date(currentEnvelope.timestamp).toISOString()
+  return {
+    identity: {
+      actorId: currentEnvelope.personId,
+      personaId: 'lumi',
+      conversationId: currentEnvelope.conversationId,
+      conversationType: 'direct',
+      participantUserIds: [...currentEnvelope.participantPersonIds],
+    },
+    workingMemory: createLumiWorkingMemory({
+      personId: currentEnvelope.personId,
+      personaId: 'lumi',
+      conversationId: currentEnvelope.conversationId,
+      conversationType: 'direct',
+      now,
+    }),
+    stableFacts: [{
+      id: 'memory-cognitive-1',
+      userId: currentEnvelope.personId,
+      personaId: 'lumi',
+      conversationId: currentEnvelope.conversationId,
+      type: 'user_fact',
+      content: 'Doggy 正在维护 Patchright 浏览器链路',
+      confidence: 0.94,
+      importance: 0.8,
+      emotionalIntensity: 0.1,
+      relationshipRelevance: 0.5,
+      createdAt: now,
+      updatedAt: now,
+      decay: 0,
+      tags: ['Patchright'],
+      status: 'active',
+      scope: 'private',
+      ownerType: 'user',
+      ownerId: currentEnvelope.personId,
+      visibility: 'private',
+      participantUserIds: [...currentEnvelope.participantPersonIds],
+      subjectUserIds: [currentEnvelope.personId],
+      sensitivity: 'private',
+      sourceActorId: currentEnvelope.personId,
+      sourceConversationType: 'direct',
+    }],
+    tentativeImpressions: [],
+    relevantEpisodes: [],
+    userProfileProjection: {
+      communicationPreferences: [],
+      stableGoals: [],
+      relevantTraits: [],
+      currentState: [],
+    },
+    currentEmotion: { primary: 'neutral', intensity: 0.2 },
+    interactionStrategies: ['直接回应当前问题'],
+    expressionAssets: ['说“我看看”时保持自然简短'],
+    contradictions: [],
+    recallTrace: {
+      ran: true,
+      query: 'Patchright 浏览器链路',
+      queryReason: 'contextual_query',
+      reusedPreviousState: false,
+      aclInputCount: 4,
+      aclOutputCount: 1,
+      lexicalCandidateCount: 2,
+      annCandidateCount: 2,
+      mergedCandidateCount: 3,
+      rerankedCandidateCount: 1,
+      thresholdRejectedCount: 2,
+      conflictRejectedCount: 0,
+      injectedCount: 1,
+      durationMs: 12,
+    },
+    ...overrides,
   }
 }
 
@@ -127,6 +207,7 @@ function createHarness(input: {
   replyTexts?: string[]
   replyOutputs?: string[]
   memoryQuery?: MemoryPort['query']
+  cognitive?: CognitiveContextPort
   sticker?: StickerPort
   tools?: AgentToolsPort
   socialLanguage?: SocialLanguagePort
@@ -174,6 +255,7 @@ function createHarness(input: {
         facts: ['Lumi的朋友'],
       })),
     },
+    cognitive: input.cognitive,
     memory: input.memoryQuery
       ? {
           query: input.memoryQuery,
@@ -201,6 +283,162 @@ function createHarness(input: {
 }
 
 describe('lumiAgentRuntime direct session', () => {
+  // ROOT CAUSE:
+  //
+  // Memory was available only as an explicit Planner tool while profile,
+  // relationship, and learned-language stores injected unrelated references.
+  // A normal turn therefore had no automatic recall and Replyer could receive
+  // duplicate or overly broad context.
+  //
+  // We fixed this with one host cognitive port that prepares an ACL-filtered
+  // bundle before Planner and projects a separate narrow expression reference.
+  /** @example Automatic recall precedes Planner and Replyer receives no memory body. */
+  it('prepares one cognitive bundle before Planner and narrows the Replyer projection', async () => {
+    const currentEnvelope = envelope(1, 'Patchright 现在怎么样了')
+    const order: string[] = []
+    const traces: AgentTraceEvent[] = []
+    const recordContextUse = vi.fn<NonNullable<CognitiveContextPort['recordContextUse']>>(async () => {})
+    const prepareTurn = vi.fn<CognitiveContextPort['prepareTurn']>(async (input) => {
+      order.push('cognitive')
+      expect(input.envelope.personId).toBe('doggy')
+      expect(input.recentTurns.at(-1)).toMatchObject({
+        role: 'user',
+        personId: 'doggy',
+        textSegments: ['Patchright 现在怎么样了'],
+      })
+      return cognitiveBundle(currentEnvelope)
+    })
+    const generateStep = vi.fn<PlannerModelPort['generateStep']>(async () => {
+      order.push('planner')
+      return plannerStep([replyCall()])
+    })
+    const plannerModel = { generateStep }
+    const harness = createHarness({
+      plannerModel,
+      cognitive: { prepareTurn, recordContextUse },
+      trace: event => traces.push(event),
+    })
+
+    const result = await harness.runtime.ingestDirect(currentEnvelope)
+
+    expect(result.endReason).toBe('reply_sent')
+    expect(order).toEqual(['cognitive', 'planner'])
+    const plannerMessages = plannerModel.generateStep.mock.calls[0]?.[0].messages ?? []
+    expect(plannerMessages.some(message =>
+      message.content.includes('Doggy 正在维护 Patchright 浏览器链路'),
+    )).toBe(true)
+    const replyerMessages = harness.languageModel.generate.mock.calls[0]?.[0] ?? []
+    expect(replyerMessages.some(message =>
+      message.content.includes('说“我看看”时保持自然简短'),
+    )).toBe(true)
+    expect(replyerMessages.every(message =>
+      !message.content.includes('Doggy 正在维护 Patchright 浏览器链路'),
+    )).toBe(true)
+    expect(recordContextUse).toHaveBeenCalledWith(expect.objectContaining({
+      envelope: currentEnvelope,
+      memoryIds: ['memory-cognitive-1'],
+    }))
+    expect(traces.find(event => event.type === 'automatic_recall')).toMatchObject({
+      status: 'completed',
+      recall: {
+        ran: true,
+        query: undefined,
+        injectedCount: 1,
+      },
+    })
+  })
+
+  // ROOT CAUSE:
+  //
+  // A mutable desktop user selection or a faulty adapter could return context
+  // for another person after ingress authentication. Trusting that projection
+  // would leak private memory into the current Planner prompt.
+  //
+  // We fixed this by checking actor, conversation, participants, and working
+  // memory against the immutable direct envelope before any reference is added.
+  /** @example A mismatched actor falls back without exposing its cognitive body. */
+  it('rejects a cognitive bundle for another actor and safely uses the legacy fallback', async () => {
+    const currentEnvelope = envelope(1, '还记得我的项目吗')
+    const traces: AgentTraceEvent[] = []
+    const foreignBundle = cognitiveBundle(currentEnvelope, {
+      identity: {
+        actorId: 'moussy',
+        personaId: 'lumi',
+        conversationId: currentEnvelope.conversationId,
+        conversationType: 'direct',
+        participantUserIds: ['doggy'],
+      },
+      stableFacts: [{
+        ...cognitiveBundle(currentEnvelope).stableFacts[0]!,
+        id: 'moussy-private-memory',
+        content: 'Moussy 的私密信息绝不能泄漏',
+      }],
+    })
+    const generateStep = vi.fn<PlannerModelPort['generateStep']>()
+      .mockResolvedValueOnce(plannerStep([replyCall()]))
+    const plannerModel = { generateStep }
+    const harness = createHarness({
+      plannerModel,
+      cognitive: {
+        prepareTurn: vi.fn(async () => foreignBundle),
+      },
+      trace: event => traces.push(event),
+    })
+
+    const result = await harness.runtime.ingestDirect(currentEnvelope)
+
+    expect(result.endReason).toBe('reply_sent')
+    const plannerMessages = plannerModel.generateStep.mock.calls[0]?.[0].messages ?? []
+    expect(plannerMessages.every(message =>
+      !message.content.includes('Moussy 的私密信息绝不能泄漏'),
+    )).toBe(true)
+    expect(plannerMessages.some(message => message.content.includes('Doggy'))).toBe(true)
+    expect(traces.find(event => event.type === 'automatic_recall')).toMatchObject({
+      status: 'fallback',
+      recall: {
+        ran: false,
+        fallbackReason: 'cognitive_context_unavailable',
+      },
+    })
+  })
+
+  /** @example Explicit history lookup remains a real tool call after shallow recall. */
+  it('retains explicit deep memory search when automatic shallow recall is enabled', async () => {
+    const currentEnvelope = envelope(1, '你从记忆里查一查你的生日')
+    const memoryQuery = vi.fn<MemoryPort['query']>(async () => [{
+      id: 'memory-birthday',
+      content: 'Lumi 的生日是 7 月 21 日',
+      scope: 'lumi_self' as const,
+      status: 'active' as const,
+      confidence: 0.98,
+      provenance: { sourceMessageId: 'birthday-message' },
+      authorizationReason: 'Lumi self fact is visible in this direct chat',
+    }])
+    const plannerModel = {
+      generateStep: vi.fn()
+        .mockImplementationOnce(async (input: Parameters<PlannerModelPort['generateStep']>[0]) => {
+          expect(input.tools.map(tool => tool.name)).toEqual(['query_memory'])
+          return plannerStep([
+            toolCall('memory-birthday', 'query_memory', { query: 'Lumi 的生日' }),
+          ])
+        })
+        .mockResolvedValueOnce(plannerStep([replyCall()])),
+    }
+    const harness = createHarness({
+      plannerModel,
+      memoryQuery,
+      cognitive: {
+        prepareTurn: vi.fn(async () => cognitiveBundle(currentEnvelope)),
+      },
+    })
+
+    const result = await harness.runtime.ingestDirect(currentEnvelope)
+
+    expect(result.endReason).toBe('reply_sent')
+    expect(memoryQuery).toHaveBeenCalledOnce()
+    expect(plannerModel.generateStep).toHaveBeenCalledTimes(2)
+  })
+
   // ROOT CAUSE:
   //
   // A host relationship gate could require refusal while preserving the

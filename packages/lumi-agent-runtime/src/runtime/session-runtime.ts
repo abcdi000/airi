@@ -1,4 +1,4 @@
-import type { LumiVisibleReply } from '@proj-airi/lumi-runtime'
+import type { LumiCognitiveContextBundle, LumiVisibleReply } from '@proj-airi/lumi-runtime'
 
 import type {
   DialogueAssistantMessage,
@@ -11,6 +11,7 @@ import type {
 import type { DirectPerceptionEnvelope } from '../input'
 import type { AgentTracePort, AgentTurnEndReason } from '../observability/trace'
 import type { DirectOutboundAuthority } from '../policy/outbound-guard'
+import type { CognitiveContextPort, CognitiveDialogueTurn } from '../ports/cognitive'
 import type { IdentityPort } from '../ports/identity'
 import type { MemoryPort } from '../ports/memory'
 import type { LanguageModelPort, PlannerModelPort, PlannerToolCall } from '../ports/model'
@@ -31,6 +32,10 @@ import type { ToolAvailabilityContext, ToolRegistry } from '../tools/registry'
 import type { WaitResult } from './wait-controller'
 
 import { errorMessageFrom } from '@moeru/std'
+import {
+  formatLumiPlannerCognitiveContext,
+  formatLumiReplyerCognitiveContext,
+} from '@proj-airi/lumi-runtime'
 
 import { compactContext, selectPlannerHistory } from '../context/compactor'
 import { consumeReferenceUses } from '../context/history'
@@ -68,6 +73,7 @@ export interface SessionRuntimeConfig {
   toolMaxConcurrency: number
   toolStepTimeoutMs: number
   plannerRequestTimeoutMs: number
+  cognitiveContextTimeoutMs: number
   deferredToolsEnabled: boolean
   expressionSelectorEnabled: boolean
   directLanguageFeedbackEnabled: boolean
@@ -129,6 +135,7 @@ export class SessionRuntime {
   readonly #languageModel: LanguageModelPort
   readonly #replyer: ReplyerService
   readonly #identity: IdentityPort
+  readonly #cognitive?: CognitiveContextPort
   readonly #memory?: MemoryPort
   readonly #persistence: AgentPersistencePort
   readonly #outbound: DirectOutboundAuthority
@@ -157,6 +164,7 @@ export class SessionRuntime {
   #compaction?: Promise<void>
   #compactionTimer?: ReturnType<typeof setTimeout>
   #compactionController?: AbortController
+  #activeCognitiveContext?: LumiCognitiveContextBundle
 
   constructor(options: {
     conversationId: string
@@ -165,6 +173,7 @@ export class SessionRuntime {
     languageModel: LanguageModelPort
     replyer: ReplyerService
     identity: IdentityPort
+    cognitive?: CognitiveContextPort
     memory?: MemoryPort
     persistence: AgentPersistencePort
     outbound: DirectOutboundAuthority
@@ -180,6 +189,7 @@ export class SessionRuntime {
     this.#languageModel = options.languageModel
     this.#replyer = options.replyer
     this.#identity = options.identity
+    this.#cognitive = options.cognitive
     this.#memory = options.memory
     this.#persistence = options.persistence
     this.#outbound = options.outbound
@@ -353,18 +363,22 @@ export class SessionRuntime {
   }
 
   async #runTurn(turn: ActiveTurn, startRound = 1): Promise<DirectTurnResult> {
-    const profile = await this.#identity.getPersonProfile({
-      personId: turn.envelope.personId,
-      conversationId: turn.envelope.conversationId,
-      viewerPersonId: turn.envelope.personId,
-    })
-    if (profile)
-      this.#replaceCurrentProfileReference(profile)
-    await this.#refreshPlannerLanguageReferences(turn.envelope)
+    const cognitivePrepared = await this.#prepareCognitiveContext(turn)
+    if (!cognitivePrepared) {
+      const profile = await this.#identity.getPersonProfile({
+        personId: turn.envelope.personId,
+        conversationId: turn.envelope.conversationId,
+        viewerPersonId: turn.envelope.personId,
+      })
+      if (profile)
+        this.#replaceCurrentProfileReference(profile)
+      await this.#refreshPlannerLanguageReferences(turn.envelope)
+    }
     this.#scheduleDirectFeedback(turn.envelope)
 
     let consecutiveNoToolSteps = 0
     let responseFormatRetries = 0
+    let cognitiveContextUseRecorded = false
     for (let round = startRound; round <= this.#config.plannerMaxRounds; round += 1) {
       this.#activePlannerRound = round
       const controller = new AbortController()
@@ -447,6 +461,10 @@ export class SessionRuntime {
       }
       if (controller.signal.aborted)
         throw new AgentTurnInterruptedError()
+      if (!cognitiveContextUseRecorded) {
+        cognitiveContextUseRecorded = true
+        this.#recordCognitiveContextUse(turn.envelope)
+      }
       responseFormatRetries = 0
       this.#history.push({
         id: `planner:${turn.turnId}:${round}`,
@@ -877,6 +895,173 @@ export class SessionRuntime {
     } satisfies DialogueUserMessage)
   }
 
+  async #prepareCognitiveContext(turn: ActiveTurn): Promise<boolean> {
+    this.#activeCognitiveContext = undefined
+    this.#history = this.#history.filter(message =>
+      message.kind !== 'reference'
+      || (message.referenceType !== 'cognitive_context'
+        && message.referenceType !== 'cognitive_expression'))
+    const startedAt = Date.now()
+    if (!this.#cognitive) {
+      await this.#recordAutomaticRecallFallback(turn.turnId, 'cognitive_port_unavailable', startedAt)
+      return false
+    }
+
+    const controller = new AbortController()
+    this.#activeController = controller
+    try {
+      const bundle = await executeAbortableRequest({
+        label: 'Cognitive context preparation',
+        parentSignal: controller.signal,
+        timeoutMs: this.#config.cognitiveContextTimeoutMs,
+        execute: async signal => await this.#cognitive!.prepareTurn({
+          envelope: turn.envelope,
+          recentTurns: this.#recentCognitiveTurns(),
+          signal,
+        }),
+      })
+      validateCognitiveBundleIdentity(bundle, turn.envelope)
+      this.#activeCognitiveContext = bundle
+      this.#replaceCognitiveReferences(bundle)
+      await this.#trace?.record({
+        type: 'automatic_recall',
+        turnId: turn.turnId,
+        status: 'completed',
+        recall: {
+          ...bundle.recallTrace,
+          query: this.#config.promptLoggingEnabled ? bundle.recallTrace.query : undefined,
+          durationMs: Date.now() - startedAt,
+        },
+        timestamp: Date.now(),
+      })
+      return true
+    }
+    catch (error) {
+      if (error instanceof AgentTurnInterruptedError || this.#activeTurn !== turn)
+        throw error
+      this.#activeCognitiveContext = undefined
+      await this.#recordAutomaticRecallFallback(turn.turnId, 'cognitive_context_unavailable', startedAt)
+      return false
+    }
+    finally {
+      if (this.#activeController === controller)
+        this.#activeController = undefined
+    }
+  }
+
+  #recentCognitiveTurns(): CognitiveDialogueTurn[] {
+    return this.#history
+      .filter((message): message is DialogueUserMessage | DialogueAssistantMessage =>
+        message.kind === 'dialogue_user' || message.kind === 'dialogue_assistant')
+      .slice(-12)
+      .map(message => message.kind === 'dialogue_user'
+        ? {
+            role: 'user',
+            personId: message.personId,
+            messageIds: [message.messageId],
+            textSegments: [message.text],
+            timestamp: message.timestamp,
+          }
+        : {
+            role: 'assistant',
+            messageIds: message.messageIds,
+            textSegments: message.textSegments,
+            timestamp: message.timestamp,
+          })
+  }
+
+  #replaceCognitiveReferences(bundle: LumiCognitiveContextBundle): void {
+    this.#history = this.#history.filter(message =>
+      message.kind !== 'reference'
+      || (message.referenceType !== 'person_profile'
+        && message.referenceType !== 'behavior'
+        && message.referenceType !== 'jargon'))
+    const sourceIds = [
+      ...bundle.stableFacts.map(memory => memory.id),
+      ...bundle.relevantEpisodes.map(memory => memory.id),
+      ...bundle.tentativeImpressions.map(hypothesis => hypothesis.id),
+    ]
+    this.#history.push({
+      id: `cognitive:planner:${this.#generation}:${bundle.identity.actorId}`,
+      kind: 'reference',
+      referenceType: 'cognitive_context',
+      content: formatLumiPlannerCognitiveContext(bundle),
+      authorizationReason: 'Prepared and ACL-revalidated by the host cognitive context port',
+      confidence: 1,
+      timestamp: Date.now(),
+      countInContext: true,
+      remainingUses: null,
+      source: 'cognitive_context',
+      visibility: 'planner',
+      provenance: {
+        origin: 'cognitive_context_port',
+        sourceIds,
+      },
+    }, {
+      id: `cognitive:replyer:${this.#generation}:${bundle.identity.actorId}`,
+      kind: 'reference',
+      referenceType: 'cognitive_expression',
+      content: formatLumiReplyerCognitiveContext(bundle),
+      authorizationReason: 'Narrow Replyer projection from the same authorized cognitive bundle',
+      confidence: 1,
+      timestamp: Date.now(),
+      countInContext: true,
+      remainingUses: null,
+      source: 'cognitive_context',
+      visibility: 'replyer',
+      provenance: {
+        origin: 'cognitive_context_port',
+        sourceIds: [],
+      },
+    })
+  }
+
+  async #recordAutomaticRecallFallback(
+    turnId: string,
+    fallbackReason: string,
+    startedAt: number,
+  ): Promise<void> {
+    await this.#trace?.record({
+      type: 'automatic_recall',
+      turnId,
+      status: 'fallback',
+      recall: {
+        ran: false,
+        reusedPreviousState: false,
+        aclInputCount: 0,
+        aclOutputCount: 0,
+        lexicalCandidateCount: 0,
+        annCandidateCount: 0,
+        mergedCandidateCount: 0,
+        rerankedCandidateCount: 0,
+        thresholdRejectedCount: 0,
+        conflictRejectedCount: 0,
+        injectedCount: 0,
+        durationMs: Date.now() - startedAt,
+        fallbackReason,
+      },
+      timestamp: Date.now(),
+    })
+  }
+
+  #recordCognitiveContextUse(envelope: DirectPerceptionEnvelope): void {
+    if (!this.#cognitive?.recordContextUse || !this.#activeCognitiveContext)
+      return
+    const bundle = this.#activeCognitiveContext
+    void this.#cognitive.recordContextUse({
+      envelope,
+      memoryIds: [
+        ...bundle.stableFacts.map(memory => memory.id),
+        ...bundle.relevantEpisodes.map(memory => memory.id),
+      ],
+      hypothesisIds: bundle.tentativeImpressions.map(hypothesis => hypothesis.id),
+      usedAt: new Date().toISOString(),
+    }).catch(error => console.warn(
+      '[lumi-agent-runtime] failed to record cognitive context usage',
+      (errorMessageFrom(error) ?? 'unknown error').slice(0, 500),
+    ))
+  }
+
   #replaceCurrentProfileReference(profile: Awaited<ReturnType<IdentityPort['getPersonProfile']>> & {}) {
     const reference: ReferenceMessage = {
       id: `profile:${this.#generation}:${profile.personId}`,
@@ -1213,6 +1398,32 @@ export class SessionRuntime {
       this.#compactionTimer = undefined
     }
     this.#compactionController?.abort(new AgentTurnInterruptedError())
+  }
+}
+
+function validateCognitiveBundleIdentity(
+  bundle: LumiCognitiveContextBundle,
+  envelope: DirectPerceptionEnvelope,
+): void {
+  const identity = bundle.identity
+  if (identity.actorId !== envelope.personId)
+    throw new TypeError('Cognitive context actor does not match the immutable turn actor')
+  if (identity.conversationId !== envelope.conversationId || identity.conversationType !== 'direct')
+    throw new TypeError('Cognitive context conversation does not match the direct turn')
+  const expectedParticipants = [...envelope.participantPersonIds].sort()
+  const actualParticipants = [...identity.participantUserIds].sort()
+  if (
+    expectedParticipants.length !== actualParticipants.length
+    || expectedParticipants.some((personId, index) => personId !== actualParticipants[index])
+  ) {
+    throw new TypeError('Cognitive context participants do not match the authorized turn')
+  }
+  if (
+    bundle.workingMemory.personId !== envelope.personId
+    || bundle.workingMemory.conversationId !== envelope.conversationId
+    || bundle.workingMemory.conversationType !== 'direct'
+  ) {
+    throw new TypeError('Cognitive working memory does not match the authorized turn')
   }
 }
 

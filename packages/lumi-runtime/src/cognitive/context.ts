@@ -125,6 +125,8 @@ export function formatLumiPlannerCognitiveContext(bundle: LumiCognitiveContextBu
       ...working.goals.map(item => `当前目标：${item.value}`),
       ...working.openLoops.map(item => `未完成问题：${item.value}`),
       ...working.projects.map(item => `当前项目：${item.value}`),
+      ...working.temporaryUserStates.map(item => `当前用户临时状态：${item.value}`),
+      working.relationshipContext ? `当前关系情境：${working.relationshipContext.value}` : '',
       working.continuationPoint ? `续接点：${working.continuationPoint}` : '',
     ]),
     section('稳定认知', bundle.stableFacts.map(memory => memory.content)),
@@ -138,6 +140,13 @@ export function formatLumiPlannerCognitiveContext(bundle: LumiCognitiveContextBu
       ...bundle.userProfileProjection.relevantTraits.map(item => `${item.key}: ${item.value}`),
       ...bundle.userProfileProjection.currentState.map(item => `${item.key}: ${item.value}（短期）`),
     ]),
+    bundle.relationshipState === undefined
+      ? ''
+      : section('当前关系状态', [printableValue(bundle.relationshipState)]),
+    bundle.currentEmotion === undefined
+      ? ''
+      : section('Lumi 当前情绪', [printableValue(bundle.currentEmotion)]),
+    section('互动策略', bundle.interactionStrategies),
     section('冲突', bundle.contradictions),
     '</Lumi认知上下文>',
   ]

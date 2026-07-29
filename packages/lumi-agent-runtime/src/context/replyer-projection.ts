@@ -21,6 +21,7 @@ export function projectReplyerHistory(
       return true
     return message.kind === 'reference'
       && (message.referenceType === 'continuity_summary'
+        || message.referenceType === 'cognitive_expression'
         || message.referenceType === 'behavior'
         || message.referenceType === 'jargon')
   })

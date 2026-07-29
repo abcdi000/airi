@@ -1,6 +1,7 @@
 import type { DirectPerceptionEnvelope } from '../input'
 import type { AgentTracePort } from '../observability/trace'
 import type { OutboundSecurityAuditPort } from '../policy/outbound-guard'
+import type { CognitiveContextPort } from '../ports/cognitive'
 import type { IdentityPort } from '../ports/identity'
 import type { MemoryPort } from '../ports/memory'
 import type { LanguageModelPort, PlannerModelPort } from '../ports/model'
@@ -41,6 +42,8 @@ export interface LumiAgentRuntimeConfig {
   toolStepTimeoutMs?: number
   /** Maximum time for one Planner model request. @default 90000 */
   plannerRequestTimeoutMs?: number
+  /** Maximum time allowed for automatic shallow recall and cognitive assembly. @default 3000 */
+  cognitiveContextTimeoutMs?: number
   /** Allows `tool_search` to discover deferred MCP, plugin, and Tool Mesh tools. @default true */
   deferredToolsEnabled?: boolean
   /** Allows the social-language port to run its model-backed precise expression selector. @default true */
@@ -100,6 +103,7 @@ export class LumiAgentRuntime {
     languageModel: LanguageModelPort
     persistence: AgentPersistencePort
     identity: IdentityPort
+    cognitive?: CognitiveContextPort
     memory?: MemoryPort
     replyPolicy: ReplyPolicyPort
     socialLanguage?: SocialLanguagePort
@@ -115,6 +119,7 @@ export class LumiAgentRuntime {
     languageModel: LanguageModelPort
     persistence: AgentPersistencePort
     identity: IdentityPort
+    cognitive?: CognitiveContextPort
     memory?: MemoryPort
     replyPolicy: ReplyPolicyPort
     socialLanguage?: SocialLanguagePort
@@ -130,6 +135,7 @@ export class LumiAgentRuntime {
       languageModel: options.languageModel,
       persistence: options.persistence,
       identity: options.identity,
+      cognitive: options.cognitive,
       memory: options.memory,
       replyPolicy: options.replyPolicy,
       socialLanguage: options.socialLanguage,
@@ -185,6 +191,7 @@ export class LumiAgentRuntime {
         replyer,
         persistence: this.#options.persistence,
         identity: this.#options.identity,
+        cognitive: this.#options.cognitive,
         memory: this.#options.memory,
         replyPolicy: this.#options.replyPolicy,
         socialLanguage: this.#options.socialLanguage,
@@ -209,6 +216,7 @@ function normalizeConfig(config: LumiAgentRuntimeConfig = {}): Required<LumiAgen
     toolMaxConcurrency: boundedInteger(config.toolMaxConcurrency, 4, 1, 32),
     toolStepTimeoutMs: boundedInteger(config.toolStepTimeoutMs, 30_000, 10, 600_000),
     plannerRequestTimeoutMs: boundedInteger(config.plannerRequestTimeoutMs, 90_000, 1_000, 300_000),
+    cognitiveContextTimeoutMs: boundedInteger(config.cognitiveContextTimeoutMs, 3_000, 100, 30_000),
     deferredToolsEnabled: config.deferredToolsEnabled ?? true,
     expressionSelectorEnabled: config.expressionSelectorEnabled ?? true,
     directLanguageFeedbackEnabled: config.directLanguageFeedbackEnabled ?? true,

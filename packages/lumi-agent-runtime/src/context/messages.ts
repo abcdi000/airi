@@ -64,6 +64,8 @@ export interface ReferenceMessage extends ContextMessageBase {
   kind: 'reference'
   referenceType:
     | 'person_profile'
+    | 'cognitive_context'
+    | 'cognitive_expression'
     | 'memory'
     | 'public_group_knowledge'
     | 'behavior'

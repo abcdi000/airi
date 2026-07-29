@@ -1,14 +1,15 @@
-﻿<script setup lang="ts">
-import { useElectronEventaInvoke } from '@proj-airi/electron-vueuse'
+<script setup lang="ts">
 import { electron } from '@proj-airi/electron-eventa'
+import { useElectronEventaInvoke } from '@proj-airi/electron-vueuse'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
 import { useLumiAgentStore } from '@proj-airi/stage-ui/stores/lumi-agent'
 import { useLocalStorage } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import { electronOpenSettings, electronStartDraggingWindow, electronWindowAnimateBounds, electronWindowClose, electronWindowSetAlwaysOnTop, electronWindowStopBoundsAnimation } from '../../shared/eventa'
 import InteractiveArea from '../components/InteractiveArea.vue'
+
+import { electronOpenSettings, electronStartDraggingWindow, electronWindowAnimateBounds, electronWindowClose, electronWindowSetAlwaysOnTop, electronWindowStopBoundsAnimation } from '../../shared/eventa'
 import { useChatSyncStore } from '../stores/chat-sync'
 import { useLumiProactiveVisionStore } from '../stores/lumi-proactive-vision'
 import { useStageWindowLifecycleStore } from '../stores/stage-window-lifecycle'
@@ -216,7 +217,8 @@ function workAreaForBounds(bounds: MiniChatBounds, displays: Array<{ workArea: M
       distance: Math.abs(center.x - (display.workArea.x + display.workArea.width / 2))
         + Math.abs(center.y - (display.workArea.y + display.workArea.height / 2)),
     }))
-    .sort((a, b) => a.distance - b.distance)[0]?.area
+    .sort((a, b) => a.distance - b.distance)[0]
+    ?.area
 }
 
 function nearestDockEdge(bounds: MiniChatBounds, area: MiniChatWorkArea, includeCollapsed = false): MiniChatDockEdge | null {
@@ -391,6 +393,24 @@ function stopDragSettleWatcher() {
   dragSettleTimer = undefined
 }
 
+function stopEdgeMonitor() {
+  if (!edgeMonitorTimer)
+    return
+
+  clearInterval(edgeMonitorTimer)
+  edgeMonitorTimer = undefined
+}
+
+function syncEdgeMonitor() {
+  stopEdgeMonitor()
+  if (!edgeDockEnabled.value)
+    return
+
+  edgeMonitorTimer = setInterval(() => {
+    void inspectEdgeDockState().catch(error => console.warn('[mini-chat] edge dock monitor failed', error))
+  }, 320)
+}
+
 function startDragSettleWatcher() {
   stopDragSettleWatcher()
   dragSettleLastBounds = ''
@@ -529,6 +549,10 @@ watch(alwaysOnTop, (value) => {
   void setAlwaysOnTop(Boolean(value))
 }, { immediate: true })
 
+watch(edgeDockEnabled, () => {
+  syncEdgeMonitor()
+})
+
 watch(() => messages.value.length, (count) => {
   if (!flashReady) {
     seenMessageCount = count
@@ -556,9 +580,7 @@ onMounted(() => {
     flashReady = true
   }, 1200)
   window.addEventListener('resize', markWindowResizing)
-  edgeMonitorTimer = setInterval(() => {
-    void inspectEdgeDockState().catch(error => console.warn('[mini-chat] edge dock monitor failed', error))
-  }, 320)
+  syncEdgeMonitor()
 })
 
 onBeforeUnmount(() => {
@@ -566,8 +588,7 @@ onBeforeUnmount(() => {
     clearTimeout(flashTimer)
   if (readyTimer)
     clearTimeout(readyTimer)
-  if (edgeMonitorTimer)
-    clearInterval(edgeMonitorTimer)
+  stopEdgeMonitor()
   if (dragGuardTimer)
     clearTimeout(dragGuardTimer)
   if (resizeSettledTimer)
@@ -628,7 +649,7 @@ function closeMiniChat() {
     @mousemove="handlePointerMove"
   >
     <div
-      class="h-10 shrink-0 cursor-move select-none flex items-center justify-between border-b border-neutral-200/70 px-3 dark:border-neutral-800/70"
+      class="h-10 flex shrink-0 cursor-move select-none items-center justify-between border-b border-neutral-200/70 px-3 dark:border-neutral-800/70"
       @mousedown="handleTitleMouseDown"
       @mouseup="handleTitleMouseUp"
     >
@@ -638,7 +659,7 @@ function closeMiniChat() {
       </div>
       <div class="flex items-center gap-1" data-mini-chat-no-drag>
         <button
-          class="h-7 w-7 flex items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-45 dark:hover:bg-neutral-800"
+          class="h-7 w-7 flex items-center justify-center rounded-md text-neutral-500 transition-colors disabled:cursor-not-allowed hover:bg-neutral-100 disabled:opacity-45 dark:hover:bg-neutral-800"
           type="button"
           title="观察一次屏幕"
           :disabled="proactiveProcessing"
@@ -685,7 +706,7 @@ function closeMiniChat() {
     </div>
 
     <div class="shrink-0 border-b border-neutral-200/60 px-3 py-1.5 text-xs text-neutral-600 dark:border-neutral-800/70 dark:text-neutral-300">
-      <div class="flex min-w-0 items-center gap-2">
+      <div class="min-w-0 flex items-center gap-2">
         <span
           :class="[
             'size-2 shrink-0 rounded-full',
@@ -742,4 +763,3 @@ function closeMiniChat() {
 meta:
   layout: stage
 </route>
-

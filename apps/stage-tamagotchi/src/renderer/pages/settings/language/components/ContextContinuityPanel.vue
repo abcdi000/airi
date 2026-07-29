@@ -2,7 +2,7 @@
 import { useLumiMainTimelineStore } from '@proj-airi/stage-ui/stores/lumi-main-timeline'
 import { Button, FieldInput } from '@proj-airi/ui'
 import { storeToRefs } from 'pinia'
-import { computed } from 'vue'
+import { computed, shallowRef } from 'vue'
 
 const store = useLumiMainTimelineStore()
 const {
@@ -15,6 +15,17 @@ const {
 const summaries = computed(() =>
   Object.values(conversationSummaries.value).sort((left, right) => right.updatedAt - left.updatedAt),
 )
+const visibleSummaryCount = shallowRef(20)
+const summaryBatchSize = 20
+const visibleSummaries = computed(() => summaries.value.slice(0, visibleSummaryCount.value))
+const hasMoreSummaries = computed(() => visibleSummaries.value.length < summaries.value.length)
+
+function loadMoreSummaries(event: Event) {
+  const target = event.currentTarget as HTMLElement
+  const reachedEnd = target.scrollTop + target.clientHeight >= target.scrollHeight - 120
+  if (reachedEnd && hasMoreSummaries.value)
+    visibleSummaryCount.value += summaryBatchSize
+}
 const contextWindow = computed({
   get: () => maxContextTokens.value,
   set: value => maxContextTokens.value = Number(value),
@@ -92,9 +103,20 @@ function clearAllSummaries() {
         </Button>
       </div>
 
-      <div v-if="summaries.length" :class="['divide-y divide-neutral-200 border-y border-neutral-200 dark:divide-neutral-800 dark:border-neutral-800']">
+      <div
+        v-if="summaries.length"
+        :class="[
+          'max-h-[70dvh]',
+          'overflow-y-auto',
+          'overscroll-contain',
+          'divide-y divide-neutral-200 border-y border-neutral-200',
+          'pr-2 [scrollbar-gutter:stable]',
+          'dark:divide-neutral-800 dark:border-neutral-800',
+        ]"
+        @scroll="loadMoreSummaries"
+      >
         <article
-          v-for="summary in summaries"
+          v-for="summary in visibleSummaries"
           :key="summary.conversationId"
           :class="['flex flex-col gap-3 py-5']"
         >
@@ -118,6 +140,9 @@ function clearAllSummaries() {
           </div>
           <pre :class="['max-h-52 overflow-auto whitespace-pre-wrap text-sm leading-6 text-neutral-600 dark:text-neutral-300']">{{ summary.summary }}</pre>
         </article>
+        <div :class="['py-3 text-center text-xs tabular-nums text-neutral-500']">
+          {{ visibleSummaries.length }} / {{ summaries.length }}
+        </div>
       </div>
       <div v-else :class="['border-y border-neutral-200 py-12 text-center text-sm text-neutral-500 dark:border-neutral-800']">
         暂无摘要。当前会话尚未接近上下文预算。

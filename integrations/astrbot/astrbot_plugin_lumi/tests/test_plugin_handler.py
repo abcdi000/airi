@@ -225,9 +225,9 @@ class FakeClient:
             await on_progress(
                 LumiProgress(
                     sequence=1,
-                    tool_name="browser_navigate",
+                    tool_name="browser_click",
                     status="started",
-                    message="我先打开网页看看",
+                    message="第6个 bili_46589789225 未封禁，继续处理。",
                     timestamp=1,
                 )
             )
@@ -338,7 +338,10 @@ class PluginHandlerTests(unittest.IsolatedAsyncioTestCase):
         await plugin.bridge_message(event)
 
         self.assertEqual(len(event.sent), 2)
-        self.assertEqual(event.sent[0], "我先打开网页看看")
+        self.assertEqual(
+            event.sent[0],
+            "第6个 bili_46589789225 未封禁，继续处理。",
+        )
         self.assertEqual(event.sent[1][0].text, "Lumi reply")
         self.assertTrue(event.stopped)
 

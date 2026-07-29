@@ -33,7 +33,7 @@ const props = withDefaults(defineProps<{
   variant: 'desktop',
   toolCallRenderers: () => ({}),
   baseIndex: 0,
-  initialRenderLimit: 160,
+  initialRenderLimit: 80,
   pageSize: 80,
 })
 
@@ -64,30 +64,36 @@ function shouldShowPlaceholder(message: ChatHistoryItem) {
 
   return message.context?.createdAt === ts || message.createdAt === ts
 }
-const fullRenderMessages = computed<ChatHistoryItem[]>(() => {
-  // Preserve array positions so delete/retry actions still address the original
-  // session entry while runtime diagnostics use the assistant card renderer.
-  const visibleMessages = props.messages.map(projectHistoryMessage)
+const sourceMessages = computed<ChatHistoryItem[]>(() => {
   if (!props.sending)
-    return visibleMessages
+    return props.messages
 
   const streamTs = streamingTs.value
   if (!streamTs)
-    return visibleMessages
+    return props.messages
 
-  const hasStreamAlready = streamTs && visibleMessages.some(msg => msg?.role === 'assistant' && msg?.createdAt === streamTs)
-  if (hasStreamAlready)
-    return visibleMessages
+  // Search from the newest entry because streamed messages are appended at the
+  // tail. This preserves diagnostic projection semantics without allocating a
+  // projected copy of the entire conversation for every streamed chunk.
+  for (let index = props.messages.length - 1; index >= 0; index -= 1) {
+    const message = projectHistoryMessage(props.messages[index])
+    if (message.role === 'assistant' && message.createdAt === streamTs)
+      return props.messages
+  }
 
-  return [...visibleMessages, streaming.value]
+  return [...props.messages, streaming.value]
 })
 
 const pagedStartOffset = ref(0)
-const renderMessages = computed<ChatHistoryItem[]>(() => fullRenderMessages.value.slice(pagedStartOffset.value))
+const renderMessages = computed<ChatHistoryItem[]>(() =>
+  sourceMessages.value
+    .slice(pagedStartOffset.value)
+    .map(projectHistoryMessage),
+)
 const canLoadEarlier = computed(() => pagedStartOffset.value > 0)
 
 watch(
-  () => [fullRenderMessages.value.length, props.initialRenderLimit] as const,
+  () => [sourceMessages.value.length, props.initialRenderLimit] as const,
   ([length, limit], previous) => {
     const previousLength = previous?.[0]
     const nextDefaultStart = Math.max(0, length - limit)
@@ -109,12 +115,13 @@ function getOriginalIndex(localIndex: number) {
   return props.baseIndex + pagedStartOffset.value + localIndex
 }
 
-function getFullLocalIndex(localIndex: number) {
-  return pagedStartOffset.value + localIndex
-}
-
 function loadEarlierMessages() {
   pagedStartOffset.value = Math.max(0, pagedStartOffset.value - props.pageSize)
+}
+
+function previousMessageRole(localIndex: number) {
+  const previous = sourceMessages.value[pagedStartOffset.value + localIndex - 1]
+  return previous ? projectHistoryMessage(previous).role : undefined
 }
 
 function emitCopyMessage(message: ChatHistoryItem, index: number) {
@@ -146,7 +153,7 @@ function emitRetryMessage(message: ChatHistoryItem, index: number) {
 </script>
 
 <template>
-  <div ref="chatHistoryRef" v-auto-animate flex="~ col" relative h-full w-full overflow-y-auto rounded-xl px="<sm:2" py="<sm:2" :class="variant === 'mobile' ? 'gap-1' : 'gap-2'">
+  <div ref="chatHistoryRef" flex="~ col" relative h-full w-full overflow-y-auto rounded-xl px="<sm:2" py="<sm:2" :class="variant === 'mobile' ? 'gap-1' : 'gap-2'">
     <button
       v-if="canLoadEarlier"
       type="button"
@@ -167,7 +174,7 @@ function emitRetryMessage(message: ChatHistoryItem, index: number) {
           :message="message"
           :label="labels.error"
           :retry-label="labels.retry"
-          :can-retry="fullRenderMessages[getFullLocalIndex(index) - 1]?.role === 'user'"
+          :can-retry="previousMessageRole(index) === 'user'"
           :show-placeholder="sending && index === renderMessages.length - 1"
           :variant="variant"
           @copy="emitCopyMessage(message, index)"

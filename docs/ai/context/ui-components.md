@@ -382,6 +382,9 @@ Searchable dropdown/autocomplete using reka-ui with grouping.
 | `openOnClick` | `boolean?` | `true` | Auto-open dropdown on click |
 | `contentMinWidth` | `string \| number?` | — | Dropdown min width |
 | `contentWidth` | `string \| number?` | — | Dropdown width |
+| `incrementalRender` | `boolean?` | `true` | Render options in batches while scrolling to avoid large initial DOM trees |
+| `initialOptionCount` | `number?` | `36` | Number of options rendered when the dropdown opens or the search changes |
+| `optionBatchSize` | `number?` | `36` | Number of additional options rendered near the bottom of the dropdown |
 
 **v-model**: `modelValue: T`
 **Slots**: `option({ option })`, `empty`
@@ -400,6 +403,9 @@ Simplified Combobox wrapper for string/number options.
 | `layout` | `'horizontal' \| 'vertical'?` | — | Layout direction |
 | `contentMinWidth` | `string \| number?` | — | Dropdown min width |
 | `contentWidth` | `string \| number?` | — | Dropdown width |
+| `incrementalRender` | `boolean?` | `true` | Render options incrementally while scrolling |
+| `initialOptionCount` | `number?` | `36` | Initial rendered option count |
+| `optionBatchSize` | `number?` | `36` | Additional options rendered per batch |
 
 **v-model**: `modelValue: string | number`
 **Slots**: `option({ option })`, `empty`

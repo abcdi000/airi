@@ -16,9 +16,15 @@ const props = withDefaults(defineProps<{
   layout?: 'horizontal' | 'vertical'
   contentMinWidth?: string | number
   contentWidth?: string | number
+  incrementalRender?: boolean
+  initialOptionCount?: number
+  optionBatchSize?: number
 }>(), {
   disabled: false,
   openOnClick: true,
+  incrementalRender: true,
+  initialOptionCount: 36,
+  optionBatchSize: 36,
 })
 
 const modelValue = defineModel<string | number>({ required: false })
@@ -33,6 +39,9 @@ const modelValue = defineModel<string | number>({ required: false })
     :content-min-width="props.contentMinWidth"
     :content-width="props.contentWidth"
     :placeholder="props.placeholder"
+    :incremental-render="props.incrementalRender"
+    :initial-option-count="props.initialOptionCount"
+    :option-batch-size="props.optionBatchSize"
   >
     <template
       v-if="$slots.option"

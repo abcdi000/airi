@@ -10,9 +10,9 @@ import { errorMessageFrom } from '@moeru/std'
 import { useElectronEventaInvoke } from '@proj-airi/electron-vueuse'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useLumiSocialLanguageStore } from '@proj-airi/stage-ui/stores/lumi-social-language'
-import { useIntervalFn } from '@vueuse/core'
+import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
-import { computed, shallowRef, toValue } from 'vue'
+import { computed, shallowRef, toValue, watch } from 'vue'
 
 import {
   electronLumiAstrBotGatewayGetState,
@@ -63,14 +63,38 @@ export function useAstrBotLearningMonitor(options: {
   const gatewayState = shallowRef<ElectronLumiAstrBotGatewayState>()
   const isReprocessing = shallowRef(false)
   const reprocessResult = shallowRef<string>()
-  useIntervalFn(() => {
-    if (toValue(options.groupObservationEnabled)) {
-      void store.refreshFromPersistence()
-      void getGatewayState()
+  const documentVisibility = useDocumentVisibility()
+  let refreshPromise: Promise<void> | undefined
+
+  function refreshMonitor() {
+    if (refreshPromise || !toValue(options.groupObservationEnabled))
+      return refreshPromise
+
+    refreshPromise = Promise.all([
+      store.refreshFromPersistence(),
+      getGatewayState()
         .then(state => gatewayState.value = state)
-        .catch(() => undefined)
-    }
-  }, 750, { immediateCallback: true })
+        .catch(() => undefined),
+    ])
+      .then(() => undefined)
+      .finally(() => {
+        refreshPromise = undefined
+      })
+    return refreshPromise
+  }
+
+  const refreshTimer = useIntervalFn(() => {
+    void refreshMonitor()
+  }, 2_000, { immediate: false })
+
+  watch([() => toValue(options.groupObservationEnabled), documentVisibility], ([enabled, visibility]) => {
+    refreshTimer.pause()
+    if (!enabled || visibility !== 'visible')
+      return
+
+    void refreshMonitor()
+    refreshTimer.resume()
+  }, { immediate: true })
 
   const sourceNames = computed(() => new Map(
     toValue(options.groups).map(group => [group.id, group.displayName || group.groupId]),

@@ -1372,7 +1372,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
                 interaction,
                 ...(event.data.perception
                   ? {
-                      onAgentToolProgress: async (progress) => {
+                      onAgentToolProgress: (progress) => {
                         const route = roomReplyRoute(sourceInstanceId)
                         if (!route)
                           return

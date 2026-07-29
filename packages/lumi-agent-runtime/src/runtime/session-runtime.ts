@@ -520,7 +520,13 @@ export class SessionRuntime {
       }
       consecutiveNoToolSteps = 0
 
-      await this.#executeToolCalls(step.toolCalls, turn, availability, controller)
+      await this.#executeToolCalls(
+        step.toolCalls,
+        turn,
+        availability,
+        controller,
+        extractPlannerPublicProgressText(step.content),
+      )
       await this.#finishRound()
       if (!turn.replyAttempted && round === this.#config.plannerMaxRounds) {
         await this.#executeRecoveryReply(turn, availability, controller)
@@ -626,6 +632,7 @@ export class SessionRuntime {
     turn: ActiveTurn,
     availability: ToolAvailabilityContext,
     controller: AbortController,
+    publicProgressText?: string,
   ): Promise<void> {
     const executionStartedAt = Date.now()
     await Promise.all(calls.map(async call => await this.#trace?.record({
@@ -634,6 +641,7 @@ export class SessionRuntime {
       stepId: call.id,
       toolName: call.name,
       status: 'started',
+      ...(publicProgressText ? { publicProgressText } : {}),
       timestamp: executionStartedAt,
     })))
     let execution
@@ -1223,6 +1231,55 @@ class PlannerToolSelectionError extends Error {
     super('Planner returned no tool call while the runtime required one')
     this.name = 'PlannerToolSelectionError'
   }
+}
+
+/**
+ * Extracts the first user-visible sentence from one Planner step.
+ *
+ * Before:
+ * - "第6个账号未封禁，继续处理。\n后面的内部说明"
+ *
+ * After:
+ * - "第6个账号未封禁，继续处理。"
+ */
+function extractPlannerPublicProgressText(content: string): string | undefined {
+  let visible = content.replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim()
+  if (!visible)
+    return undefined
+
+  const internalMarkerIndex = visible.search(
+    /\[(?:memory_search|memory_write|system_notice|tool_execution|planner_trace)\]/i,
+  )
+  if (internalMarkerIndex === 0)
+    return undefined
+  if (internalMarkerIndex > 0)
+    visible = visible.slice(0, internalMarkerIndex).trim()
+  if (!visible)
+    return undefined
+
+  if (visible.startsWith('{') || visible.startsWith('[')) {
+    try {
+      const structured = JSON.parse(visible)
+      if (structured !== null && typeof structured === 'object')
+        return undefined
+    }
+    catch {
+      // Normal conversational text may begin with punctuation resembling JSON.
+    }
+  }
+
+  const lineEnd = visible.indexOf('\n')
+  const sentenceEnd = visible.search(/[。！？!?]/u)
+  let end = visible.length
+  if (lineEnd >= 0)
+    end = Math.min(end, lineEnd)
+  if (sentenceEnd >= 0)
+    end = Math.min(end, sentenceEnd + 1)
+
+  const sentence = visible.slice(0, end).trim()
+  if (!sentence)
+    return undefined
+  return sentence.slice(0, 320).trim()
 }
 
 async function executeAbortableRequest<T>(options: {

@@ -583,6 +583,71 @@ describe('lumiAgentRuntime direct session', () => {
 
   // ROOT CAUSE:
   //
+  // Tool progress only exposed the tool name and execution status. The desktop
+  // gateway therefore invented fixed action phrases instead of forwarding the
+  // Planner's public text for the current step.
+  //
+  // We fixed this by carrying only the first visible sentence from Planner
+  // `content` on the started trace. Planner `reasoning` remains private.
+  /** @example A Planner status sentence is attached to the matching tool start. */
+  it('attaches the first public Planner sentence to tool-start progress', async () => {
+    const traces: AgentTraceEvent[] = []
+    const plannerModel = {
+      generateStep: vi.fn()
+        .mockResolvedValueOnce({
+          content: '第6个 bili_46589789225 未封禁，继续处理。\n后面的说明不应作为进度发送。',
+          reasoning: '这是不能发送到 QQ 的隐藏推理。',
+          toolCalls: [toolCall('browser-1', 'browser_click', { selector: '#confirm' })],
+          modelName: 'fake-planner',
+        })
+        .mockResolvedValueOnce(plannerStep([replyCall()])),
+    }
+    const harness = createHarness({
+      plannerModel,
+      tools: {
+        registerTools(registry) {
+          registry.register({
+            name: 'browser_click',
+            description: 'Clicks one browser element.',
+            inputSchema: {
+              type: 'object',
+              properties: { selector: { type: 'string' } },
+              required: ['selector'],
+              additionalProperties: false,
+            },
+            provider: 'test',
+            visibility: 'visible',
+            stage: 'planner',
+            chatScope: 'direct',
+            riskLevel: 'low',
+            executionMode: 'automatic',
+            sideEffectType: 'write',
+            idempotencyPolicy: 'optional',
+            requiredScopes: [],
+            async handler() {
+              return { success: true, output: { clicked: true } }
+            },
+          })
+        },
+      },
+      trace: event => traces.push(event),
+    })
+
+    await harness.runtime.ingestDirect(envelope(1, '继续处理这些账号'))
+
+    const startedTrace = traces.find(event =>
+      event.type === 'tool_execution'
+      && event.toolName === 'browser_click'
+      && event.status === 'started',
+    )
+    expect(startedTrace).toMatchObject({
+      publicProgressText: '第6个 bili_46589789225 未封禁，继续处理。',
+    })
+    expect(JSON.stringify(startedTrace)).not.toContain('隐藏推理')
+  })
+
+  // ROOT CAUSE:
+  //
   // `toolChoice: required` only required one of the advertised tools. When the
   // user explicitly said "从记忆里查", the provider could still choose `reply`
   // immediately and let Replyer claim that Lumi already knew the answer.

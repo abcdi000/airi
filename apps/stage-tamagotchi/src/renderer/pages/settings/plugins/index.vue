@@ -8,8 +8,10 @@ import { useLumiToolMeshStore } from '@proj-airi/stage-ui/stores/lumi-tool-mesh'
 import { Button, Callout, FieldCheckbox, FieldCombobox, FieldInput, FieldRange } from '@proj-airi/ui'
 import { useLocalStorage } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
+
+import VisionCapturePreview from './components/visionCapturePreview.vue'
 
 import { electronAppOpenPath, electronOpenMiniChat } from '../../../../shared/eventa'
 import { useLumiAutonomousLifeStore } from '../../../stores/lumi-autonomous-life'
@@ -18,7 +20,6 @@ import { useLumiProactiveVisionStore } from '../../../stores/lumi-proactive-visi
 import { useLumiSelfAdjustmentStore } from '../../../stores/lumi-self-adjustment'
 import { useLumiSelfTodoStore } from '../../../stores/lumi-self-todo'
 import { useTamagotchiPluginToolsStore } from '../../../stores/plugin-tools'
-import VisionCapturePreview from './components/visionCapturePreview.vue'
 
 const pluginStore = usePluginHostInspectorStore()
 const proactiveVisionStore = useLumiProactiveVisionStore()
@@ -161,6 +162,19 @@ const selfProjectTargetPathDraft = ref('')
 const selfTodoContentDraft = ref('')
 const selfProgressNoteDraft = ref('')
 const selfDeliverablePathsDraft = ref('')
+const activatedDetails = shallowRef(new Set<string>())
+
+function activateDetail(id: string, event: Event) {
+  const details = event.currentTarget
+  if (!(details instanceof HTMLDetailsElement) || !details.open || activatedDetails.value.has(id))
+    return
+
+  activatedDetails.value = new Set([...activatedDetails.value, id])
+}
+
+function detailActivated(id: string) {
+  return activatedDetails.value.has(id)
+}
 
 const builtInPlugins = computed(() => [
   {
@@ -1050,32 +1064,59 @@ onMounted(async () => {
     </Section>
 
     <Section title="Lumi Tool Mesh" icon="i-solar:widget-5-bold-duotone" inner-class="gap-4">
-      <details :class="['rounded-lg', 'border', 'border-cyan-500/20', 'bg-cyan-50/60', 'p-4', 'dark:bg-cyan-950/20']">
+      <details
+        :class="['rounded-lg', 'border', 'border-cyan-500/20', 'bg-cyan-50/60', 'p-4', 'dark:bg-cyan-950/20']"
+        @toggle="activateDetail('tool-mesh', $event)"
+      >
         <summary :class="['cursor-pointer', 'select-none', 'font-semibold']">
           工具网格调试
         </summary>
 
-        <div :class="['mt-4', 'grid', 'gap-4']">
+        <div v-if="detailActivated('tool-mesh')" :class="['mt-4', 'grid', 'gap-4']">
           <div :class="['grid', 'gap-3', 'md:grid-cols-4']">
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-              <div :class="['text-xs', 'opacity-70']">已注册</div>
-              <div :class="['text-2xl', 'font-semibold']">{{ toolMeshDefinitions.length }}</div>
-              <div :class="['text-xs', 'opacity-60']">可执行 {{ toolMeshImplementedCount }}</div>
+              <div :class="['text-xs', 'opacity-70']">
+                已注册
+              </div>
+              <div :class="['text-2xl', 'font-semibold']">
+                {{ toolMeshDefinitions.length }}
+              </div>
+              <div :class="['text-xs', 'opacity-60']">
+                可执行 {{ toolMeshImplementedCount }}
+              </div>
             </div>
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-              <div :class="['text-xs', 'opacity-70']">可写工具</div>
-              <div :class="['text-2xl', 'font-semibold']">{{ toolMeshWritableCount }}</div>
-              <div :class="['text-xs', 'opacity-60']">高风险 {{ toolMeshHighRiskCount }}</div>
+              <div :class="['text-xs', 'opacity-70']">
+                可写工具
+              </div>
+              <div :class="['text-2xl', 'font-semibold']">
+                {{ toolMeshWritableCount }}
+              </div>
+              <div :class="['text-xs', 'opacity-60']">
+                高风险 {{ toolMeshHighRiskCount }}
+              </div>
             </div>
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-              <div :class="['text-xs', 'opacity-70']">进程工具</div>
-              <div :class="['text-2xl', 'font-semibold']">{{ toolMeshExecutableCount }}</div>
-              <div :class="['text-xs', 'opacity-60']">Claude / MCP / 沙箱</div>
+              <div :class="['text-xs', 'opacity-70']">
+                进程工具
+              </div>
+              <div :class="['text-2xl', 'font-semibold']">
+                {{ toolMeshExecutableCount }}
+              </div>
+              <div :class="['text-xs', 'opacity-60']">
+                Claude / MCP / 沙箱
+              </div>
             </div>
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-              <div :class="['text-xs', 'opacity-70']">聊天入口</div>
-              <div :class="['text-lg', 'font-semibold']">{{ toolMeshRegisteredLlmTool ? '已注册' : '未注册' }}</div>
-              <div :class="['text-xs', 'opacity-60']">{{ toolMeshWaitingForConfirmation ? '等待确认' : '空闲' }}</div>
+              <div :class="['text-xs', 'opacity-70']">
+                聊天入口
+              </div>
+              <div :class="['text-lg', 'font-semibold']">
+                {{ toolMeshRegisteredLlmTool ? '已注册' : '未注册' }}
+              </div>
+              <div :class="['text-xs', 'opacity-60']">
+                {{ toolMeshWaitingForConfirmation ? '等待确认' : '空闲' }}
+              </div>
             </div>
           </div>
 
@@ -1091,13 +1132,17 @@ onMounted(async () => {
           </div>
 
           <div v-if="toolMeshLastInjectionSummary" :class="['rounded-lg', 'bg-white/70', 'p-3', 'text-xs', 'dark:bg-neutral-950/50']">
-            <div :class="['mb-1', 'font-semibold']">最近注入摘要</div>
+            <div :class="['mb-1', 'font-semibold']">
+              最近注入摘要
+            </div>
             <pre :class="['max-h-32', 'overflow-auto', 'whitespace-pre-wrap']">{{ toolMeshLastInjectionSummary }}</pre>
           </div>
 
           <div :class="['grid', 'gap-3', 'lg:grid-cols-2']">
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-              <div :class="['mb-2', 'font-semibold']">最近工具调用</div>
+              <div :class="['mb-2', 'font-semibold']">
+                最近工具调用
+              </div>
               <div v-if="toolMeshRecentVisibleLogs.length === 0" :class="['text-sm', 'opacity-70']">
                 还没有工具调用日志。
               </div>
@@ -1112,13 +1157,17 @@ onMounted(async () => {
                     <span>{{ entry.status }}</span>
                     <span>{{ formatDateTime(Date.parse(entry.createdAt)) }}</span>
                   </div>
-                  <div v-if="entry.error" :class="['mt-1', 'text-red-400']">{{ entry.error }}</div>
+                  <div v-if="entry.error" :class="['mt-1', 'text-red-400']">
+                    {{ entry.error }}
+                  </div>
                 </div>
               </div>
             </div>
 
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-              <div :class="['mb-2', 'font-semibold']">最近工具计划</div>
+              <div :class="['mb-2', 'font-semibold']">
+                最近工具计划
+              </div>
               <div v-if="toolMeshRecentVisiblePlans.length === 0" :class="['text-sm', 'opacity-70']">
                 还没有工具计划。
               </div>
@@ -1280,12 +1329,15 @@ onMounted(async () => {
         <Button label="刷新屏幕来源" icon="i-solar:refresh-bold-duotone" variant="secondary" :loading="isRefetching" @click="refreshSources" />
       </div>
 
-      <details :class="['rounded-lg', 'border', 'border-cyan-500/20', 'bg-cyan-50/60', 'p-4', 'dark:bg-cyan-950/20']">
+      <details
+        :class="['rounded-lg', 'border', 'border-cyan-500/20', 'bg-cyan-50/60', 'p-4', 'dark:bg-cyan-950/20']"
+        @toggle="activateDetail('autonomous-actions', $event)"
+      >
         <summary :class="['cursor-pointer', 'select-none', 'font-semibold']">
           自主行动
         </summary>
 
-        <div :class="['mt-4', 'grid', 'gap-4']">
+        <div v-if="detailActivated('autonomous-actions')" :class="['mt-4', 'grid', 'gap-4']">
           <div :class="['grid', 'gap-3', 'md:grid-cols-2']">
             <FieldCheckbox
               v-model="autonomousEnabled"
@@ -1396,20 +1448,36 @@ onMounted(async () => {
 
               <div :class="['grid', 'gap-3', 'md:grid-cols-4']">
                 <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-                  <div :class="['text-xs', 'opacity-70']">今日行动</div>
-                  <div :class="['text-2xl', 'font-semibold']">{{ lifeTickTodayActionCount }}</div>
+                  <div :class="['text-xs', 'opacity-70']">
+                    今日行动
+                  </div>
+                  <div :class="['text-2xl', 'font-semibold']">
+                    {{ lifeTickTodayActionCount }}
+                  </div>
                 </div>
                 <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-                  <div :class="['text-xs', 'opacity-70']">连续失败</div>
-                  <div :class="['text-2xl', 'font-semibold']">{{ lifeTickConsecutiveFailureCount }}</div>
+                  <div :class="['text-xs', 'opacity-70']">
+                    连续失败
+                  </div>
+                  <div :class="['text-2xl', 'font-semibold']">
+                    {{ lifeTickConsecutiveFailureCount }}
+                  </div>
                 </div>
                 <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-                  <div :class="['text-xs', 'opacity-70']">想法池</div>
-                  <div :class="['text-2xl', 'font-semibold']">{{ lifeTickIdeas.length }}</div>
+                  <div :class="['text-xs', 'opacity-70']">
+                    想法池
+                  </div>
+                  <div :class="['text-2xl', 'font-semibold']">
+                    {{ lifeTickIdeas.length }}
+                  </div>
                 </div>
                 <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'dark:bg-neutral-950/50']">
-                  <div :class="['text-xs', 'opacity-70']">反思</div>
-                  <div :class="['text-2xl', 'font-semibold']">{{ lifeTickReflections.length }}</div>
+                  <div :class="['text-xs', 'opacity-70']">
+                    反思
+                  </div>
+                  <div :class="['text-2xl', 'font-semibold']">
+                    {{ lifeTickReflections.length }}
+                  </div>
                 </div>
               </div>
 
@@ -1773,26 +1841,44 @@ onMounted(async () => {
 
           <div :class="['grid', 'gap-3', 'md:grid-cols-4']">
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'text-sm', 'dark:bg-neutral-950/50']">
-              <div :class="['opacity-70']">今日主动发言</div>
-              <div :class="['text-2xl', 'font-semibold']">{{ todayProactiveMessageCount }}</div>
+              <div :class="['opacity-70']">
+                今日主动发言
+              </div>
+              <div :class="['text-2xl', 'font-semibold']">
+                {{ todayProactiveMessageCount }}
+              </div>
             </div>
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'text-sm', 'dark:bg-neutral-950/50']">
-              <div :class="['opacity-70']">未回应次数</div>
-              <div :class="['text-2xl', 'font-semibold']">{{ ignoredProactiveStreak }}</div>
+              <div :class="['opacity-70']">
+                未回应次数
+              </div>
+              <div :class="['text-2xl', 'font-semibold']">
+                {{ ignoredProactiveStreak }}
+              </div>
             </div>
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'text-sm', 'dark:bg-neutral-950/50']">
-              <div :class="['opacity-70']">低变化次数</div>
-              <div :class="['text-2xl', 'font-semibold']">{{ lowChangeStreak }}</div>
+              <div :class="['opacity-70']">
+                低变化次数
+              </div>
+              <div :class="['text-2xl', 'font-semibold']">
+                {{ lowChangeStreak }}
+              </div>
             </div>
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'text-sm', 'dark:bg-neutral-950/50']">
-              <div :class="['opacity-70']">无推进次数</div>
-              <div :class="['text-2xl', 'font-semibold']">{{ noProgressStreak }}</div>
+              <div :class="['opacity-70']">
+                无推进次数
+              </div>
+              <div :class="['text-2xl', 'font-semibold']">
+                {{ noProgressStreak }}
+              </div>
             </div>
           </div>
 
           <div :class="['grid', 'gap-3', 'lg:grid-cols-2']">
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'text-sm', 'dark:bg-neutral-950/50']">
-              <div :class="['mb-2', 'font-semibold']">最近决策日志</div>
+              <div :class="['mb-2', 'font-semibold']">
+                最近决策日志
+              </div>
               <div :class="['mb-3', 'grid', 'gap-2', 'md:grid-cols-2']">
                 <div :class="['rounded-md', 'bg-cyan-950/5', 'p-2', 'text-xs', 'dark:bg-cyan-50/5']">
                   <div :class="['font-semibold']">
@@ -1884,15 +1970,23 @@ onMounted(async () => {
                   :key="entry.id"
                   :class="['rounded-md', 'bg-cyan-950/5', 'p-2', 'text-xs', 'dark:bg-cyan-50/5']"
                 >
-                  <div :class="['font-semibold']">{{ entry.desire || entry.selectedAction }} · {{ entry.selectedMode || entry.selectedAction }} · {{ entry.result }}</div>
-                  <div :class="['opacity-70']">{{ formatTime(entry.timestamp) }} · {{ entry.targetSpace || 'lumi_world' }} · {{ entry.visibility || 'private' }}</div>
-                  <div :class="['opacity-70']">{{ entry.motivation || entry.reason }}</div>
+                  <div :class="['font-semibold']">
+                    {{ entry.desire || entry.selectedAction }} · {{ entry.selectedMode || entry.selectedAction }} · {{ entry.result }}
+                  </div>
+                  <div :class="['opacity-70']">
+                    {{ formatTime(entry.timestamp) }} · {{ entry.targetSpace || 'lumi_world' }} · {{ entry.visibility || 'private' }}
+                  </div>
+                  <div :class="['opacity-70']">
+                    {{ entry.motivation || entry.reason }}
+                  </div>
                 </div>
               </div>
             </div>
 
             <div :class="['rounded-lg', 'bg-white/70', 'p-3', 'text-sm', 'dark:bg-neutral-950/50']">
-              <div :class="['mb-2', 'font-semibold']">私密笔记</div>
+              <div :class="['mb-2', 'font-semibold']">
+                私密笔记
+              </div>
               <div v-if="privateNotes.length === 0" :class="['text-xs', 'opacity-70']">
                 Lumi 还没有留下私密观察笔记。
               </div>
@@ -1902,8 +1996,12 @@ onMounted(async () => {
                   :key="note.id"
                   :class="['rounded-md', 'bg-emerald-950/5', 'p-2', 'text-xs', 'dark:bg-emerald-50/5']"
                 >
-                  <div :class="['font-semibold']">{{ formatTime(note.createdAt) }} · {{ note.reason }}</div>
-                  <div :class="['whitespace-pre-wrap', 'opacity-80']">{{ note.note }}</div>
+                  <div :class="['font-semibold']">
+                    {{ formatTime(note.createdAt) }} · {{ note.reason }}
+                  </div>
+                  <div :class="['whitespace-pre-wrap', 'opacity-80']">
+                    {{ note.note }}
+                  </div>
                 </div>
               </div>
             </div>

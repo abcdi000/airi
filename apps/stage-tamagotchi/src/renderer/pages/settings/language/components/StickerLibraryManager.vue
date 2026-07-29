@@ -2,15 +2,16 @@
 import type { ElectronLumiStickerRecord } from '../../../../../shared/eventa'
 
 import { Button, DoubleCheckButton, Input } from '@proj-airi/ui'
-import { computed, onMounted, reactive, shallowRef, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, shallowRef, useTemplateRef, watch } from 'vue'
 
 import { useLocalAstrBotGateway } from '../../integrations/astrbot/useLocalAstrBotGateway'
 
 const gateway = useLocalAstrBotGateway()
 const query = shallowRef('')
 const status = shallowRef<'all' | 'owned' | 'discarded'>('owned')
-const page = shallowRef(1)
-const pageSize = 24
+const visibleRecordCount = shallowRef(24)
+const recordBatchSize = 24
+const stickerViewport = useTemplateRef<HTMLDivElement>('stickerViewport')
 const previews = reactive<Record<string, string>>({})
 const tagDrafts = reactive<Record<string, string>>({})
 const editingId = shallowRef('')
@@ -23,14 +24,23 @@ const filteredRecords = computed(() => {
     .filter(record => !normalized || record.tags.some(tag => tag.toLocaleLowerCase().includes(normalized)))
     .sort((left, right) => right.lastObservedAt - left.lastObservedAt)
 })
-const pageCount = computed(() => Math.max(1, Math.ceil(filteredRecords.value.length / pageSize)))
-const pagedRecords = computed(() => filteredRecords.value.slice((page.value - 1) * pageSize, page.value * pageSize))
+const visibleRecords = computed(() => filteredRecords.value.slice(0, visibleRecordCount.value))
+const hasMoreRecords = computed(() => visibleRecords.value.length < filteredRecords.value.length)
 
-watch([query, status], () => {
-  page.value = 1
+function loadMoreRecords(event: Event) {
+  const target = event.currentTarget as HTMLElement
+  const reachedEnd = target.scrollTop + target.clientHeight >= target.scrollHeight - 160
+  if (reachedEnd && hasMoreRecords.value)
+    visibleRecordCount.value += recordBatchSize
+}
+
+watch([query, status], async () => {
+  visibleRecordCount.value = recordBatchSize
+  await nextTick()
+  stickerViewport.value?.scrollTo({ top: 0 })
 })
 
-watch(pagedRecords, async (items) => {
+watch(visibleRecords, async (items) => {
   await Promise.all(items.map(loadPreview))
 }, { immediate: true })
 
@@ -125,77 +135,87 @@ function formatTime(timestamp: number) {
     <div v-if="!gateway.state.value" :class="['py-12 text-center text-sm text-neutral-500']">
       正在读取表情包库
     </div>
-    <div v-else-if="!pagedRecords.length" :class="['py-12 text-center text-sm text-neutral-500']">
+    <div v-else-if="!visibleRecords.length" :class="['py-12 text-center text-sm text-neutral-500']">
       当前筛选下没有表情包
     </div>
-    <div v-else :class="['grid grid-cols-2 gap-4 md:grid-cols-3']">
-      <article
-        v-for="record in pagedRecords"
-        :key="record.id"
-        v-motion
-        :initial="{ opacity: 0, scale: 0.98 }"
-        :enter="{ opacity: 1, scale: 1 }"
-        :class="['overflow-hidden rounded-lg border border-neutral-200 bg-neutral-50/70 dark:border-neutral-800 dark:bg-neutral-900/50']"
-      >
-        <div :class="['aspect-square bg-neutral-100 dark:bg-neutral-950']">
-          <img v-if="previews[record.id]" :src="previews[record.id]" alt="" :class="['size-full object-contain']">
-          <div v-else :class="['flex size-full items-center justify-center text-2xl text-neutral-400']">
-            <span class="i-solar:gallery-minimalistic-bold-duotone" />
+    <div
+      v-else
+      ref="stickerViewport"
+      :class="[
+        'max-h-[70dvh]',
+        'overflow-y-auto',
+        'overscroll-contain',
+        'pr-2',
+        '[scrollbar-gutter:stable]',
+      ]"
+      @scroll="loadMoreRecords"
+    >
+      <div :class="['grid grid-cols-2 gap-4 md:grid-cols-3']">
+        <article
+          v-for="record in visibleRecords"
+          :key="record.id"
+          v-motion
+          :initial="{ opacity: 0, scale: 0.98 }"
+          :enter="{ opacity: 1, scale: 1 }"
+          :class="['overflow-hidden rounded-lg border border-neutral-200 bg-neutral-50/70 dark:border-neutral-800 dark:bg-neutral-900/50']"
+        >
+          <div :class="['aspect-square bg-neutral-100 dark:bg-neutral-950']">
+            <img v-if="previews[record.id]" :src="previews[record.id]" alt="" :class="['size-full object-contain']">
+            <div v-else :class="['flex size-full items-center justify-center text-2xl text-neutral-400']">
+              <span class="i-solar:gallery-minimalistic-bold-duotone" />
+            </div>
           </div>
-        </div>
-        <div :class="['flex flex-col gap-3 p-3']">
-          <template v-if="editingId === record.id">
-            <Input v-model="tagDrafts[record.id]" placeholder="标签，用逗号分隔" />
-            <div :class="['flex gap-2']">
-              <Button size="sm" @click="saveTags(record)">
-                保存标签
-              </Button>
-              <Button size="sm" variant="secondary" @click="editingId = ''">
-                取消
-              </Button>
-            </div>
-          </template>
-          <template v-else>
-            <div :class="['flex min-h-6 flex-wrap gap-1.5']">
-              <span v-for="tag in record.tags" :key="tag" :class="['rounded bg-primary-500/10 px-2 py-0.5 text-xs text-primary-600 dark:text-primary-300']">{{ tag }}</span>
-              <span v-if="record.tagsManuallyEdited" :class="['rounded bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-600 dark:text-emerald-300']">人工标签</span>
-              <span v-if="!record.tags.length" :class="['text-xs text-amber-600']">尚无标签</span>
-            </div>
-            <p :class="['text-xs text-neutral-500']">
-              观察 {{ record.observedCount }} · 发送 {{ record.sentCount }} · {{ formatTime(record.lastObservedAt) }}
-            </p>
-            <div :class="['flex flex-wrap gap-2']">
-              <Button size="sm" variant="secondary" icon="i-solar:pen-bold-duotone" @click="startTagEdit(record)">
-                编辑
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                :icon="record.status === 'owned' ? 'i-solar:archive-down-bold-duotone' : 'i-solar:restart-bold-duotone'"
-                @click="gateway.updateSticker({ id: record.id, status: record.status === 'owned' ? 'discarded' : 'owned' })"
-              >
-                {{ record.status === 'owned' ? '淘汰' : '恢复' }}
-              </Button>
-              <DoubleCheckButton size="sm" variant="danger" @confirm="gateway.deleteSticker(record.id)">
-                删除
-                <template #confirm>
-                  永久删除
-                </template>
-                <template #cancel>
+          <div :class="['flex flex-col gap-3 p-3']">
+            <template v-if="editingId === record.id">
+              <Input v-model="tagDrafts[record.id]" placeholder="标签，用逗号分隔" />
+              <div :class="['flex gap-2']">
+                <Button size="sm" @click="saveTags(record)">
+                  保存标签
+                </Button>
+                <Button size="sm" variant="secondary" @click="editingId = ''">
                   取消
-                </template>
-              </DoubleCheckButton>
-            </div>
-          </template>
-        </div>
-      </article>
+                </Button>
+              </div>
+            </template>
+            <template v-else>
+              <div :class="['flex min-h-6 flex-wrap gap-1.5']">
+                <span v-for="tag in record.tags" :key="tag" :class="['rounded bg-primary-500/10 px-2 py-0.5 text-xs text-primary-600 dark:text-primary-300']">{{ tag }}</span>
+                <span v-if="record.tagsManuallyEdited" :class="['rounded bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-600 dark:text-emerald-300']">人工标签</span>
+                <span v-if="!record.tags.length" :class="['text-xs text-amber-600']">尚无标签</span>
+              </div>
+              <p :class="['text-xs text-neutral-500']">
+                观察 {{ record.observedCount }} · 发送 {{ record.sentCount }} · {{ formatTime(record.lastObservedAt) }}
+              </p>
+              <div :class="['flex flex-wrap gap-2']">
+                <Button size="sm" variant="secondary" icon="i-solar:pen-bold-duotone" @click="startTagEdit(record)">
+                  编辑
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  :icon="record.status === 'owned' ? 'i-solar:archive-down-bold-duotone' : 'i-solar:restart-bold-duotone'"
+                  @click="gateway.updateSticker({ id: record.id, status: record.status === 'owned' ? 'discarded' : 'owned' })"
+                >
+                  {{ record.status === 'owned' ? '淘汰' : '恢复' }}
+                </Button>
+                <DoubleCheckButton size="sm" variant="danger" @confirm="gateway.deleteSticker(record.id)">
+                  删除
+                  <template #confirm>
+                    永久删除
+                  </template>
+                  <template #cancel>
+                    取消
+                  </template>
+                </DoubleCheckButton>
+              </div>
+            </template>
+          </div>
+        </article>
+      </div>
+      <div :class="['py-3 text-center text-xs tabular-nums text-neutral-500']">
+        {{ visibleRecords.length }} / {{ filteredRecords.length }}
+      </div>
     </div>
-
-    <footer v-if="pageCount > 1" :class="['flex items-center justify-center gap-3 border-t border-neutral-200 pt-4 dark:border-neutral-800']">
-      <Button size="sm" variant="secondary" icon="i-solar:arrow-left-linear" :disabled="page <= 1" @click="page -= 1" />
-      <span :class="['text-sm tabular-nums text-neutral-500']">{{ page }} / {{ pageCount }}</span>
-      <Button size="sm" variant="secondary" icon="i-solar:arrow-right-linear" :disabled="page >= pageCount" @click="page += 1" />
-    </footer>
     <p v-if="gateway.state.value" :class="['break-all text-xs text-neutral-500']">
       存储目录：{{ gateway.state.value.stickerLibrary.rootPath }}
     </p>

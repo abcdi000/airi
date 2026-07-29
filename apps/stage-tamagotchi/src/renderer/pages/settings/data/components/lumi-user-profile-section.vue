@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import type { LumiUserProfileEntry, LumiUserProfileKey, LumiUserProfileLayer } from '@proj-airi/stage-ui/stores/lumi-user-profile'
 
+import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import {
-  LUMI_BOOTSTRAP_PROFILE_VERSION,
   keyLabel,
   layerLabel,
+  LUMI_BOOTSTRAP_PROFILE_VERSION,
   useLumiUserProfileStore,
 } from '@proj-airi/stage-ui/stores/lumi-user-profile'
-import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { Button, DoubleCheckButton } from '@proj-airi/ui'
 import { storeToRefs } from 'pinia'
 import { computed, reactive, ref } from 'vue'
@@ -43,11 +43,35 @@ const newEntry = reactive<{
 })
 const editValues = reactive<Record<string, string>>({})
 const bootstrapPreview = computed(() => profileStore.previewBootstrapProfile().slice(0, 12))
+const pendingVisibleCount = ref(20)
+const historyVisibleCount = ref(30)
+const sectionVisibleCounts = reactive<Record<'core' | 'dynamic' | 'daily', number>>({
+  core: 20,
+  dynamic: 20,
+  daily: 20,
+})
+const visiblePendingUpdates = computed(() => pendingActiveUpdates.value.slice(0, pendingVisibleCount.value))
+const visibleRecentEvents = computed(() => recentEvents.value.slice(0, historyVisibleCount.value))
 
 const sections = computed(() => [
-  { id: 'core', title: '基础锚点', entries: coreEntries.value, tone: 'cyan' },
-  { id: 'dynamic', title: '动态画像', entries: dynamicEntries.value, tone: 'emerald' },
-  { id: 'daily', title: '每日状态', entries: dailyEntries.value, tone: 'amber' },
+  {
+    id: 'core' as const,
+    title: '基础锚点',
+    entries: coreEntries.value.slice(0, sectionVisibleCounts.core),
+    totalCount: coreEntries.value.length,
+  },
+  {
+    id: 'dynamic' as const,
+    title: '动态画像',
+    entries: dynamicEntries.value.slice(0, sectionVisibleCounts.dynamic),
+    totalCount: dynamicEntries.value.length,
+  },
+  {
+    id: 'daily' as const,
+    title: '每日状态',
+    entries: dailyEntries.value.slice(0, sectionVisibleCounts.daily),
+    totalCount: dailyEntries.value.length,
+  },
 ])
 
 const keyOptions: Array<{ key: LumiUserProfileKey, layer: LumiUserProfileLayer, label: string }> = [
@@ -175,6 +199,26 @@ function pendingReviewLabel(pending: { source: unknown[], confidence: number, re
     ? `等待意识模型审阅 · 成熟度 ${maturity.toFixed(2)}`
     : `等待更多印象 · 成熟度 ${maturity.toFixed(2)}`
 }
+
+function reachedScrollEnd(event: Event) {
+  const target = event.currentTarget as HTMLElement
+  return target.scrollTop + target.clientHeight >= target.scrollHeight - 96
+}
+
+function loadMorePending(event: Event) {
+  if (reachedScrollEnd(event) && visiblePendingUpdates.value.length < pendingActiveUpdates.value.length)
+    pendingVisibleCount.value += 20
+}
+
+function loadMoreSection(event: Event, sectionId: 'core' | 'dynamic' | 'daily', totalCount: number) {
+  if (reachedScrollEnd(event) && sectionVisibleCounts[sectionId] < totalCount)
+    sectionVisibleCounts[sectionId] += 20
+}
+
+function loadMoreHistory(event: Event) {
+  if (reachedScrollEnd(event) && visibleRecentEvents.value.length < recentEvents.value.length)
+    historyVisibleCount.value += 30
+}
 </script>
 
 <template>
@@ -256,20 +300,36 @@ function pendingReviewLabel(pending: { source: unknown[], confidence: number, re
           </div>
           <div :class="['grid grid-cols-2 gap-2 lg:grid-cols-4']">
             <div :class="['rounded-md bg-white/70 p-2 dark:bg-neutral-950/30']">
-              <div :class="['text-xs text-neutral-500 dark:text-neutral-400']">当前版本</div>
-              <div :class="['break-all text-sm text-neutral-900 dark:text-neutral-50']">{{ bootstrapStatus.currentVersion || '无' }}</div>
+              <div :class="['text-xs text-neutral-500 dark:text-neutral-400']">
+                当前版本
+              </div>
+              <div :class="['break-all text-sm text-neutral-900 dark:text-neutral-50']">
+                {{ bootstrapStatus.currentVersion || '无' }}
+              </div>
             </div>
             <div :class="['rounded-md bg-white/70 p-2 dark:bg-neutral-950/30']">
-              <div :class="['text-xs text-neutral-500 dark:text-neutral-400']">默认版本</div>
-              <div :class="['break-all text-sm text-neutral-900 dark:text-neutral-50']">{{ LUMI_BOOTSTRAP_PROFILE_VERSION }}</div>
+              <div :class="['text-xs text-neutral-500 dark:text-neutral-400']">
+                默认版本
+              </div>
+              <div :class="['break-all text-sm text-neutral-900 dark:text-neutral-50']">
+                {{ LUMI_BOOTSTRAP_PROFILE_VERSION }}
+              </div>
             </div>
             <div :class="['rounded-md bg-white/70 p-2 dark:bg-neutral-950/30']">
-              <div :class="['text-xs text-neutral-500 dark:text-neutral-400']">已导入条目</div>
-              <div :class="['text-sm text-neutral-900 dark:text-neutral-50']">{{ bootstrapStatus.importedCount }}</div>
+              <div :class="['text-xs text-neutral-500 dark:text-neutral-400']">
+                已导入条目
+              </div>
+              <div :class="['text-sm text-neutral-900 dark:text-neutral-50']">
+                {{ bootstrapStatus.importedCount }}
+              </div>
             </div>
             <div :class="['rounded-md bg-white/70 p-2 dark:bg-neutral-950/30']">
-              <div :class="['text-xs text-neutral-500 dark:text-neutral-400']">受保护条目</div>
-              <div :class="['text-sm text-neutral-900 dark:text-neutral-50']">{{ bootstrapStatus.protectedCount }}</div>
+              <div :class="['text-xs text-neutral-500 dark:text-neutral-400']">
+                受保护条目
+              </div>
+              <div :class="['text-sm text-neutral-900 dark:text-neutral-50']">
+                {{ bootstrapStatus.protectedCount }}
+              </div>
             </div>
           </div>
           <p :class="['mt-2 text-xs text-neutral-600 dark:text-neutral-300']">
@@ -358,9 +418,12 @@ function pendingReviewLabel(pending: { source: unknown[], confidence: number, re
           @click="profileStore.consolidatePendingUpdates()"
         />
       </div>
-      <div :class="['flex flex-col gap-2']">
+      <div
+        :class="['flex max-h-96 flex-col gap-2 overflow-y-auto pr-1 [scrollbar-gutter:stable]']"
+        @scroll.passive="loadMorePending"
+      >
         <div
-          v-for="pending in pendingActiveUpdates"
+          v-for="pending in visiblePendingUpdates"
           :key="pending.id"
           :class="['rounded-md bg-white/75 p-2 text-sm dark:bg-neutral-950/30']"
         >
@@ -389,6 +452,9 @@ function pendingReviewLabel(pending: { source: unknown[], confidence: number, re
             <Button variant="secondary" size="sm" icon="i-solar:close-circle-line-duotone" label="拒绝" @click="profileStore.rejectPending(pending.id)" />
           </div>
         </div>
+        <div v-if="visiblePendingUpdates.length < pendingActiveUpdates.length" :class="['py-2 text-center text-xs tabular-nums text-neutral-500']">
+          {{ visiblePendingUpdates.length }} / {{ pendingActiveUpdates.length }}
+        </div>
       </div>
     </div>
 
@@ -403,11 +469,14 @@ function pendingReviewLabel(pending: { source: unknown[], confidence: number, re
             {{ section.title }}
           </div>
           <div :class="['rounded-md bg-neutral-100 px-2 py-0.5 text-xs text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300']">
-            {{ section.entries.length }}
+            {{ section.totalCount }}
           </div>
         </div>
 
-        <div :class="['flex max-h-128 flex-col gap-2 overflow-auto pr-1']">
+        <div
+          :class="['flex max-h-128 flex-col gap-2 overflow-auto pr-1 [scrollbar-gutter:stable]']"
+          @scroll.passive="loadMoreSection($event, section.id, section.totalCount)"
+        >
           <details
             v-for="entry in section.entries"
             :key="entry.id"
@@ -445,8 +514,11 @@ function pendingReviewLabel(pending: { source: unknown[], confidence: number, re
               </div>
             </div>
           </details>
-          <div v-if="section.entries.length === 0" :class="['rounded-md border border-dashed border-neutral-200 p-3 text-sm text-neutral-500 dark:border-neutral-800 dark:text-neutral-400']">
+          <div v-if="section.totalCount === 0" :class="['rounded-md border border-dashed border-neutral-200 p-3 text-sm text-neutral-500 dark:border-neutral-800 dark:text-neutral-400']">
             暂无{{ section.title }}。
+          </div>
+          <div v-else-if="section.entries.length < section.totalCount" :class="['py-2 text-center text-xs tabular-nums text-neutral-500']">
+            {{ section.entries.length }} / {{ section.totalCount }}
           </div>
         </div>
       </section>
@@ -456,13 +528,19 @@ function pendingReviewLabel(pending: { source: unknown[], confidence: number, re
       <summary :class="['cursor-pointer select-none text-sm font-medium outline-none']">
         更新历史
       </summary>
-      <div :class="['mt-2 flex max-h-48 flex-col gap-1 overflow-auto']">
+      <div
+        :class="['mt-2 flex max-h-48 flex-col gap-1 overflow-auto pr-1 [scrollbar-gutter:stable]']"
+        @scroll.passive="loadMoreHistory"
+      >
         <div
-          v-for="event in recentEvents"
+          v-for="event in visibleRecentEvents"
           :key="event.id"
           :class="['rounded-md bg-neutral-50 px-2 py-1 text-xs text-neutral-600 dark:bg-neutral-900/60 dark:text-neutral-300']"
         >
           {{ new Date(event.createdAt).toLocaleString() }} · {{ event.kind }} · {{ event.key ? keyLabel(event.key) : '' }} {{ event.preview }}
+        </div>
+        <div v-if="visibleRecentEvents.length < recentEvents.length" :class="['py-2 text-center text-xs tabular-nums text-neutral-500']">
+          {{ visibleRecentEvents.length }} / {{ recentEvents.length }}
         </div>
         <div v-if="recentEvents.length === 0" :class="['text-xs text-neutral-500']">
           暂无画像历史。

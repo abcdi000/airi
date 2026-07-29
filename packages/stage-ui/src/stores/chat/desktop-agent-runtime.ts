@@ -236,8 +236,23 @@ export class DesktopLumiAgentHost {
           console.info('[lumi-agent-runtime:desktop]', event)
           if (input.visible)
             appendDesktopAgentToolNotice(input.sessionId, event)
-          if (event.type === 'tool_execution')
-            await this.#toolProgressListeners.get(input.sessionId)?.(event)
+          if (event.type === 'tool_execution') {
+            const listener = this.#toolProgressListeners.get(input.sessionId)
+            if (listener) {
+              try {
+                void Promise.resolve(listener(event)).catch(error => console.warn(
+                  '[lumi-agent-runtime:desktop] failed to forward public tool progress',
+                  errorMessageFrom(error) ?? error,
+                ))
+              }
+              catch (error) {
+                console.warn(
+                  '[lumi-agent-runtime:desktop] failed to forward public tool progress',
+                  errorMessageFrom(error) ?? error,
+                )
+              }
+            }
+          }
         },
       },
       outboundAdapter: createDesktopOutboundAdapter(input.visible),

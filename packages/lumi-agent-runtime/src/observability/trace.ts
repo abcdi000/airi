@@ -41,6 +41,8 @@ export type AgentTraceEvent
     stepId: string
     toolName: string
     status: 'started' | 'succeeded' | 'failed' | 'skipped'
+    /** First public Planner sentence for this step; never contains model reasoning. */
+    publicProgressText?: string
     durationMs?: number
     errorCode?: string
     timestamp: number

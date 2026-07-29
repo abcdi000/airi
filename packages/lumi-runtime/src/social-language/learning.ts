@@ -119,6 +119,14 @@ export function observeLearnedExpression(
   const sourceOwnership = evidence.source === 'lumi' ? 0.08 : 0.02
   const familiarity = clamp01((existing?.familiarity ?? 0) + 0.08 * proposal.confidence)
   const ownership = clamp01((existing?.ownership ?? sourceOwnership) + (observationCount > 1 ? 0.025 : 0))
+  const derivedStatus = expressionStatus({
+    observationCount,
+    familiarity,
+    ownership,
+    useCount: existing?.useCount ?? 0,
+    successfulUseCount: existing?.successfulUseCount ?? 0,
+    explicitRejectionCount: existing?.explicitRejectionCount ?? 0,
+  })
   return {
     id: existing?.id ?? id,
     phrase: proposal.phrase ?? existing?.phrase,
@@ -147,14 +155,7 @@ export function observeLearnedExpression(
     lastSeenAt: evidence.timestamp,
     lastUsedAt: existing?.lastUsedAt,
     embedding: existing?.embedding,
-    status: expressionStatus({
-      observationCount,
-      familiarity,
-      ownership,
-      useCount: existing?.useCount ?? 0,
-      successfulUseCount: existing?.successfulUseCount ?? 0,
-      explicitRejectionCount: existing?.explicitRejectionCount ?? 0,
-    }),
+    status: advanceExpressionStatus(existing?.status, derivedStatus),
   }
 }
 
@@ -311,16 +312,19 @@ export function applyExpressionFeedback(
     familiarity: clamp01(expression.familiarity + familiarityDelta),
     lastUsedAt: expression.lastUsedAt ?? now,
   }
+  const derivedStatus = expressionStatus({
+    observationCount: next.observationCount,
+    familiarity: next.familiarity,
+    ownership: next.ownership,
+    useCount: next.useCount,
+    successfulUseCount: next.successfulUseCount,
+    explicitRejectionCount,
+  })
   return {
     ...next,
-    status: expressionStatus({
-      observationCount: next.observationCount,
-      familiarity: next.familiarity,
-      ownership: next.ownership,
-      useCount: next.useCount,
-      successfulUseCount: next.successfulUseCount,
-      explicitRejectionCount,
-    }),
+    status: negative > 0
+      ? derivedStatus
+      : advanceExpressionStatus(expression.status, derivedStatus),
   }
 }
 
@@ -332,17 +336,51 @@ export function markExpressionUsed(expression: LearnedExpression, now = Date.now
     lastUsedAt: now,
     familiarity: clamp01(expression.familiarity + 0.01),
   }
+  const derivedStatus = expressionStatus({
+    observationCount: next.observationCount,
+    familiarity: next.familiarity,
+    ownership: next.ownership,
+    useCount: next.useCount,
+    successfulUseCount: next.successfulUseCount,
+    explicitRejectionCount: next.explicitRejectionCount,
+  })
   return {
     ...next,
-    status: expressionStatus({
-      observationCount: next.observationCount,
-      familiarity: next.familiarity,
-      ownership: next.ownership,
-      useCount: next.useCount,
-      successfulUseCount: next.successfulUseCount,
-      explicitRejectionCount: next.explicitRejectionCount,
-    }),
+    status: advanceExpressionStatus(expression.status, derivedStatus),
   }
+}
+
+/**
+ * Keeps positive lifecycle evidence monotonic without blocking explicit decay.
+ *
+ * Use when:
+ * - Repeated observation or successful use derives a new expression status
+ * - Legacy duplicate evidence is consolidated during snapshot migration
+ *
+ * Expects:
+ * - `derived` was calculated from non-negative evidence
+ * - Callers handling rejection or inactivity apply that downgrade separately
+ *
+ * Returns:
+ * - The furthest active lifecycle status reached by either input
+ */
+export function advanceExpressionStatus(
+  current: LearnedExpression['status'] | undefined,
+  derived: LearnedExpression['status'],
+): LearnedExpression['status'] {
+  if (!current || derived === 'forgotten')
+    return derived
+  if (current === 'forgotten' || current === 'declining')
+    return derived
+
+  const progress: LearnedExpression['status'][] = [
+    'observed',
+    'understood',
+    'trial',
+    'adopted',
+    'habit',
+  ]
+  return progress.indexOf(current) >= progress.indexOf(derived) ? current : derived
 }
 
 /**

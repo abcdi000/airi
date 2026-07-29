@@ -60,6 +60,7 @@ const revokingDeviceId = shallowRef('')
 const clearingAudit = shallowRef(false)
 const terminatingLeaseId = shallowRef('')
 const errorMessage = shallowRef('')
+const visibleAuditCount = shallowRef(30)
 
 const userOptions = computed(() => activeUsers.value.map(user => ({ label: user.displayName, value: user.id })))
 const groupRooms = computed(() => Object.values(sessionMetas.value)
@@ -70,6 +71,7 @@ const roomOptions = computed(() => groupRooms.value.map(room => ({
   value: room.sessionId,
 })))
 const selectedRoom = computed(() => groupRooms.value.find(room => room.sessionId === selectedConversationId.value))
+const visibleAuditEntries = computed(() => auditEntries.value.slice(0, visibleAuditCount.value))
 const pairingText = computed(() => credential.value ? JSON.stringify(credential.value.pairing) : '')
 const pairingQrSource = computed(() => {
   if (!pairingText.value)
@@ -115,6 +117,7 @@ async function refreshDevices() {
 async function refreshAudit() {
   try {
     auditEntries.value = (await listAudit()).entries
+    visibleAuditCount.value = 30
   }
   catch (error) {
     errorMessage.value = errorMessageFrom(error) ?? t('settings.pages.connection.lumi-devices.errors.audit-load')
@@ -201,6 +204,13 @@ async function handleClearAudit() {
   finally {
     clearingAudit.value = false
   }
+}
+
+function loadMoreAudit(event: Event) {
+  const target = event.currentTarget as HTMLElement
+  const reachedEnd = target.scrollTop + target.clientHeight >= target.scrollHeight - 96
+  if (reachedEnd && visibleAuditEntries.value.length < auditEntries.value.length)
+    visibleAuditCount.value += 30
 }
 
 async function handleTerminateLease(leaseId: string) {
@@ -383,8 +393,16 @@ useIntervalFn(() => void refreshResourceLeases(), 5_000)
           </template>
         </DoubleCheckButton>
       </div>
-      <ol v-if="auditEntries.length" :class="['m-0 list-none divide-y divide-neutral-200 p-0 dark:divide-neutral-700']">
-        <li v-for="entry in auditEntries" :key="entry.id" :class="['grid grid-cols-[minmax(0,1fr)_auto] gap-3 py-2']">
+      <ol
+        v-if="auditEntries.length"
+        :class="[
+          'm-0 max-h-96 list-none divide-y divide-neutral-200 overflow-y-auto p-0 pr-1',
+          'overscroll-contain [scrollbar-gutter:stable]',
+          'dark:divide-neutral-700',
+        ]"
+        @scroll.passive="loadMoreAudit"
+      >
+        <li v-for="entry in visibleAuditEntries" :key="entry.id" :class="['grid grid-cols-[minmax(0,1fr)_auto] gap-3 py-2']">
           <div :class="['min-w-0 text-xs']">
             <div :class="['truncate font-medium']">
               {{ auditLabel(entry) }} / {{ entry.deviceName || entry.deviceId || t('settings.pages.connection.lumi-devices.audit.unknown-device') }}
@@ -396,6 +414,9 @@ useIntervalFn(() => void refreshResourceLeases(), 5_000)
           <div :class="['text-right text-[11px] text-neutral-400']">
             {{ formatTime(entry.createdAt) }}
           </div>
+        </li>
+        <li v-if="visibleAuditEntries.length < auditEntries.length" :class="['py-2 text-center text-xs tabular-nums text-neutral-500']">
+          {{ visibleAuditEntries.length }} / {{ auditEntries.length }}
         </li>
       </ol>
       <p v-else :class="['m-0 text-xs text-neutral-500 dark:text-neutral-400']">

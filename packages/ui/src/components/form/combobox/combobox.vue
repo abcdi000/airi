@@ -4,7 +4,6 @@ import type { AcceptableValue } from 'reka-ui'
 import {
   ComboboxAnchor,
   ComboboxContent,
-  ComboboxEmpty,
   ComboboxGroup,
   ComboboxInput,
   ComboboxItem,
@@ -16,7 +15,7 @@ import {
   ComboboxTrigger,
   ComboboxViewport,
 } from 'reka-ui'
-import { computed } from 'vue'
+import { computed, nextTick, shallowRef, useTemplateRef, watch } from 'vue'
 
 interface ComboboxOptionItem<T extends AcceptableValue> {
   label: string
@@ -38,12 +37,22 @@ const props = withDefaults(defineProps<{
   openOnClick?: boolean
   contentMinWidth?: string | number
   contentWidth?: string | number
+  incrementalRender?: boolean
+  initialOptionCount?: number
+  optionBatchSize?: number
 }>(), {
   disabled: false,
   openOnClick: true,
+  incrementalRender: true,
+  initialOptionCount: 36,
+  optionBatchSize: 36,
 })
 
 const modelValue = defineModel<T>({ required: false })
+const open = shallowRef(false)
+const searchTerm = shallowRef('')
+const renderedOptionCount = shallowRef(props.initialOptionCount)
+const optionViewport = useTemplateRef<HTMLDivElement>('optionViewport')
 
 const normalizedOptions = computed<ComboboxOptionGroupItem<T>[]>(() => {
   if (!props.options.length) {
@@ -67,6 +76,78 @@ const flattenedOptions = computed<ComboboxOptionItem<T>[]>(() =>
   normalizedOptions.value.flatMap(group => group.children ?? []),
 )
 
+const filteredOptions = computed<ComboboxOptionGroupItem<T>[]>(() => {
+  const query = searchTerm.value.trim().toLocaleLowerCase()
+  if (!query)
+    return normalizedOptions.value
+
+  return normalizedOptions.value
+    .map(group => ({
+      ...group,
+      children: (group.children ?? []).filter((option) => {
+        return option.label.toLocaleLowerCase().includes(query)
+          || option.description?.toLocaleLowerCase().includes(query)
+      }),
+    }))
+    .filter(group => Boolean(group.children?.length))
+})
+
+const filteredOptionCount = computed(() =>
+  filteredOptions.value.reduce((count, group) => count + (group.children?.length ?? 0), 0),
+)
+
+const renderedOptions = computed<ComboboxOptionGroupItem<T>[]>(() => {
+  if (!props.incrementalRender)
+    return filteredOptions.value
+
+  let remaining = renderedOptionCount.value
+  const groups: ComboboxOptionGroupItem<T>[] = []
+  for (const group of filteredOptions.value) {
+    if (remaining <= 0)
+      break
+
+    const children = (group.children ?? []).slice(0, remaining)
+    if (children.length) {
+      groups.push({
+        ...group,
+        children,
+      })
+      remaining -= children.length
+    }
+  }
+  return groups
+})
+
+const renderedFlatOptions = computed(() =>
+  renderedOptions.value.flatMap(group => group.children ?? []),
+)
+const hasMoreOptions = computed(() =>
+  props.incrementalRender && renderedFlatOptions.value.length < filteredOptionCount.value,
+)
+
+function loadMoreOptions(event: Event) {
+  const target = event.currentTarget as HTMLElement
+  const reachedEnd = target.scrollTop + target.clientHeight >= target.scrollHeight - 64
+  if (reachedEnd && hasMoreOptions.value)
+    renderedOptionCount.value += props.optionBatchSize
+}
+
+watch(searchTerm, () => {
+  renderedOptionCount.value = props.initialOptionCount
+  optionViewport.value?.scrollTo({ top: 0 })
+})
+
+watch(open, async (isOpen) => {
+  if (!isOpen) {
+    searchTerm.value = ''
+    return
+  }
+
+  renderedOptionCount.value = props.initialOptionCount
+  await nextTick()
+  optionViewport.value?.scrollTo({ top: 0 })
+})
+
 function toDisplayValue(value: T): string {
   const option = flattenedOptions.value.find(option => option.value === value)
   return option?.label ?? props.placeholder ?? ''
@@ -79,14 +160,30 @@ function toCssSize(value?: string | number): string | undefined {
 
   return typeof value === 'number' ? `${value}px` : value
 }
+
+function handleSearchInput(event: Event) {
+  searchTerm.value = (event.target as HTMLInputElement).value
+}
+
+function handleHighlight(payload?: { value: T }) {
+  if (!payload || !hasMoreOptions.value)
+    return
+
+  const lastOption = renderedFlatOptions.value.at(-1)
+  if (lastOption?.value === payload.value)
+    renderedOptionCount.value += props.optionBatchSize
+}
 </script>
 
 <template>
   <ComboboxRoot
     v-model="modelValue"
+    v-model:open="open"
     :disabled="props.disabled"
+    :ignore-filter="true"
     :open-on-click="props.openOnClick"
     :class="['relative', 'w-full', 'h-fit']"
+    @highlight="handleHighlight"
   >
     <ComboboxAnchor
       :class="[
@@ -108,6 +205,7 @@ function toCssSize(value?: string | number): string | undefined {
         :disabled="props.disabled"
         :placeholder="props.placeholder"
         :display-value="(val) => toDisplayValue(val)"
+        @input="handleSearchInput"
       />
       <ComboboxTrigger>
         <div
@@ -144,106 +242,127 @@ function toCssSize(value?: string | number): string | undefined {
           minWidth: toCssSize(props.contentMinWidth) ?? '160px',
         }"
       >
-        <ComboboxViewport :class="['p-[2px]', 'max-h-50dvh', 'overflow-y-auto']">
-          <ComboboxEmpty
+        <ComboboxViewport :class="['p-[2px]']">
+          <div
+            ref="optionViewport"
             :class="[
-              'font-medium py-2 px-2',
-              'text-xs text-neutral-700 dark:text-neutral-200',
-              'transition-colors duration-200 ease-in-out',
+              'max-h-50dvh',
+              'overflow-y-auto',
+              'overscroll-contain',
+              '[scrollbar-gutter:stable]',
             ]"
+            @scroll="loadMoreOptions"
           >
-            <slot name="empty" />
-          </ComboboxEmpty>
+            <div
+              v-if="filteredOptionCount === 0"
+              :class="[
+                'font-medium py-2 px-2',
+                'text-xs text-neutral-700 dark:text-neutral-200',
+                'transition-colors duration-200 ease-in-out',
+              ]"
+            >
+              <slot name="empty" />
+            </div>
 
-          <template
-            v-for="(group, groupIndex) in normalizedOptions"
-            :key="group.groupLabel || `group-${groupIndex}`"
-          >
-            <ComboboxGroup :class="['overflow-x-hidden']">
-              <ComboboxSeparator
-                v-if="groupIndex !== 0"
-                :class="['m-[5px]', 'h-[1px]', 'bg-neutral-400']"
-              />
+            <template
+              v-for="(group, groupIndex) in renderedOptions"
+              :key="group.groupLabel || `group-${groupIndex}`"
+            >
+              <ComboboxGroup :class="['overflow-x-hidden']">
+                <ComboboxSeparator
+                  v-if="groupIndex !== 0"
+                  :class="['m-[5px]', 'h-[1px]', 'bg-neutral-400']"
+                />
 
-              <ComboboxLabel
-                v-if="group.groupLabel"
-                :class="[
-                  'px-[25px] text-xs leading-[25px]',
-                  'text-neutral-500 dark:text-neutral-400',
-                  'transition-colors duration-200 ease-in-out',
-                ]"
-              >
-                {{ group.groupLabel }}
-              </ComboboxLabel>
-
-              <ComboboxItem
-                v-for="(option, optionIndex) in group.children || []"
-                :key="`${group.groupLabel || groupIndex}-${option.label}-${optionIndex}`"
-                :text-value="option.label"
-                :value="option.value"
-                :disabled="option.disabled"
-                :class="[
-                  'leading-normal rounded-lg grid grid-cols-[1rem_minmax(0,1fr)] items-center gap-2 min-h-8 px-2 relative select-none data-[disabled]:pointer-events-none data-[highlighted]:outline-none',
-                  'data-[highlighted]:bg-neutral-100 dark:data-[highlighted]:bg-neutral-800',
-                  'text-sm text-neutral-700 dark:text-neutral-200 data-[disabled]:text-neutral-400 dark:data-[disabled]:text-neutral-600 data-[highlighted]:text-grass1',
-                  'transition-colors duration-200 ease-in-out',
-                  option.disabled ? 'cursor-not-allowed' : 'cursor-pointer',
-                ]"
-              >
-                <ComboboxItemIndicator
+                <ComboboxLabel
+                  v-if="group.groupLabel"
                   :class="[
-                    'col-start-1 row-start-1',
-                    'inline-flex items-center justify-center',
-                    'w-[1rem]',
-                    'opacity-30',
-                    'text-current',
+                    'px-[25px] text-xs leading-[25px]',
+                    'text-neutral-500 dark:text-neutral-400',
+                    'transition-colors duration-200 ease-in-out',
                   ]"
                 >
-                  <div i-solar:alt-arrow-right-outline class="size-4" />
-                </ComboboxItemIndicator>
+                  {{ group.groupLabel }}
+                </ComboboxLabel>
 
-                <div :class="['col-start-2', 'min-w-0', 'flex', 'items-center', 'gap-2', 'py-1']">
-                  <slot
-                    name="option"
-                    v-bind="{ option }"
+                <ComboboxItem
+                  v-for="(option, optionIndex) in group.children || []"
+                  :key="`${group.groupLabel || groupIndex}-${option.label}-${optionIndex}`"
+                  :text-value="option.label"
+                  :value="option.value"
+                  :disabled="option.disabled"
+                  :class="[
+                    'leading-normal rounded-lg grid grid-cols-[1rem_minmax(0,1fr)] items-center gap-2 min-h-8 px-2 relative select-none data-[disabled]:pointer-events-none data-[highlighted]:outline-none',
+                    'data-[highlighted]:bg-neutral-100 dark:data-[highlighted]:bg-neutral-800',
+                    'text-sm text-neutral-700 dark:text-neutral-200 data-[disabled]:text-neutral-400 dark:data-[disabled]:text-neutral-600 data-[highlighted]:text-grass1',
+                    'transition-colors duration-200 ease-in-out',
+                    option.disabled ? 'cursor-not-allowed' : 'cursor-pointer',
+                  ]"
+                >
+                  <ComboboxItemIndicator
+                    :class="[
+                      'col-start-1 row-start-1',
+                      'inline-flex items-center justify-center',
+                      'w-[1rem]',
+                      'opacity-30',
+                      'text-current',
+                    ]"
                   >
-                    <span
-                      v-if="option.icon"
-                      :class="[
-                        'size-4 shrink-0',
-                        'text-current',
-                        option.icon,
-                      ]"
-                    />
+                    <div i-solar:alt-arrow-right-outline class="size-4" />
+                  </ComboboxItemIndicator>
 
-                    <div :class="['min-w-0', 'flex', 'flex-1', 'flex-col']">
+                  <div :class="['col-start-2', 'min-w-0', 'flex', 'items-center', 'gap-2', 'py-1']">
+                    <slot
+                      name="option"
+                      v-bind="{ option }"
+                    >
                       <span
+                        v-if="option.icon"
                         :class="[
-                          'line-clamp-1',
-                          'overflow-hidden',
-                          'text-ellipsis',
-                          'whitespace-nowrap',
+                          'size-4 shrink-0',
+                          'text-current',
+                          option.icon,
                         ]"
-                      >
-                        {{ option.label }}
-                      </span>
+                      />
 
-                      <span
-                        v-if="option.description"
-                        :class="[
-                          'line-clamp-2',
-                          'text-xs',
-                          'text-neutral-500 dark:text-neutral-400',
-                        ]"
-                      >
-                        {{ option.description }}
-                      </span>
-                    </div>
-                  </slot>
-                </div>
-              </ComboboxItem>
-            </ComboboxGroup>
-          </template>
+                      <div :class="['min-w-0', 'flex', 'flex-1', 'flex-col']">
+                        <span
+                          :class="[
+                            'line-clamp-1',
+                            'overflow-hidden',
+                            'text-ellipsis',
+                            'whitespace-nowrap',
+                          ]"
+                        >
+                          {{ option.label }}
+                        </span>
+
+                        <span
+                          v-if="option.description"
+                          :class="[
+                            'line-clamp-2',
+                            'text-xs',
+                            'text-neutral-500 dark:text-neutral-400',
+                          ]"
+                        >
+                          {{ option.description }}
+                        </span>
+                      </div>
+                    </slot>
+                  </div>
+                </ComboboxItem>
+              </ComboboxGroup>
+            </template>
+            <div
+              v-if="hasMoreOptions"
+              :class="[
+                'px-3 py-2',
+                'text-center text-xs text-neutral-500 dark:text-neutral-400',
+              ]"
+            >
+              {{ renderedFlatOptions.length }} / {{ filteredOptionCount }}
+            </div>
+          </div>
         </ComboboxViewport>
       </ComboboxContent>
     </ComboboxPortal>

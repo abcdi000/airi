@@ -3,8 +3,8 @@ import type { LanguageDecisionLog } from '@proj-airi/stage-ui/stores/lumi-social
 
 import { useLumiAgentRuntimeSettingsStore } from '@proj-airi/stage-ui/stores/lumi-agent-runtime-settings'
 import { useLumiSocialLanguageStore } from '@proj-airi/stage-ui/stores/lumi-social-language'
-import { Button, DoubleCheckButton, SelectTab } from '@proj-airi/ui'
-import { useIntervalFn } from '@vueuse/core'
+import { Button, ComboboxSelect, DoubleCheckButton, SelectTab } from '@proj-airi/ui'
+import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 import { computed, shallowRef, watch } from 'vue'
 
@@ -30,12 +30,17 @@ const copied = shallowRef(false)
 const promptLoggingEnabled = computed(() =>
   config.value.promptLoggingEnabled || runtimePromptLoggingEnabled.value,
 )
+const documentVisibility = useDocumentVisibility()
 
 const visibleDecisionLimit = 120
 const totalDecisionCount = computed(() => snapshot.value.decisions.length)
 const loggedDecisions = computed(() => snapshot.value.decisions
   .slice(-visibleDecisionLimit)
   .reverse())
+const decisionOptions = computed(() => loggedDecisions.value.map(decision => ({
+  label: formatDecision(decision),
+  value: decision.id,
+})))
 const selectedDecision = computed(() =>
   loggedDecisions.value.find(decision => decision.id === selectedDecisionId.value) ?? loggedDecisions.value[0],
 )
@@ -44,20 +49,44 @@ const promptMessages = computed(() =>
     ? selectedDecision.value.replyerPromptSnapshot
     : [],
 )
+const expressionsById = computed(() => new Map(snapshot.value.expressions.map(item => [item.id, item])))
+const behaviorsById = computed(() => new Map(snapshot.value.behaviors.map(item => [item.id, item])))
+const jargonById = computed(() => new Map(snapshot.value.jargon.map(item => [item.id, item])))
 const selectedExpressions = computed(() => selectedDecision.value?.selectedExpressions
-  .map(id => snapshot.value.expressions.find(item => item.id === id))
+  .map(id => expressionsById.value.get(id))
   .filter(item => item !== undefined) ?? [])
 const realizedExpressionIds = computed(() => new Set(selectedDecision.value?.realizedExpressions ?? []))
 const selectedBehaviors = computed(() => selectedDecision.value?.selectedBehaviors
-  .map(id => snapshot.value.behaviors.find(item => item.id === id))
+  .map(id => behaviorsById.value.get(id))
   .filter(item => item !== undefined) ?? [])
 const selectedJargon = computed(() => (selectedDecision.value?.selectedJargon ?? [])
-  .map(id => snapshot.value.jargon.find(item => item.id === id))
+  .map(id => jargonById.value.get(id))
   .filter(item => item !== undefined))
 
-useIntervalFn(() => {
-  void store.refreshFromPersistence()
-}, 1_000, { immediate: true })
+let refreshPromise: Promise<void> | undefined
+function refreshDecisions() {
+  if (refreshPromise)
+    return refreshPromise
+
+  refreshPromise = store.refreshFromPersistence()
+    .finally(() => {
+      refreshPromise = undefined
+    })
+  return refreshPromise
+}
+
+const decisionRefreshTimer = useIntervalFn(() => {
+  void refreshDecisions()
+}, 3_000, { immediate: false })
+
+watch([inspectorMode, documentVisibility], ([mode, visibility]) => {
+  decisionRefreshTimer.pause()
+  if (mode !== 'decision' || visibility !== 'visible')
+    return
+
+  void refreshDecisions()
+  decisionRefreshTimer.resume()
+}, { immediate: true })
 
 watch(loggedDecisions, (decisions) => {
   if (!decisions.some(item => item.id === selectedDecisionId.value))
@@ -179,14 +208,12 @@ async function copyCurrent() {
         <template v-else>
           <label :class="['flex flex-col gap-2']">
             <span :class="['text-xs font-medium text-neutral-500']">选择一次回复</span>
-            <select
+            <ComboboxSelect
               v-model="selectedDecisionId"
-              :class="['h-10 rounded-lg border border-neutral-200 bg-white px-3 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-900']"
-            >
-              <option v-for="decision in loggedDecisions" :key="decision.id" :value="decision.id">
-                {{ formatDecision(decision) }}
-              </option>
-            </select>
+              :options="decisionOptions"
+              placeholder="搜索回复时间或内容"
+              :content-min-width="320"
+            />
           </label>
 
           <div :class="['flex flex-wrap items-center justify-between gap-3']">

@@ -589,6 +589,8 @@ export interface LumiExternalAgentProgressEvent {
   eventId: string
   toolName: string
   status: 'started' | 'succeeded' | 'failed' | 'skipped'
+  /** First public Planner sentence for this step; model reasoning is never included. */
+  publicProgressText?: string
   timestamp: number
   durationMs?: number
   errorCode?: string

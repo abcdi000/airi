@@ -7,7 +7,6 @@ import type { ChatActionMenuAction } from '.'
 import { errorMessageFrom } from '@moeru/std'
 import { isStageCapacitor, isStageWeb } from '@proj-airi/stage-shared'
 import { useElementVisibility, useIntervalFn } from '@vueuse/core'
-import { createTimeline } from 'animejs'
 import { clamp } from 'es-toolkit'
 import {
   ContextMenuContent,
@@ -21,7 +20,7 @@ import {
   DropdownMenuRoot,
   DropdownMenuTrigger,
 } from 'reka-ui'
-import { computed, inject, reactive, ref, shallowRef, toRef, useTemplateRef, watch } from 'vue'
+import { computed, inject, ref, shallowRef, toRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useWebHaptics } from 'web-haptics/vue'
 
@@ -154,7 +153,14 @@ function useTouching(element: MaybeComputedElementRef) {
   const pressStartTime = ref(0)
   const pressNow = ref(0)
 
-  const { resume, pause } = useIntervalFn(() => pressNow.value = Date.now(), 50)
+  // A chat history can mount hundreds of action menus. Starting this timer
+  // eagerly caused every message to write reactive state 20 times per second,
+  // even when no message was being touched.
+  const { resume, pause } = useIntervalFn(
+    () => pressNow.value = Date.now(),
+    50,
+    { immediate: false },
+  )
 
   const isTouching = ref(false)
   const pressedFor = computed(() => {
@@ -278,30 +284,20 @@ async function handleAction(action: ChatActionMenuAction) {
   emit('delete')
 }
 
-const pressedAnimatable = reactive({ scale: 100 })
-const tl = createTimeline({ defaults: { duration: 500, autoplay: false } })
-  .add(pressedAnimatable, { scale: 90, ease: 'inOut', autoplay: false })
-  .reset()
+const pressAnimationActive = shallowRef(false)
 
 const { trigger: triggerTimer, clear: clearTimer } = useSetTimeoutFn(() => {
   trigger('medium')
-  tl.reset()
+  pressAnimationActive.value = false
 }, { delay: 700 })
 
 watch(isTouching, (val) => {
   if (val) {
-    if (tl.completed || tl.paused) {
-      tl.restart()
-    }
-    else {
-      tl.play()
-    }
-
+    pressAnimationActive.value = true
     triggerTimer()
   }
   else {
-    tl.reset()
-
+    pressAnimationActive.value = false
     clearTimer()
   }
 })
@@ -314,11 +310,9 @@ watch(isTouching, (val) => {
         ref="contextMenuContainer"
         :class="[
           'group/chat-action relative w-fit',
-          'transition-transform duration-150 ease-in-out',
+          'transition-transform ease-in-out',
+          pressAnimationActive ? 'scale-90 duration-500' : 'scale-100 duration-150',
         ]"
-        :style="{
-          transform: `scale(${pressedAnimatable.scale / 100})`,
-        }"
       >
         <div
           ref="topSentinel"

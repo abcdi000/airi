@@ -248,6 +248,33 @@ describe('lumi social language', () => {
     expect(migrated.expressions.find(item => item.id === rejected.id)?.status).toBe('forgotten')
   })
 
+  it('preserves an internalized v1 expression while merging duplicate evidence', () => {
+    const internalized = expression({
+      id: 'internalized-expression',
+      phrase: 'keep this habit',
+      status: 'habit',
+      observationCount: 1,
+    })
+    const duplicate = expression({
+      id: 'duplicate-expression',
+      phrase: internalized.phrase,
+      status: 'understood',
+      observationCount: 2,
+    })
+
+    const migrated = migrateSocialLanguageSnapshot({
+      version: 1,
+      expressions: [internalized, duplicate],
+      jargon: [],
+      behaviors: [],
+      decisions: [],
+      updatedAt: 100,
+    }, 200)
+
+    expect(migrated.expressions).toHaveLength(1)
+    expect(migrated.expressions[0]?.status).toBe('habit')
+  })
+
   it('keeps observed candidates out of replies until evidence repeats', () => {
     const observed = expression({
       status: 'observed',
@@ -357,6 +384,31 @@ describe('lumi social language', () => {
     expect(learned.status).toBe('adopted')
     learned = applyExpressionFeedback(markExpressionUsed(learned, 500), praise, 500)
     expect(learned.status).toBe('habit')
+  })
+
+  it('does not demote an existing habit when another observation arrives', () => {
+    const internalized = expression({
+      status: 'habit',
+      observationCount: 2,
+      useCount: 0,
+      successfulUseCount: 0,
+      familiarity: 0.2,
+      ownership: 0.2,
+    })
+    const observedAgain = observeLearnedExpression(internalized, {
+      phrase: internalized.phrase,
+      situation: internalized.situation,
+      pragmaticFunction: internalized.pragmaticFunction,
+      patternType: internalized.patternType,
+      confidence: internalized.confidence,
+    }, {
+      ...evidence(internalized.phrase ?? 'habit'),
+      messageId: 'another-observation',
+      timestamp: 200,
+    }, 'unused')
+
+    expect(observedAgain.status).toBe('habit')
+    expect(markExpressionUsed(internalized, 300).status).toBe('habit')
   })
 
   it('runs inactivity decay at most once per maintenance interval', () => {

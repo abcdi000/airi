@@ -5,8 +5,8 @@ import type {
 } from '@proj-airi/stage-ui/stores/lumi-consciousness-observability'
 
 import { useLumiConsciousnessObservabilityStore } from '@proj-airi/stage-ui/stores/lumi-consciousness-observability'
-import { Button, DoubleCheckButton, SelectTab } from '@proj-airi/ui'
-import { useIntervalFn } from '@vueuse/core'
+import { Button, ComboboxSelect, DoubleCheckButton, SelectTab } from '@proj-airi/ui'
+import { useDocumentVisibility, useEventListener, useIntervalFn } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 import { computed, shallowRef, watch } from 'vue'
 
@@ -17,11 +17,12 @@ const { requests, activeCount } = storeToRefs(store)
 const selectedRequestId = shallowRef('')
 const detailTab = shallowRef<DetailTab>('response')
 const copied = shallowRef(false)
+const documentVisibility = useDocumentVisibility()
 
 const orderedRequests = computed(() => requests.value.slice().reverse())
 const requestOptions = computed(() =>
   orderedRequests.value.map(request => ({
-    id: request.id,
+    value: request.id,
     label: requestOption(request),
   })),
 )
@@ -40,9 +41,23 @@ const averageDuration = computed(() => {
   return Math.round(completed.reduce((total, duration) => total + duration, 0) / completed.length)
 })
 
-useIntervalFn(() => {
+const refreshTimer = useIntervalFn(() => {
   store.refreshFromStorage()
-}, 1_000, { immediate: true })
+}, 2_000, { immediate: false })
+
+watch(documentVisibility, (visibility) => {
+  refreshTimer.pause()
+  if (visibility !== 'visible')
+    return
+
+  store.refreshFromStorage()
+  refreshTimer.resume()
+}, { immediate: true })
+
+useEventListener(window, 'storage', () => {
+  if (documentVisibility.value === 'visible')
+    store.refreshFromStorage()
+})
 
 watch(orderedRequests, (next) => {
   if (!next.some(request => request.id === selectedRequestId.value))
@@ -195,14 +210,13 @@ function clearRequests() {
       <div :class="['flex items-end gap-3']">
         <label :class="['min-w-0 flex-1']">
           <span :class="['mb-2 block text-xs font-medium text-neutral-500']">选择请求</span>
-          <select
+          <ComboboxSelect
             v-model="selectedRequestId"
-            :class="['h-10 w-full rounded-lg border border-neutral-200 bg-white px-3 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-900']"
-          >
-            <option v-for="option in requestOptions" :key="option.id" :value="option.id">
-              {{ option.label }}
-            </option>
-          </select>
+            :options="requestOptions"
+            placeholder="搜索请求阶段、状态或时间"
+            :content-min-width="320"
+            :class="['w-full']"
+          />
         </label>
         <DoubleCheckButton size="sm" variant="danger" @confirm="clearRequests">
           清空

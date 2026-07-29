@@ -107,7 +107,13 @@ onMounted(() => {
       </button>
     </section>
 
-    <div :class="['overflow-x-auto pb-1']">
+    <div
+      :class="[
+        'sticky top-0 z-98',
+        'overflow-x-auto py-2',
+      ]"
+      bg="$bg-color"
+    >
       <SelectTab v-model="activeTab" :options="tabs" size="sm" tab-space="compact" />
     </div>
 

@@ -8,7 +8,7 @@ import type {
   SocialLanguageSnapshot,
 } from './types'
 
-import { decayLearnedExpression, expressionSemanticKey } from './learning'
+import { advanceExpressionStatus, decayLearnedExpression, expressionSemanticKey } from './learning'
 
 const SOCIAL_LANGUAGE_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000
 
@@ -274,9 +274,10 @@ function mergeLegacyExpressions(expressions: LearnedExpression[]): LearnedExpres
       embedding: current.embedding ?? expression.embedding,
       status: explicitRejectionCount >= 3
         ? 'forgotten'
-        : observationCount >= 2
-          ? 'understood'
-          : current.status,
+        : advanceExpressionStatus(
+            advanceExpressionStatus(current.status, expression.status),
+            observationCount >= 2 ? 'understood' : 'observed',
+          ),
     })
   }
   return [...merged.values()]

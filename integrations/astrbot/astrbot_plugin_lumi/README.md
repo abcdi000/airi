@@ -161,7 +161,7 @@ Lumi 接管后，插件按 AstrBot 4.26.7 的真实管线调用 `event.should_ca
 | `speech_endpoint` | `http://127.0.0.1:6132` | 桌面 Lumi 发声网关；中心 Server 模式也保持指向客户端 |
 | `speech_api_token` | 空 | 桌面 AstrBot 接入令牌；留空时复用主令牌 |
 | `request_timeout_seconds` | `300` | 等待一次 Lumi 完整回复；最低 300 秒 |
-| `send_tool_progress` | `true` | 多步工具任务期间发送去重后的可读动作，如“我先打开网页看看”；不发送工具包装器名称、失败固定话术、隐藏思考、提示词、参数或结果正文 |
+| `send_tool_progress` | `true` | 多步工具任务期间发送去重后的 Planner 当前步骤公开首句；不发送工具包装器名称、固定动作/失败话术、隐藏推理、提示词、参数或结果正文；没有公开首句时静默 |
 | `connect_timeout_seconds` | `10` | 连接超时 |
 | `trigger_mode` | `private_always` | 接管策略 |
 | `handle_private_messages` | `true` | 是否处理私聊 |

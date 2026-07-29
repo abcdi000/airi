@@ -431,7 +431,9 @@ export function setupLumiAstrBotGateway(params: { lifecycle: Lifecycle }) {
       const state = progressByEvent.get(event.data.eventId)
       if (!state || state.complete || event.data.toolName === 'reply')
         return
-      const message = describeToolProgress(event.data.toolName, event.data.status)
+      if (event.data.status !== 'started')
+        return
+      const message = sanitizePublicProgressText(event.data.publicProgressText)
       if (!message)
         return
       if (state.events.some(item => item.message === message))
@@ -1069,44 +1071,23 @@ function normalizeConfig(input: unknown): ElectronLumiAstrBotGatewayConfig {
 }
 
 /**
- * Converts a private tool trace into a short public action update.
+ * Normalizes Planner-authored progress at the authenticated gateway boundary.
  *
- * Tool arguments, results, prompts, and model reasoning are intentionally not
- * accepted here, so this projection cannot leak credentials or hidden context.
+ * Before:
+ * - "  第5个账号也拉黑成功！  "
+ *
+ * After:
+ * - "第5个账号也拉黑成功！"
  */
-function describeToolProgress(
-  toolName: string,
-  status: GatewayProgressEvent['status'],
-): string | undefined {
-  // Completion and failure are internal execution facts, not things Lumi
-  // intentionally chose to say. Only announce a clear user-facing action.
-  if (status !== 'started')
+function sanitizePublicProgressText(value: unknown): string | undefined {
+  if (typeof value !== 'string')
     return undefined
-
-  const normalized = toolName.toLowerCase()
-  if (normalized === 'tool_search')
-    return '我先找一下合适的工具'
-  if (normalized.includes('memory') || normalized.includes('记忆'))
-    return '我先去记忆里查一下'
-  if (normalized.includes('navigate') || normalized.includes('open_url'))
-    return '我先打开网页看看'
-  if (normalized.includes('snapshot') || normalized.includes('screenshot'))
-    return '我看一下当前页面'
-  if (normalized.includes('search'))
-    return '我正在搜索相关内容'
-  if (normalized.includes('click'))
-    return '我继续操作一下页面'
-  if (normalized.includes('type') || normalized.includes('fill'))
-    return '我正在填写页面内容'
-  if (normalized.includes('browser') || normalized.includes('playwright') || normalized.includes('patchright'))
-    return '我正在用浏览器处理'
-  if (normalized.includes('computer') || normalized.includes('window'))
-    return '我正在操作电脑'
-  if (normalized.includes('minecraft') || normalized.includes('mineflayer'))
-    return '我正在处理 Minecraft 里的操作'
-  // MCP dispatchers and other wrappers do not describe the actual action.
-  // Exposing their implementation names produces repetitive robotic chatter.
-  return undefined
+  const message = value.trim().slice(0, 320).trim()
+  if (!message)
+    return undefined
+  if (/\[(?:memory_search|memory_write|system_notice|tool_execution|planner_trace)\]/i.test(message))
+    return undefined
+  return message
 }
 
 function stripInternalLumiOutput(text: string): string {

@@ -261,21 +261,21 @@ class HttpLumiClientTests(unittest.IsolatedAsyncioTestCase):
                                     "sequence": 1,
                                     "tool_name": "query_memory",
                                     "status": "started",
-                                    "message": "checking memory",
+                                    "message": "我先确认一下记忆里的日期。",
                                     "timestamp": 1,
                                 },
                                 {
                                     "sequence": 2,
                                     "tool_name": "browser_navigate",
                                     "status": "started",
-                                    "message": "opening page",
+                                    "message": "第5个账号已处理，继续下一个。",
                                     "timestamp": 2,
                                 },
                                 {
                                     "sequence": 3,
                                     "tool_name": "browser_navigate",
                                     "status": "started",
-                                    "message": "opening page",
+                                    "message": "第5个账号已处理，继续下一个。",
                                     "timestamp": 3,
                                 },
                                 {
@@ -320,8 +320,8 @@ class HttpLumiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             received,
             [
-                (1, "checking memory"),
-                (2, "opening page"),
+                (1, "我先确认一下记忆里的日期。"),
+                (2, "第5个账号已处理，继续下一个。"),
             ],
         )
 

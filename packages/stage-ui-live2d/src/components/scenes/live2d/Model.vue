@@ -504,6 +504,7 @@ async function setMotion(motionName: string, index?: number) {
 
 const dropShadowColorComputer = ref<HTMLDivElement>()
 const dropShadowAnimationId = ref(0)
+let lastDropShadowUpdateAt = 0
 
 function updateDropShadowFilter() {
   if (!model.value)
@@ -528,28 +529,37 @@ watch([model, themeColorsHue], updateDropShadowFilter)
 watch(live2dShadowEnabled, updateDropShadowFilter)
 
 // TODO: This is hacky!
-function updateDropShadowFilterLoop() {
-  updateDropShadowFilter()
-  if (!live2dShadowEnabled.value) {
+function updateDropShadowFilterLoop(timestamp: number) {
+  if (paused.value || !themeColorsHueDynamic.value || !live2dShadowEnabled.value) {
     dropShadowAnimationId.value = 0
     return
   }
 
+  // Reading computed styles forces browser style resolution. The theme hue
+  // does not need to update at the model's full render rate, so keep the
+  // visual animation smooth while avoiding a forced style read every frame.
+  if (timestamp - lastDropShadowUpdateAt >= 64) {
+    lastDropShadowUpdateAt = timestamp
+    updateDropShadowFilter()
+  }
   dropShadowAnimationId.value = requestAnimationFrame(updateDropShadowFilterLoop)
 }
 
-watch([themeColorsHueDynamic, live2dShadowEnabled], ([dynamic, shadowEnabled]) => {
-  if (dynamic && shadowEnabled) {
-    dropShadowAnimationId.value = requestAnimationFrame(updateDropShadowFilterLoop)
-  }
-  else {
+function stopDropShadowFilterLoop() {
+  if (dropShadowAnimationId.value)
     cancelAnimationFrame(dropShadowAnimationId.value)
-    dropShadowAnimationId.value = 0
-  }
+  dropShadowAnimationId.value = 0
+  lastDropShadowUpdateAt = 0
+}
+
+watch([themeColorsHueDynamic, live2dShadowEnabled, paused], ([dynamic, shadowEnabled, isPaused]) => {
+  stopDropShadowFilterLoop()
+  if (dynamic && shadowEnabled && !isPaused)
+    dropShadowAnimationId.value = requestAnimationFrame(updateDropShadowFilterLoop)
 }, { immediate: true })
 
 watch(currentMotion, value => setMotion(value.group, value.index))
-watch(paused, value => value ? pixiApp.value?.stop() : pixiApp.value?.start())
+watch([paused, pixiApp], ([isPaused, app]) => isPaused ? app?.stop() : app?.start(), { immediate: true })
 
 // Watch and apply model parameters
 watch(() => modelParameters.value.angleX, (value) => {
@@ -750,6 +760,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   isUnmounted = true
+  stopDropShadowFilterLoop()
   resizeAnimation?.pause()
   disposeShouldUpdateView?.()
   expressionController.dispose()

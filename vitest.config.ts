@@ -12,6 +12,7 @@ export default defineConfig({
       'packages/core-agent',
       'packages/electron-screen-capture',
       'packages/lumi-agent-runtime',
+      'packages/lumi-runtime',
       'packages/lumi-server-runtime',
       'packages/vishot-runner-browser',
       'packages/plugin-sdk',

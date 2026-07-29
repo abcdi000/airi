@@ -173,6 +173,28 @@ export interface LumiMemoryFragment {
   classificationReason?: string
   /** Human-auditable explanation of whether this memory may cross relationships. */
   disclosureReason?: string
+  /** Evidence records from which this memory was consolidated. */
+  derivedFromEvidenceIds?: string[]
+  /** ISO timestamp from which this memory is semantically valid. */
+  validFrom?: string
+  /** ISO timestamp after which this memory is no longer current. */
+  validUntil?: string
+  /** ISO timestamp of the latest independent confirmation. */
+  lastConfirmedAt?: string
+  /** Older memory replaced by this record. */
+  supersedesId?: string
+  /** Newer memory that replaced this record. */
+  supersededById?: string
+  /** Memories that conflict with this record. */
+  contradictsIds?: string[]
+  /** First message in the source episode. */
+  sourceEpisodeStartMessageId?: string
+  /** Last message in the source episode. */
+  sourceEpisodeEndMessageId?: string
+  /** Number of times this memory was actually injected. */
+  useCount?: number
+  /** Source class retained during migration and audit. */
+  evidenceOrigin?: 'primary' | 'derived' | 'legacy_import'
 }
 
 /** User profile summary kept separate from persona identity. */
@@ -333,12 +355,24 @@ export interface LumiRankedMemory {
     emotionalIntensity: number
     relationshipRelevance: number
     confidence: number
+    validity: number
   }
 }
 
 export interface LumiMemoryRoute {
   preferredTypes: LumiMemoryType[]
-  queryIntent: 'memory_recall' | 'conflict_context' | 'boundary_pressure' | 'project_context' | 'casual' | 'unknown'
+  queryIntent:
+    | 'exact_fact'
+    | 'relationship'
+    | 'preference'
+    | 'project_continuity'
+    | 'commitment_decision'
+    | 'episodic_event'
+    | 'emotion_conflict'
+    | 'association'
+    | 'explicit_history'
+    | 'boundary_pressure'
+    | 'unknown'
   reason: string
 }
 

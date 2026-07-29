@@ -103,7 +103,7 @@ export function retrieveLumiMemories(
 
       const byId = new Map(pool.map(memory => [memory.id, memory]))
       candidates = matches.map(match => byId.get(match.memoryId)).filter(Boolean) as LumiMemoryFragment[]
-      const lexicalCandidates = rankLumiMemories(pool, request.query, {}, options.now)
+      const lexicalCandidates = rankLumiMemories(pool, request.query, {}, options.now, route.queryIntent)
         .filter(item => item.scoreBreakdown.keywordScore >= 0.12 || item.scoreBreakdown.lexicalScore >= 0.12)
         .slice(0, 20)
         .map(item => item.memory)
@@ -117,7 +117,7 @@ export function retrieveLumiMemories(
   if (!candidates.length)
     candidates = pool.slice(0, 80)
 
-  const ranked = rankLumiMemories(candidates, request.query, vectorScores, options.now)
+  const ranked = rankLumiMemories(candidates, request.query, vectorScores, options.now, route.queryIntent)
     .filter(item => item.finalScore >= minScore && isReliableRetrieval(
       item,
       route.queryIntent,
@@ -161,7 +161,7 @@ export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
   if (/birthday|生日|出生日期|纪念日/i.test(text)) {
     return {
       preferredTypes: ['persona_fact', 'user_fact', 'shared_event', 'relationship_event'],
-      queryIntent: 'memory_recall',
+      queryIntent: 'exact_fact',
       reason: 'User is asking about a persona or participant date fact.',
     }
   }
@@ -169,7 +169,7 @@ export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
   if (/\u662F\u8C01|\u8C01\u662F|\u53EB\u4EC0\u4E48|\u540D\u5B57|\u5973\u670B\u53CB|\u7537\u670B\u53CB|\u597D\u53CB|\u670B\u53CB|\u5907\u6CE8|\u6635\u79F0|\u7528\u6237\u540D|\u8D26\u53F7|\u8D26\u6237/.test(text)) {
     return {
       preferredTypes: ['persona_fact', 'user_fact', 'user_preference', 'relationship_event', 'shared_event'],
-      queryIntent: 'memory_recall',
+      queryIntent: 'relationship',
       reason: 'User is asking for a stored personal relationship or identity fact.',
     }
   }
@@ -177,7 +177,7 @@ export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
   if (/\bfavou?rite\b|\blikes?\b|\bprefers?\b|\bdislikes?\b|\bcolou?r\b|最爱|爱好|偏好|喜欢|讨厌/.test(text)) {
     return {
       preferredTypes: ['persona_preference', 'persona_fact', 'user_preference', 'user_fact', 'shared_event'],
-      queryIntent: 'memory_recall',
+      queryIntent: 'preference',
       reason: 'User is asking for a stored persona or participant preference.',
     }
   }
@@ -185,7 +185,7 @@ export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
   if (/\b\d{1,2}[-/]\d{1,2}\b|\u53D1\u751F\u4E86\u4EC0\u4E48|\u90A3\u5929|\u9664\u6B64\u4E4B\u5916|\u8FD8\u6709\u5417|\u522B\u7684\u5417|\u5176\u4ED6\u5417/.test(text)) {
     return {
       preferredTypes: ['persona_fact', 'shared_event', 'relationship_event', 'emotional_echo', 'user_fact'],
-      queryIntent: 'memory_recall',
+      queryIntent: 'episodic_event',
       reason: 'User is asking about a dated event or follow-up to recalled events.',
     }
   }
@@ -193,7 +193,7 @@ export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
   if (/remember|recall|\u8FD8\u8BB0\u5F97|\u8BB0\u5F97|\u559C\u6B22\u4EC0\u4E48/.test(text)) {
     return {
       preferredTypes: ['persona_fact', 'persona_preference', 'user_preference', 'user_fact', 'shared_event'],
-      queryIntent: 'memory_recall',
+      queryIntent: 'explicit_history',
       reason: 'User is asking for remembered personal context.',
     }
   }
@@ -201,7 +201,7 @@ export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
   if (/again|\u53C8\u8FD9\u6837|\u6BCF\u6B21\u90FD|\u521A\u624D|\u751F\u6C14|\u54ED/.test(text)) {
     return {
       preferredTypes: ['conflict_event', 'relationship_event', 'emotional_echo'],
-      queryIntent: 'conflict_context',
+      queryIntent: 'emotion_conflict',
       reason: 'User references recurring emotional or conflict context.',
     }
   }
@@ -214,17 +214,25 @@ export function routeLumiMemoryQuery(query: string): LumiMemoryRoute {
     }
   }
 
-  if (/project|progress|repo|api|backend|migration|\u9879\u76EE|\u8FDB\u5EA6|\u540E\u7AEF|\u63A5\u53E3|airi|\u8FC1\u79FB/.test(text)) {
+  if (/promise|decision|commit|承诺|决定|确认|撤销/.test(text)) {
+    return {
+      preferredTypes: ['promise', 'project_context', 'shared_event'],
+      queryIntent: 'commitment_decision',
+      reason: 'User is asking about a commitment or decision.',
+    }
+  }
+
+  if (/project|progress|repo|api|backend|migration|项目|进度|后端|接口|airi|迁移/.test(text)) {
     return {
       preferredTypes: ['project_context', 'promise', 'shared_event'],
-      queryIntent: 'project_context',
+      queryIntent: 'project_continuity',
       reason: 'User is asking about ongoing project context.',
     }
   }
 
   return {
     preferredTypes: ['user_preference', 'shared_event', 'temporary_context'],
-    queryIntent: 'casual',
+    queryIntent: 'association',
     reason: 'Default casual recall path.',
   }
 }
@@ -234,9 +242,10 @@ export function rankLumiMemories(
   query: string,
   semanticScores: Record<string, number> = {},
   now = new Date(),
+  intent: LumiMemoryRoute['queryIntent'] = 'association',
 ): LumiRankedMemory[] {
   return memories
-    .map(memory => scoreLumiMemory(memory, query, semanticScores, now))
+    .map(memory => scoreLumiMemory(memory, query, semanticScores, now, intent))
     .sort((left, right) => right.finalScore - left.finalScore)
 }
 
@@ -245,6 +254,7 @@ export function scoreLumiMemory(
   query: string,
   semanticScores: Record<string, number> = {},
   now = new Date(),
+  intent: LumiMemoryRoute['queryIntent'] = 'association',
 ): LumiRankedMemory {
   const lexicalScore = lexicalSemanticScore(query, memory.content, memory.tags)
   const vectorScore = semanticScores[memory.id] ?? lexicalScore
@@ -253,6 +263,7 @@ export function scoreLumiMemory(
     : round(0.68 * vectorScore + 0.32 * lexicalScore)
   const keywordScore = keywordOverlapScore(query, memory.content, memory.tags)
   const recencyScore = memoryRecencyScore(memory, now)
+  const validity = memoryValidityScore(memory, now)
   const scoreBreakdown = {
     semanticScore,
     vectorScore,
@@ -263,16 +274,9 @@ export function scoreLumiMemory(
     emotionalIntensity: memory.emotionalIntensity,
     relationshipRelevance: memory.relationshipRelevance,
     confidence: memory.confidence,
+    validity,
   }
-  const finalScore = (
-    0.26 * semanticScore
-    + 0.22 * keywordScore
-    + 0.17 * memory.importance
-    + 0.13 * recencyScore
-    + 0.12 * memory.emotionalIntensity
-    + 0.07 * memory.relationshipRelevance
-    + 0.03 * memory.confidence
-  )
+  const finalScore = scoreForIntent(scoreBreakdown, intent)
 
   return {
     memory,
@@ -295,6 +299,8 @@ function filterSearchPool(
     .filter(fragment => fragment.personaId === request.personaId)
     .filter(fragment => includeMigratedUsers || canAccessLumiMemory(fragment, request))
     .filter(fragment => fragment.status === 'active' && isRecallableMemory(fragment))
+    .filter(fragment => !fragment.supersededById)
+    .filter(fragment => !fragment.validUntil || Date.parse(fragment.validUntil) > Date.now())
     .filter(fragment => !requestTypes.length || requestTypes.includes(fragment.type))
     .sort((left, right) => (right.updatedAt || '').localeCompare(left.updatedAt || ''))
 }
@@ -426,7 +432,12 @@ function isReliableRetrieval(
   if (externalVectorScore !== undefined && externalVectorScore >= 0.48)
     return true
 
-  if (intent === 'memory_recall' || intent === 'project_context') {
+  if (intent === 'exact_fact'
+    || intent === 'relationship'
+    || intent === 'preference'
+    || intent === 'project_continuity'
+    || intent === 'commitment_decision'
+    || intent === 'explicit_history') {
     return item.scoreBreakdown.keywordScore >= 0.12
       || item.scoreBreakdown.lexicalScore >= 0.12
   }
@@ -579,6 +590,88 @@ function memoryRecencyScore(memory: LumiMemoryFragment, now: Date): number {
   return 0.1
 }
 
+function memoryValidityScore(memory: LumiMemoryFragment, now: Date): number {
+  if (memory.supersededById || memory.status === 'contradicted')
+    return 0
+  const timestamp = now.getTime()
+  if (memory.validFrom && Date.parse(memory.validFrom) > timestamp)
+    return 0
+  if (memory.validUntil && Date.parse(memory.validUntil) <= timestamp)
+    return 0
+  if (memory.lastConfirmedAt) {
+    const ageDays = Math.max(0, (timestamp - Date.parse(memory.lastConfirmedAt)) / 86_400_000)
+    return ageDays <= 30 ? 1 : ageDays <= 180 ? 0.8 : 0.6
+  }
+  return 0.7
+}
+
+function scoreForIntent(
+  score: LumiRankedMemory['scoreBreakdown'],
+  intent: LumiMemoryRoute['queryIntent'],
+) {
+  if (intent === 'exact_fact') {
+    return 0.3 * score.semanticScore
+      + 0.22 * score.keywordScore
+      + 0.16 * score.confidence
+      + 0.15 * score.validity
+      + 0.1 * score.importance
+      + 0.07 * score.recencyScore
+  }
+  if (intent === 'relationship') {
+    return 0.2 * score.semanticScore
+      + 0.14 * score.keywordScore
+      + 0.24 * score.relationshipRelevance
+      + 0.15 * score.emotionalIntensity
+      + 0.1 * score.confidence
+      + 0.1 * score.validity
+      + 0.07 * score.recencyScore
+  }
+  if (intent === 'preference') {
+    return 0.25 * score.semanticScore
+      + 0.2 * score.keywordScore
+      + 0.16 * score.confidence
+      + 0.12 * score.importance
+      + 0.12 * score.validity
+      + 0.08 * score.recencyScore
+      + 0.07 * score.relationshipRelevance
+  }
+  if (intent === 'project_continuity' || intent === 'commitment_decision') {
+    return 0.24 * score.semanticScore
+      + 0.17 * score.keywordScore
+      + 0.15 * score.confidence
+      + 0.15 * score.validity
+      + 0.12 * score.recencyScore
+      + 0.1 * score.importance
+      + 0.07 * score.relationshipRelevance
+  }
+  if (intent === 'episodic_event' || intent === 'explicit_history') {
+    return 0.28 * score.semanticScore
+      + 0.17 * score.keywordScore
+      + 0.13 * score.emotionalIntensity
+      + 0.12 * score.importance
+      + 0.12 * score.confidence
+      + 0.1 * score.validity
+      + 0.08 * score.recencyScore
+  }
+  if (intent === 'emotion_conflict' || intent === 'boundary_pressure') {
+    return 0.18 * score.semanticScore
+      + 0.12 * score.keywordScore
+      + 0.22 * score.emotionalIntensity
+      + 0.22 * score.relationshipRelevance
+      + 0.1 * score.recencyScore
+      + 0.08 * score.confidence
+      + 0.08 * score.validity
+  }
+  return 0.26 * score.semanticScore
+    + 0.22 * score.keywordScore
+    + 0.17 * score.importance
+    + 0.13 * score.recencyScore
+    + 0.1 * score.emotionalIntensity
+    + 0.07 * score.relationshipRelevance
+    + 0.03 * score.confidence
+    + 0.02 * score.validity
+}
+
 function applyIntentLimits(ranked: LumiRankedMemory[], intent: LumiMemoryRoute['queryIntent']): LumiRankedMemory[] {
   const selected: LumiRankedMemory[] = []
   const counts = { temporary: 0, relationship: 0, longTerm: 0 }
@@ -610,27 +703,39 @@ function applyIntentLimits(ranked: LumiRankedMemory[], intent: LumiMemoryRoute['
 }
 
 function totalLimitForIntent(intent: LumiMemoryRoute['queryIntent']): number {
-  if (intent === 'casual')
+  if (intent === 'association')
     return 2
-  if (intent === 'conflict_context' || intent === 'boundary_pressure')
+  if (intent === 'emotion_conflict' || intent === 'boundary_pressure')
     return 4
-  if (intent === 'memory_recall' || intent === 'project_context')
+  if (intent === 'exact_fact'
+    || intent === 'relationship'
+    || intent === 'preference'
+    || intent === 'project_continuity'
+    || intent === 'commitment_decision'
+    || intent === 'episodic_event'
+    || intent === 'explicit_history') {
     return 8
+  }
   return 3
 }
 
 function longTermLimitForIntent(intent: LumiMemoryRoute['queryIntent']): number {
-  if (intent === 'casual')
+  if (intent === 'association')
     return 2
-  if (intent === 'project_context' || intent === 'memory_recall')
+  if (intent === 'project_continuity'
+    || intent === 'commitment_decision'
+    || intent === 'exact_fact'
+    || intent === 'preference'
+    || intent === 'explicit_history') {
     return 5
+  }
   return 3
 }
 
 function relationshipLimitForIntent(intent: LumiMemoryRoute['queryIntent']): number {
-  if (intent === 'conflict_context')
+  if (intent === 'emotion_conflict' || intent === 'relationship')
     return 3
-  if (intent === 'casual')
+  if (intent === 'association')
     return 1
   return 2
 }

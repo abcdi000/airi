@@ -185,7 +185,6 @@ vi.mock('./lumi-memory', () => ({
 
 vi.mock('./lumi-current-state', () => ({
   useLumiCurrentStateStore: () => ({
-    buildProfileCandidatesFromState: vi.fn().mockReturnValue([]),
     currentState: {},
     initializePersistence: vi.fn().mockResolvedValue(undefined),
     normalizedUpdateEveryTurns: 1000,

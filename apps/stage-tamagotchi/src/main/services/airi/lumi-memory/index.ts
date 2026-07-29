@@ -1,6 +1,14 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 
 import type { createContext } from '@moeru/eventa/adapters/electron/main'
+import type {
+  LumiCognitiveIdentity,
+  LumiMemoryFragment,
+  LumiMemorySearchRequest,
+  LumiMemoryStatus,
+  LumiMemoryType,
+  LumiRecallTrace,
+} from '@proj-airi/lumi-runtime'
 
 import type { ElectronLumiMemorySnapshot, ElectronLumiMemoryVectorRecord, ElectronLumiMemoryVectorSearchResult, ElectronLumiMemoryVectorStatus, ElectronLumiSocialLanguageSnapshot } from '../../../../shared/eventa'
 
@@ -14,6 +22,10 @@ import { fileURLToPath } from 'node:url'
 
 import { defineInvokeHandler } from '@moeru/eventa'
 import { errorMessageFrom } from '@moeru/std'
+import {
+  canAccessLumiMemory,
+  migrateSocialLanguageSnapshot,
+} from '@proj-airi/lumi-runtime'
 import { app } from 'electron'
 
 import {
@@ -37,6 +49,9 @@ import {
   electronLumiSocialLanguageReplaceSnapshot,
 
 } from '../../../../shared/eventa'
+import { loadCurrentStateFromDatabase } from '../lumi-current-state'
+import { loadProfileFromDatabase } from '../lumi-user-profile'
+import { createLumiDesktopCognitiveService } from './cognitive'
 
 type SqliteValue = string | number | null
 const LUMI_MEMORY_EMBEDDING_MODEL = 'BAAI/bge-small-zh-v1.5'
@@ -169,7 +184,7 @@ function normalizedLegacyMemory(row: Record<string, any>) {
     userId,
     ownerId: relationshipScoped ? userId : memory.ownerId,
     participantUserIds: relationshipScoped ? [userId] : memory.participantUserIds,
-    subjectUserIds: relationshipScoped && memory.subjectUserIds.length === 0 ? [userId] : memory.subjectUserIds,
+    subjectUserIds: relationshipScoped && (memory.subjectUserIds?.length ?? 0) === 0 ? [userId] : memory.subjectUserIds,
     sourceActorId: memory.sourceActorId === 'local' ? userId : memory.sourceActorId,
   }
 }
@@ -351,6 +366,17 @@ function migrateMemoryScopes(db: SqliteDatabase) {
     ['source_conversation_type', `TEXT NOT NULL DEFAULT 'import'`],
     ['classification_reason', `TEXT NOT NULL DEFAULT ''`],
     ['disclosure_reason', `TEXT NOT NULL DEFAULT ''`],
+    ['derived_from_evidence_ids_json', `TEXT NOT NULL DEFAULT '[]'`],
+    ['valid_from', 'TEXT'],
+    ['valid_until', 'TEXT'],
+    ['last_confirmed_at', 'TEXT'],
+    ['supersedes_id', 'TEXT'],
+    ['superseded_by_id', 'TEXT'],
+    ['contradicts_ids_json', `TEXT NOT NULL DEFAULT '[]'`],
+    ['source_episode_start_message_id', 'TEXT'],
+    ['source_episode_end_message_id', 'TEXT'],
+    ['use_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['evidence_origin', `TEXT NOT NULL DEFAULT 'legacy_import'`],
   ] as const
   for (const [name, definition] of additions) {
     if (!columns.some(column => column.name === name))
@@ -377,6 +403,8 @@ function migrateMemoryScopes(db: SqliteDatabase) {
         END
   `)
   db.exec('CREATE INDEX IF NOT EXISTS idx_lumi_memories_scope_owner ON lumi_memories(scope, owner_id)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_lumi_memories_current_validity ON lumi_memories(status, superseded_by_id, valid_until)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_lumi_memories_conversation_scope ON lumi_memories(conversation_id, scope)')
 
   if (getMeta(db, MEMORY_SCOPE_MIGRATION_KEY) !== 'complete') {
     const legacyRows = db.prepare('SELECT id, user_id FROM lumi_memories').all()
@@ -477,6 +505,15 @@ export function createLumiMemoryService(params: {
   defineInvokeHandler(params.context, electronLumiMemoryClear, async ({ userId }) => clearDatabase(userId))
   defineInvokeHandler(params.context, electronLumiSocialLanguageGetSnapshot, async () => getSocialLanguageSnapshot())
   defineInvokeHandler(params.context, electronLumiSocialLanguageReplaceSnapshot, async snapshot => replaceSocialLanguageSnapshot(snapshot))
+  createLumiDesktopCognitiveService({
+    context: params.context,
+    getDatabase,
+    recall: recallCognitiveMemories,
+    loadMemoriesByIds: loadCognitiveMemoriesByIds,
+    getSocialLanguageSnapshot: async () => migrateSocialLanguageSnapshot(await getSocialLanguageSnapshot()),
+    loadLegacyCurrentState: async actorId => (await loadCurrentStateFromDatabase(actorId)).state,
+    loadLegacyProfile: async actorId => (await loadProfileFromDatabase(actorId)).entries,
+  })
 }
 
 async function getSocialLanguageSnapshot(): Promise<ElectronLumiSocialLanguageSnapshot> {
@@ -538,6 +575,195 @@ async function getSnapshot(userId: string): Promise<ElectronLumiMemorySnapshot> 
     seedId,
     dbPath: path,
   } satisfies ElectronLumiMemorySnapshot
+}
+
+async function recallCognitiveMemories(input: {
+  identity: LumiCognitiveIdentity
+  query: string
+  limit: number
+  signal?: AbortSignal
+}): Promise<{ memories: LumiMemoryFragment[], trace: LumiRecallTrace }> {
+  const startedAt = Date.now()
+  throwIfAborted(input.signal)
+  const { db } = await getDatabase()
+  const lexicalRows = cognitiveLexicalCandidates(db, input.identity, input.query, Math.max(input.limit * 4, 20))
+  const lexicalIds = lexicalRows.map(row => stringField(row.id)).filter(Boolean)
+  const embeddingStartedAt = Date.now()
+  const semantic = await searchVectors(
+    input.identity.actorId,
+    input.query,
+    LUMI_MEMORY_VECTOR_SEARCH_LIMIT,
+  )
+  const embeddingDurationMs = Date.now() - embeddingStartedAt
+  throwIfAborted(input.signal)
+
+  const semanticEntries = Object.entries(semantic.scores)
+    .filter((entry): entry is [string, number] => Number.isFinite(entry[1]) && entry[1] >= 0.2)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, Math.max(input.limit * 6, 30))
+  const candidateIds = [...new Set([
+    ...lexicalIds,
+    ...semanticEntries.map(([id]) => id),
+  ])]
+  const accessible = await loadCognitiveMemoriesByIds({
+    identity: input.identity,
+    memoryIds: candidateIds,
+    signal: input.signal,
+  })
+  const lexicalRank = new Map(lexicalIds.map((id, index) => [id, 1 - index / Math.max(1, lexicalIds.length)]))
+  const semanticScore = new Map(semanticEntries)
+  const ranked = accessible
+    .map(memory => ({
+      memory,
+      score: (semanticScore.get(memory.id) ?? 0) * 0.62
+        + (lexicalRank.get(memory.id) ?? 0) * 0.23
+        + memory.confidence * 0.08
+        + memory.importance * 0.07,
+    }))
+    .filter(item => item.score >= 0.24)
+    .sort((left, right) => right.score - left.score)
+  const memories = ranked.slice(0, Math.max(0, Math.min(input.limit, 5))).map(item => item.memory)
+  const conflictRejectedCount = Math.max(0, candidateIds.length - accessible.length)
+
+  return {
+    memories,
+    trace: {
+      ran: true,
+      reusedPreviousState: false,
+      aclInputCount: candidateIds.length,
+      aclOutputCount: accessible.length,
+      lexicalCandidateCount: lexicalIds.length,
+      annCandidateCount: semanticEntries.length,
+      mergedCandidateCount: candidateIds.length,
+      rerankedCandidateCount: ranked.length,
+      thresholdRejectedCount: Math.max(0, accessible.length - ranked.length),
+      conflictRejectedCount,
+      injectedCount: memories.length,
+      durationMs: Date.now() - startedAt,
+      embeddingDurationMs,
+      vectorIndexStatus: semantic.status.available
+        ? `${semantic.status.model}:${semantic.status.indexedCount}/${semantic.status.totalCount}`
+        : 'structured_lexical_fallback',
+      fallbackReason: semantic.status.available ? undefined : semantic.status.lastError ?? 'semantic_index_unavailable',
+    },
+  }
+}
+
+async function loadCognitiveMemoriesByIds(input: {
+  identity: LumiCognitiveIdentity
+  memoryIds: readonly string[]
+  signal?: AbortSignal
+}): Promise<LumiMemoryFragment[]> {
+  throwIfAborted(input.signal)
+  const ids = [...new Set(input.memoryIds.map(id => id.trim()).filter(Boolean))].slice(0, 100)
+  if (ids.length === 0)
+    return []
+  const { db } = await getDatabase()
+  const placeholders = ids.map(() => '?').join(', ')
+  const request = cognitiveMemoryRequest(input.identity)
+  const byId = new Map(
+    db.prepare(`SELECT * FROM lumi_memories WHERE id IN (${placeholders})`)
+      .all(...ids)
+      .map(rowToMemory)
+      .filter(memory => isCurrentCognitiveMemory(memory) && canAccessLumiMemory(memory, request))
+      .map(memory => [memory.id, memory] as const),
+  )
+  throwIfAborted(input.signal)
+  return ids.flatMap(id => byId.get(id) ? [byId.get(id)!] : [])
+}
+
+function cognitiveLexicalCandidates(
+  db: SqliteDatabase,
+  identity: LumiCognitiveIdentity,
+  query: string,
+  limit: number,
+) {
+  const tokens = cognitiveQueryTokens(query)
+  if (tokens.length === 0)
+    return []
+  const access = cognitiveAccessClause(identity)
+  const lexical = tokens.map(() => `(m.content LIKE ? ESCAPE '\\' OR m.tags_json LIKE ? ESCAPE '\\')`).join(' OR ')
+  const patterns = tokens.flatMap(token => [`%${escapeLikePattern(token)}%`, `%${escapeLikePattern(token)}%`])
+  return db.prepare(`
+    SELECT m.* FROM lumi_memories m
+    WHERE m.status = 'active'
+      AND m.superseded_by_id IS NULL
+      AND (m.valid_until IS NULL OR m.valid_until > ?)
+      AND (${access.sql})
+      AND (${lexical})
+    ORDER BY m.importance DESC, m.confidence DESC, m.updated_at DESC
+    LIMIT ?
+  `).all(new Date().toISOString(), ...access.values, ...patterns, Math.max(1, limit))
+}
+
+function cognitiveAccessClause(identity: LumiCognitiveIdentity): {
+  sql: string
+  values: SqliteValue[]
+} {
+  if (identity.conversationType === 'group') {
+    return {
+      sql: `(
+        (m.scope IN ('global', 'shared') AND m.sensitivity != 'private')
+        OR (m.scope = 'group' AND m.conversation_id = ? AND m.sensitivity != 'private')
+      )`,
+      values: [identity.conversationId],
+    }
+  }
+  return {
+    sql: `(
+      (m.scope IN ('global', 'shared') AND m.sensitivity != 'private')
+      OR (
+        m.scope IN ('relationship', 'private')
+        AND (
+          m.user_id = ?
+          OR m.owner_id = ?
+          OR EXISTS (
+            SELECT 1 FROM json_each(m.participant_user_ids_json) participant
+            WHERE participant.value = ?
+          )
+        )
+      )
+    )`,
+    values: [identity.actorId, identity.actorId, identity.actorId],
+  }
+}
+
+function cognitiveMemoryRequest(identity: LumiCognitiveIdentity): LumiMemorySearchRequest {
+  return {
+    query: '',
+    userId: identity.actorId,
+    viewerUserId: identity.actorId,
+    personaId: identity.personaId,
+    limit: 100,
+    conversationType: identity.conversationType === 'group' ? 'group' : 'direct',
+    conversationId: identity.conversationId,
+    participantUserIds: [...identity.participantUserIds],
+  }
+}
+
+function isCurrentCognitiveMemory(memory: LumiMemoryFragment): boolean {
+  return memory.status === 'active'
+    && !memory.supersededById
+    && (!memory.validUntil || Date.parse(memory.validUntil) > Date.now())
+}
+
+function cognitiveQueryTokens(query: string): string[] {
+  const normalized = query.toLocaleLowerCase().replace(/\s+/g, ' ').trim()
+  if (!normalized)
+    return []
+  const matches = normalized.match(/[\p{L}\p{N}_-]{2,}/gu) ?? []
+  return [...new Set(matches)]
+    .sort((left, right) => right.length - left.length)
+    .slice(0, 8)
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, match => `\\${match}`)
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted)
+    throw signal.reason ?? new Error('Desktop cognitive recall aborted')
 }
 
 async function replaceSnapshot(userId: string, snapshot: ElectronLumiMemorySnapshot): Promise<ElectronLumiMemorySnapshot> {
@@ -604,9 +830,20 @@ function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
       source_actor_id,
       source_conversation_type,
       classification_reason,
-      disclosure_reason
+      disclosure_reason,
+      derived_from_evidence_ids_json,
+      valid_from,
+      valid_until,
+      last_confirmed_at,
+      supersedes_id,
+      superseded_by_id,
+      contradicts_ids_json,
+      source_episode_start_message_id,
+      source_episode_end_message_id,
+      use_count,
+      evidence_origin
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       user_id = excluded.user_id,
       persona_id = excluded.persona_id,
@@ -634,7 +871,18 @@ function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
       source_actor_id = excluded.source_actor_id,
       source_conversation_type = excluded.source_conversation_type,
       classification_reason = excluded.classification_reason,
-      disclosure_reason = excluded.disclosure_reason
+      disclosure_reason = excluded.disclosure_reason,
+      derived_from_evidence_ids_json = excluded.derived_from_evidence_ids_json,
+      valid_from = excluded.valid_from,
+      valid_until = excluded.valid_until,
+      last_confirmed_at = excluded.last_confirmed_at,
+      supersedes_id = excluded.supersedes_id,
+      superseded_by_id = excluded.superseded_by_id,
+      contradicts_ids_json = excluded.contradicts_ids_json,
+      source_episode_start_message_id = excluded.source_episode_start_message_id,
+      source_episode_end_message_id = excluded.source_episode_end_message_id,
+      use_count = excluded.use_count,
+      evidence_origin = excluded.evidence_origin
   `).run(
     stringField(memory.id),
     stringField(memory.userId, 'local'),
@@ -664,6 +912,17 @@ function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
     sourceConversationTypeField(memory.sourceConversationType ?? memory.source_conversation_type),
     stringField(memory.classificationReason ?? memory.classification_reason),
     stringField(memory.disclosureReason ?? memory.disclosure_reason),
+    JSON.stringify(stringArrayField(memory.derivedFromEvidenceIds ?? memory.derived_from_evidence_ids_json)),
+    nullableString(memory.validFrom ?? memory.valid_from),
+    nullableString(memory.validUntil ?? memory.valid_until),
+    nullableString(memory.lastConfirmedAt ?? memory.last_confirmed_at),
+    nullableString(memory.supersedesId ?? memory.supersedes_id),
+    nullableString(memory.supersededById ?? memory.superseded_by_id),
+    JSON.stringify(stringArrayField(memory.contradictsIds ?? memory.contradicts_ids_json)),
+    nullableString(memory.sourceEpisodeStartMessageId ?? memory.source_episode_start_message_id),
+    nullableString(memory.sourceEpisodeEndMessageId ?? memory.source_episode_end_message_id),
+    numberField(memory.useCount ?? memory.use_count),
+    evidenceOriginField(memory.evidenceOrigin ?? memory.evidence_origin),
   )
 }
 
@@ -1307,13 +1566,13 @@ function pruneEvents(db: SqliteDatabase, userId: string) {
   `).run(userId, userId)
 }
 
-function rowLikeMemory(value: Record<string, any>) {
+function rowLikeMemory(value: Record<string, any>): LumiMemoryFragment {
   return {
     id: stringField(value.id),
     userId: stringField(value.userId ?? value.user_id, 'local'),
     personaId: stringField(value.personaId ?? value.persona_id, 'lumi'),
     conversationId: value.conversationId ?? value.conversation_id ?? undefined,
-    type: stringField(value.type, 'user_fact'),
+    type: memoryTypeField(value.type),
     content: stringField(value.content),
     sourceMessageId: value.sourceMessageId ?? value.source_message_id ?? undefined,
     confidence: numberField(value.confidence),
@@ -1325,7 +1584,7 @@ function rowLikeMemory(value: Record<string, any>) {
     lastUsedAt: value.lastUsedAt ?? value.last_used_at ?? undefined,
     decay: numberField(value.decay),
     tags: Array.isArray(value.tags) ? value.tags.filter(item => typeof item === 'string') : parseJsonArray(value.tags_json),
-    status: stringField(value.status, 'candidate'),
+    status: memoryStatusField(value.status),
     scope: memoryScopeField(value.scope),
     ownerType: ownerTypeField(value.ownerType ?? value.owner_type, value.scope),
     ownerId: stringField(value.ownerId ?? value.owner_id, defaultMemoryOwnerId(value)),
@@ -1337,6 +1596,17 @@ function rowLikeMemory(value: Record<string, any>) {
     sourceConversationType: sourceConversationTypeField(value.sourceConversationType ?? value.source_conversation_type),
     classificationReason: stringField(value.classificationReason ?? value.classification_reason),
     disclosureReason: stringField(value.disclosureReason ?? value.disclosure_reason),
+    derivedFromEvidenceIds: stringArrayField(value.derivedFromEvidenceIds ?? value.derived_from_evidence_ids_json),
+    validFrom: value.validFrom ?? value.valid_from ?? undefined,
+    validUntil: value.validUntil ?? value.valid_until ?? undefined,
+    lastConfirmedAt: value.lastConfirmedAt ?? value.last_confirmed_at ?? undefined,
+    supersedesId: value.supersedesId ?? value.supersedes_id ?? undefined,
+    supersededById: value.supersededById ?? value.superseded_by_id ?? undefined,
+    contradictsIds: stringArrayField(value.contradictsIds ?? value.contradicts_ids_json),
+    sourceEpisodeStartMessageId: value.sourceEpisodeStartMessageId ?? value.source_episode_start_message_id ?? undefined,
+    sourceEpisodeEndMessageId: value.sourceEpisodeEndMessageId ?? value.source_episode_end_message_id ?? undefined,
+    useCount: numberField(value.useCount ?? value.use_count),
+    evidenceOrigin: evidenceOriginField(value.evidenceOrigin ?? value.evidence_origin),
   }
 }
 
@@ -1411,6 +1681,42 @@ function sensitivityField(value: unknown, scope: unknown) {
 
 function sourceConversationTypeField(value: unknown) {
   return value === 'direct' || value === 'group' || value === 'manual' ? value : 'import'
+}
+
+function evidenceOriginField(value: unknown) {
+  return value === 'primary' || value === 'derived' ? value : 'legacy_import'
+}
+
+function memoryTypeField(value: unknown): LumiMemoryType {
+  switch (value) {
+    case 'user_preference':
+    case 'user_fact':
+    case 'persona_fact':
+    case 'relationship_event':
+    case 'shared_event':
+    case 'persona_preference':
+    case 'conflict_event':
+    case 'promise':
+    case 'project_context':
+    case 'temporary_context':
+    case 'emotional_echo':
+      return value
+    default:
+      return 'user_fact'
+  }
+}
+
+function memoryStatusField(value: unknown): LumiMemoryStatus {
+  switch (value) {
+    case 'candidate':
+    case 'active':
+    case 'rejected':
+    case 'contradicted':
+    case 'archived':
+      return value
+    default:
+      return 'candidate'
+  }
 }
 
 function defaultMemoryOwnerId(value: Record<string, any>) {

@@ -7,6 +7,7 @@ import type {
   AgentPersonProfile,
   AgentToolsPort,
   AgentTraceEvent,
+  CognitiveContextPort,
   DirectOutboundAdapter,
   DirectPerceptionEnvelope,
   LanguageModelMessage,
@@ -128,7 +129,31 @@ export class DesktopLumiAgentHost {
   readonly #runtimes = new Map<string, LumiAgentRuntime>()
   readonly #seedExclusions = new Map<string, string>()
   readonly #toolProgressListeners = new Map<string, DesktopAgentIngestInput['onToolProgress']>()
+  #cognitive?: CognitiveContextPort
   #clearTask?: Promise<void>
+
+  readonly #cognitiveDelegate: CognitiveContextPort = {
+    prepareTurn: async input => await this.#requiredCognitive().prepareTurn(input),
+    recordContextUse: async (input) => {
+      await this.#requiredCognitive().recordContextUse?.(input)
+    },
+  }
+
+  /**
+   * Connects the desktop Agent Runtime to Electron-owned cognitive persistence.
+   *
+   * Use when:
+   * - The Electron renderer has initialized its typed Eventa bridge
+   *
+   * Expects:
+   * - The port preserves the immutable envelope identity for every call
+   *
+   * Returns:
+   * - Nothing; existing sessions use the stable delegate on their next turn
+   */
+  setCognitivePort(port: CognitiveContextPort | undefined): void {
+    this.#cognitive = port
+  }
 
   async ingest(input: DesktopAgentIngestInput) {
     await this.#clearTask
@@ -227,6 +252,7 @@ export class DesktopLumiAgentHost {
       languageModel: models.languageModel,
       persistence: this.#persistence(input.mode),
       identity: createDesktopIdentityPort(),
+      cognitive: this.#cognitiveDelegate,
       memory: createDesktopMemoryPort(),
       replyPolicy: createDesktopReplyPolicy(),
       socialLanguage: createDesktopSocialLanguagePort(models.languageModel, input.mode === 'shadow'),
@@ -295,6 +321,12 @@ export class DesktopLumiAgentHost {
 
   #persistenceKey(mode: Exclude<LumiAgentRuntimeMode, 'legacy'>, conversationId: string): string {
     return `${mode}:${conversationId}`
+  }
+
+  #requiredCognitive(): CognitiveContextPort {
+    if (!this.#cognitive)
+      throw new Error('Desktop cognitive IPC bridge is not configured')
+    return this.#cognitive
   }
 }
 

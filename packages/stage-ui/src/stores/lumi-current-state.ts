@@ -1,6 +1,6 @@
 import type { ChatHistoryItem } from '../types/chat'
-import type { LumiUserProfileCandidate } from './lumi-user-profile'
 
+import { errorMessageFrom } from '@moeru/std'
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
@@ -230,7 +230,7 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
         persistenceReady.value = true
       }
       catch (error) {
-        persistenceLastError.value = error instanceof Error ? error.message : String(error)
+        persistenceLastError.value = errorMessageFrom(error) ?? String(error)
         persistenceReady.value = true
       }
     })()
@@ -269,7 +269,7 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
         currentState.value = normalizeState(snapshot.state)
     }
     catch (error) {
-      persistenceLastError.value = error instanceof Error ? error.message : String(error)
+      persistenceLastError.value = errorMessageFrom(error) ?? String(error)
       console.warn('[lumi-current-state] Failed to save current_state:', persistenceLastError.value)
     }
   }
@@ -294,7 +294,7 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
       await bridge.clearCurrentState()
     }
     catch (error) {
-      persistenceLastError.value = error instanceof Error ? error.message : String(error)
+      persistenceLastError.value = errorMessageFrom(error) ?? String(error)
     }
   }
 
@@ -318,53 +318,6 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     if (state.lastContinuationPoint)
       sections.push(`上次续接点：${state.lastContinuationPoint}`)
     return sections.join('\n')
-  }
-
-  function buildProfileCandidatesFromState(userId = activeStateUserId.value): LumiUserProfileCandidate[] {
-    const state = getStateForUser(userId)
-    const candidates: LumiUserProfileCandidate[] = []
-    const evidence = `current_state ${state.updatedAt || new Date().toISOString()}`
-    if (state.recentTopics[0]) {
-      candidates.push({
-        layer: 'dynamic',
-        key: 'current_focus',
-        value: state.recentTopics.slice(0, 3).join('；'),
-        confidence: 0.68,
-        sourceKind: 'current_state',
-        evidence,
-      })
-    }
-    if (state.activeProjects[0]) {
-      candidates.push({
-        layer: 'dynamic',
-        key: 'active_project',
-        value: state.activeProjects.slice(0, 3).join('；'),
-        confidence: 0.7,
-        sourceKind: 'current_state',
-        evidence,
-      })
-    }
-    if (state.unfinishedTasks[0]) {
-      candidates.push({
-        layer: 'dynamic',
-        key: 'unresolved_problem',
-        value: state.unfinishedTasks.slice(0, 4).join('；'),
-        confidence: 0.64,
-        sourceKind: 'current_state',
-        evidence,
-      })
-    }
-    if (state.userRecentMood) {
-      candidates.push({
-        layer: 'daily',
-        key: 'mood',
-        value: state.userRecentMood,
-        confidence: 0.6,
-        sourceKind: 'current_state',
-        evidence,
-      })
-    }
-    return candidates
   }
 
   function exportSnapshot(): LumiCurrentStateExportSnapshot {
@@ -404,7 +357,6 @@ export const useLumiCurrentStateStore = defineStore('lumi-current-state', () => 
     saveCurrentState,
     clearCurrentState,
     buildPromptContext,
-    buildProfileCandidatesFromState,
     exportSnapshot,
     importSnapshot,
   }

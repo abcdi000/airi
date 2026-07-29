@@ -1,4 +1,5 @@
 import type { ChatOrchestratorRuntimeState, ChatOrchestratorSendOptions, StreamEvent, StreamOptions } from '@proj-airi/core-agent'
+import type { CognitiveContextPort } from '@proj-airi/lumi-agent-runtime'
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { Message } from '@xsai/shared-chat'
 
@@ -540,8 +541,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
             .filter(Boolean)
             .join('\n\n')
           if (assistantText) {
-            void runLumiUserProfileAfterTurn(assistantText, sessionMessages, 'chat', interaction)
-            void runLumiCurrentStateAfterTurn(sessionMessages, false, interaction)
             runLumiEmotionAfterTurn(assistantText, sessionMessages, interaction)
             void runLumiAutoMemoryAfterTurn(assistantText, sessionMessages, sessionId, interaction)
           }
@@ -1686,23 +1685,13 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       const nextState = parseLumiCurrentStateUpdateOutput(buffer, previousState, sourceMessageIds)
       await lumiCurrentStateStore.saveCurrentState(nextState, userId)
 
-      const candidates = lumiCurrentStateStore.buildProfileCandidatesFromState(userId)
-      const results = candidates.length
-        ? await lumiUserProfileStore.applyCandidatesForUser(userId, candidates, {
-            sourceKind: 'current_state',
-            sourceMessageId: sourceMessageIds.at(-1),
-          })
-        : []
-
       appendLumiSystemNotice([
         'title: 短期意识状态',
         'status: updated',
         `topics: ${nextState.recentTopics.slice(0, 3).join('；') || 'none'}`,
         `active_projects: ${nextState.activeProjects.length}`,
         `unfinished_tasks: ${nextState.unfinishedTasks.length}`,
-        `profile_candidates: ${candidates.length}`,
-        `profile_stored: ${results.filter(result => result.status === 'stored').length}`,
-        `profile_pending: ${results.filter(result => result.status === 'pending').length}`,
+        'profile_projection: cognitive_evidence_only',
       ])
 
       return { status: 'updated' as const, state: nextState }
@@ -2079,6 +2068,10 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     }
   }
 
+  function setDesktopCognitivePort(port: CognitiveContextPort | undefined): void {
+    desktopLumiAgentHost.setCognitivePort(port)
+  }
+
   return {
     sending,
     pendingQueuedSendCount,
@@ -2091,6 +2084,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     reprocessMissedExternalGroupLanguage,
     runExternalStickerIntelligence,
     refreshLumiCurrentStateNow: () => runLumiCurrentStateAfterTurn(chatSession.messages, true),
+    setDesktopCognitivePort,
     clearLumiConversationContext,
     cancelPendingSends,
     getPendingQueuedSendSnapshot,

@@ -1,7 +1,9 @@
 import type { createContext } from '@moeru/eventa/adapters/electron/main'
 import type {
+  LumiBeliefHypothesis,
   LumiCognitiveEvidence,
   LumiCognitiveIdentity,
+  LumiCognitiveProfileProjection,
   LumiCognitiveProjectionState,
   LumiFeedbackEvent,
   LumiMemoryFragment,
@@ -13,6 +15,7 @@ import type {
   ElectronLumiCognitivePrepareTurnRequest,
   ElectronLumiCognitiveRecordUseRequest,
 } from '../../../../shared/eventa'
+import type { LegacyDesktopCognitiveSources } from './cognitiveMigration'
 import type { SqliteDatabase } from './index'
 
 import { defineInvokeHandler } from '@moeru/eventa'
@@ -25,9 +28,10 @@ import {
   electronLumiCognitivePrepareTurn,
   electronLumiCognitiveRecordUse,
 } from '../../../../shared/eventa'
+import { migrateLegacyDesktopCognition } from './cognitiveMigration'
 
 /** Main-process dependencies kept outside the renderer cognitive projection. */
-export interface LumiDesktopCognitiveServiceOptions {
+export interface LumiDesktopCognitiveServiceOptions extends LegacyDesktopCognitiveSources {
   /** Electron Eventa main context. */
   context: ReturnType<typeof createContext>['context']
   /** Shared memory database provider. */
@@ -93,6 +97,12 @@ async function desktopRepository(
   const { db } = await options.getDatabase()
   ensureCognitiveSchema(db)
   assertIdentity(request.identity)
+  try {
+    await migrateLegacyDesktopCognition(db, request.identity, options)
+  }
+  catch (error) {
+    console.warn('[lumi-cognitive] legacy projection migration failed; continuing without legacy projections', error)
+  }
   return {
     async loadWorkingMemory(identity: LumiCognitiveIdentity) {
       assertSameIdentity(identity, request.identity)
@@ -126,6 +136,7 @@ async function desktopRepository(
     },
     async loadProjectionState(identity: LumiCognitiveIdentity): Promise<LumiCognitiveProjectionState> {
       assertSameIdentity(identity, request.identity)
+      const projection = loadProjectionState(db, identity)
       const snapshot = await options.getSocialLanguageSnapshot()
       const behaviors = selectPlannerSocialBehaviors(snapshot.behaviors, {
         personId: identity.actorId,
@@ -139,15 +150,11 @@ async function desktopRepository(
         .filter(item => lowerText.includes(item.term.toLocaleLowerCase()))
         .slice(0, 4)
       return {
-        evidence: [],
-        hypotheses: [],
-        profile: [],
+        ...projection,
         interactionStrategies: [
           ...behaviors.map(item => item.behavior.action),
           ...jargon.map(item => `按语境理解“${item.term}”：${item.meanings[0]?.meaning ?? item.pragmaticFunctions.join('、')}`),
         ],
-        expressionAssets: [],
-        contradictions: [],
       }
     },
   }
@@ -310,6 +317,138 @@ function loadWorkingMemory(
   const memory = JSON.parse(row.payload_json) as LumiWorkingMemory
   assertWorkingMemoryIdentity(memory, identity)
   return Date.parse(memory.expiresAt) > Date.now() ? memory : undefined
+}
+
+function loadProjectionState(
+  db: SqliteDatabase,
+  identity: LumiCognitiveIdentity,
+): LumiCognitiveProjectionState {
+  const now = Date.now()
+  const hypotheses = db.prepare(`
+    SELECT payload_json FROM lumi_cognitive_beliefs
+    WHERE subject_id = ? AND status IN ('tentative', 'supported', 'stable')
+    ORDER BY updated_at DESC
+    LIMIT 100
+  `).all(identity.actorId).flatMap(row => parsedPayload<LumiBeliefHypothesis>(row.payload_json)).filter(item => !item.expiresAt || Date.parse(item.expiresAt) > now)
+  const profile = db.prepare(`
+    SELECT payload_json FROM lumi_cognitive_profile_projections
+    WHERE subject_id = ? AND status = 'active'
+    ORDER BY updated_at DESC
+    LIMIT 100
+  `).all(identity.actorId).flatMap(row => parsedPayload<LumiCognitiveProfileProjection>(row.payload_json)).filter(item => !item.expiresAt || Date.parse(item.expiresAt) > now)
+  const evidenceIds = [...new Set(hypotheses.flatMap(item => item.evidenceIds))]
+  const evidence = evidenceIds.length > 0
+    ? db.prepare(`
+        SELECT * FROM lumi_cognitive_evidence
+        WHERE id IN (${evidenceIds.map(() => '?').join(', ')})
+      `).all(...evidenceIds).flatMap(rowToEvidence)
+    : []
+  const contradictions = db.prepare(`
+    SELECT payload_json FROM lumi_cognitive_beliefs
+    WHERE subject_id = ? AND status = 'contradicted'
+    ORDER BY updated_at DESC
+    LIMIT 10
+  `).all(identity.actorId).flatMap(row => parsedPayload<LumiBeliefHypothesis>(row.payload_json)).map(item => `${item.predicate} 存在已记录反证，不能作为当前事实。`)
+
+  return {
+    evidence,
+    hypotheses,
+    profile,
+    interactionStrategies: [],
+    expressionAssets: [],
+    contradictions,
+  }
+}
+
+function rowToEvidence(row: Record<string, unknown>): LumiCognitiveEvidence[] {
+  const kind = cognitiveEvidenceKind(row.kind)
+  const origin = cognitiveEvidenceOrigin(row.origin)
+  const conversationType = cognitiveConversationType(row.conversation_type)
+  const scope = cognitiveScope(row.scope)
+  const sensitivity = row.sensitivity === 'private' ? 'private' : 'normal'
+  if (!kind || !origin || !conversationType || !scope)
+    return []
+  return [{
+    id: stringValue(row.id),
+    actorId: stringValue(row.actor_id),
+    subjectUserIds: jsonStringArray(row.subject_user_ids_json),
+    conversationId: stringValue(row.conversation_id) || undefined,
+    conversationType,
+    kind,
+    origin,
+    content: stringValue(row.content),
+    sourceId: stringValue(row.source_id) || undefined,
+    sourceMessageId: stringValue(row.source_message_id) || undefined,
+    occurredAt: stringValue(row.occurred_at),
+    trust: finiteNumber(row.trust),
+    authorVerified: Number(row.author_verified) === 1,
+    scope,
+    sensitivity,
+    participantUserIds: jsonStringArray(row.participant_user_ids_json),
+    derivedFromEvidenceIds: jsonStringArray(row.derived_from_evidence_ids_json),
+    derivationReason: stringValue(row.derivation_reason) || undefined,
+    schemaVersion: 1,
+  }]
+}
+
+function parsedPayload<T>(value: unknown): T[] {
+  if (typeof value !== 'string')
+    return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? [parsed as T] : []
+  }
+  catch {
+    return []
+  }
+}
+
+function cognitiveEvidenceKind(value: unknown): LumiCognitiveEvidence['kind'] | undefined {
+  switch (value) {
+    case 'user_statement':
+    case 'user_correction':
+    case 'observed_behavior':
+    case 'tool_result':
+    case 'screen_observation':
+    case 'lumi_action':
+    case 'user_feedback':
+    case 'relationship_event':
+    case 'conversation_episode':
+    case 'legacy_import':
+      return value
+    default:
+      return undefined
+  }
+}
+
+function cognitiveEvidenceOrigin(value: unknown): LumiCognitiveEvidence['origin'] | undefined {
+  return value === 'primary' || value === 'derived' || value === 'legacy_import'
+    ? value
+    : undefined
+}
+
+function cognitiveConversationType(value: unknown): LumiCognitiveEvidence['conversationType'] | undefined {
+  return value === 'direct' || value === 'group' || value === 'internal'
+    ? value
+    : undefined
+}
+
+function cognitiveScope(value: unknown): LumiCognitiveEvidence['scope'] | undefined {
+  return value === 'global'
+    || value === 'shared'
+    || value === 'relationship'
+    || value === 'group'
+    || value === 'private'
+    ? value
+    : undefined
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
 function commitFastLoop(db: SqliteDatabase, input: {

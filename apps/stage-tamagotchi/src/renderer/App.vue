@@ -50,6 +50,8 @@ import {
   electronGodotStageGetStatus,
   electronGodotStageStatusChanged,
   electronImportLumiChannelDeviceArchive,
+  electronLumiCognitivePrepareTurn,
+  electronLumiCognitiveRecordUse,
   electronLumiCurrentStateClear,
   electronLumiCurrentStateGetSnapshot,
   electronLumiCurrentStateSaveSnapshot,
@@ -216,6 +218,8 @@ const syncLumiMemoryVector = useElectronEventaInvoke(electronLumiMemorySyncVecto
 const saveLumiMemoryEvent = useElectronEventaInvoke(electronLumiMemorySaveEvent)
 const setLumiMemorySeedId = useElectronEventaInvoke(electronLumiMemorySetSeedId)
 const clearLumiMemory = useElectronEventaInvoke(electronLumiMemoryClear)
+const prepareLumiCognitiveTurn = useElectronEventaInvoke(electronLumiCognitivePrepareTurn)
+const recordLumiCognitiveUse = useElectronEventaInvoke(electronLumiCognitiveRecordUse)
 const getLumiSocialLanguageSnapshot = useElectronEventaInvoke(electronLumiSocialLanguageGetSnapshot)
 const replaceLumiSocialLanguageSnapshot = useElectronEventaInvoke(electronLumiSocialLanguageReplaceSnapshot)
 const loadLumiCurrentStateFromDatabase = useElectronEventaInvoke(electronLumiCurrentStateGetSnapshot)
@@ -321,6 +325,48 @@ lumiMemoryStore.setPersistenceBridge({
   saveEvent: payload => saveLumiMemoryEvent(toIpcPayload(payload) as any),
   setSeedId: payload => setLumiMemorySeedId(payload),
   clear: payload => clearLumiMemory(payload),
+})
+
+chatOrchestratorStore.setDesktopCognitivePort({
+  async prepareTurn({ envelope, recentTurns }) {
+    return await prepareLumiCognitiveTurn(toIpcPayload({
+      identity: {
+        actorId: envelope.personId,
+        personaId: 'lumi',
+        conversationId: envelope.conversationId,
+        conversationType: envelope.conversationType,
+        participantUserIds: [...new Set([
+          envelope.personId,
+          ...envelope.participantPersonIds,
+        ])],
+      },
+      sourceMessageId: envelope.sourceMessageId,
+      userText: envelope.text ?? '',
+      recentTurns: recentTurns.map((turn, index) => ({
+        id: turn.messageIds.at(-1) ?? `dialogue:${turn.timestamp}:${index}`,
+        role: turn.role,
+        content: turn.textSegments.join('\n'),
+      })),
+      platform: envelope.platform,
+    }))
+  },
+  async recordContextUse({ envelope, memoryIds, hypothesisIds, usedAt }) {
+    await recordLumiCognitiveUse({
+      identity: {
+        actorId: envelope.personId,
+        personaId: 'lumi',
+        conversationId: envelope.conversationId,
+        conversationType: envelope.conversationType,
+        participantUserIds: [...new Set([
+          envelope.personId,
+          ...envelope.participantPersonIds,
+        ])],
+      },
+      memoryIds: [...memoryIds],
+      hypothesisIds: [...hypothesisIds],
+      usedAt,
+    })
+  },
 })
 
 lumiSocialLanguageStore.setPersistenceBridge({
@@ -600,6 +646,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   chatSyncLifecycle.dispose()
+  chatOrchestratorStore.setDesktopCognitivePort(undefined)
   disposeLumiIdentityChanged()
   stopLumiIdentityBusyWatch()
   disposeLumiOnlineDesktopBridge()

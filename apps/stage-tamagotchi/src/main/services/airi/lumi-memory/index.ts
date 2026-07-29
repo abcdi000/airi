@@ -23,8 +23,10 @@ import { fileURLToPath } from 'node:url'
 import { defineInvokeHandler } from '@moeru/eventa'
 import { errorMessageFrom } from '@moeru/std'
 import {
+  buildLumiMemoryLexicalQuery,
   canAccessLumiMemory,
   migrateSocialLanguageSnapshot,
+  retrieveLumiMemories,
 } from '@proj-airi/lumi-runtime'
 import { app } from 'electron'
 
@@ -346,6 +348,8 @@ function migrate(db: SqliteDatabase) {
     );
   `)
 
+  ensureMemoryFtsIndex(db)
+
   const eventColumns = db.prepare('PRAGMA table_info(lumi_memory_events)').all()
   if (!eventColumns.some(column => column.name === 'user_id'))
     db.exec(`ALTER TABLE lumi_memory_events ADD COLUMN user_id TEXT NOT NULL DEFAULT '${DOGGY_USER_ID}'`)
@@ -655,19 +659,16 @@ async function recallCognitiveMemories(input: {
     memoryIds: candidateIds,
     signal: input.signal,
   })
-  const lexicalRank = new Map(lexicalIds.map((id, index) => [id, 1 - index / Math.max(1, lexicalIds.length)]))
-  const semanticScore = new Map(semanticEntries)
-  const ranked = accessible
-    .map(memory => ({
-      memory,
-      score: (semanticScore.get(memory.id) ?? 0) * 0.62
-        + (lexicalRank.get(memory.id) ?? 0) * 0.23
-        + memory.confidence * 0.08
-        + memory.importance * 0.07,
-    }))
-    .filter(item => item.score >= 0.24)
-    .sort((left, right) => right.score - left.score)
-  const memories = ranked.slice(0, Math.max(0, Math.min(input.limit, 5))).map(item => item.memory)
+  const retrieval = retrieveLumiMemories(accessible, {
+    ...cognitiveMemoryRequest(input.identity),
+    query: input.query,
+    limit: Math.max(0, Math.min(input.limit, 5)),
+  }, {
+    externalVectorScores: Object.fromEntries(semanticEntries),
+    vectorEnabled: semantic.status.available,
+    now: new Date(),
+  })
+  const memories = retrieval.rankedMemories.map(item => item.memory)
   const conflictRejectedCount = Math.max(0, candidateIds.length - accessible.length)
 
   return {
@@ -680,8 +681,8 @@ async function recallCognitiveMemories(input: {
       lexicalCandidateCount: lexicalIds.length,
       annCandidateCount: semanticEntries.length,
       mergedCandidateCount: candidateIds.length,
-      rerankedCandidateCount: ranked.length,
-      thresholdRejectedCount: Math.max(0, accessible.length - ranked.length),
+      rerankedCandidateCount: retrieval.rankedMemories.length,
+      thresholdRejectedCount: Math.max(0, accessible.length - retrieval.rankedMemories.length),
       conflictRejectedCount,
       injectedCount: memories.length,
       durationMs: Date.now() - startedAt,
@@ -723,22 +724,45 @@ function cognitiveLexicalCandidates(
   query: string,
   limit: number,
 ) {
-  const tokens = cognitiveQueryTokens(query)
-  if (tokens.length === 0)
+  const lexicalQuery = buildLumiMemoryLexicalQuery(query)
+  if (!lexicalQuery.matchExpression && lexicalQuery.fallbackTerms.length === 0)
     return []
   const access = cognitiveAccessClause(identity)
-  const lexical = tokens.map(() => `(m.content LIKE ? ESCAPE '\\' OR m.tags_json LIKE ? ESCAPE '\\')`).join(' OR ')
-  const patterns = tokens.flatMap(token => [`%${escapeLikePattern(token)}%`, `%${escapeLikePattern(token)}%`])
-  return db.prepare(`
+  const boundedLimit = Math.max(1, limit)
+  const rows = lexicalQuery.matchExpression
+    ? db.prepare(`
+        SELECT m.*, bm25(lumi_memories_fts, 1.0, 0.35) AS lexical_rank
+        FROM lumi_memories_fts
+        INNER JOIN lumi_memories m ON m.rowid = lumi_memories_fts.rowid
+        WHERE lumi_memories_fts MATCH ?
+          AND m.status = 'active'
+          AND m.superseded_by_id IS NULL
+          AND (m.valid_until IS NULL OR m.valid_until > ?)
+          AND (${access.sql})
+        ORDER BY lexical_rank, m.importance DESC, m.confidence DESC
+        LIMIT ?
+      `).all(lexicalQuery.matchExpression, new Date().toISOString(), ...access.values, boundedLimit)
+    : []
+  if (lexicalQuery.fallbackTerms.length === 0 || rows.length >= boundedLimit)
+    return rows
+
+  const fallback = lexicalQuery.fallbackTerms
+    .map(() => `(m.content LIKE ? ESCAPE '\\' OR m.tags_json LIKE ? ESCAPE '\\')`)
+    .join(' OR ')
+  const patterns = lexicalQuery.fallbackTerms
+    .flatMap(token => [`%${escapeLikePattern(token)}%`, `%${escapeLikePattern(token)}%`])
+  const fallbackRows = db.prepare(`
     SELECT m.* FROM lumi_memories m
     WHERE m.status = 'active'
       AND m.superseded_by_id IS NULL
       AND (m.valid_until IS NULL OR m.valid_until > ?)
       AND (${access.sql})
-      AND (${lexical})
+      AND (${fallback})
     ORDER BY m.importance DESC, m.confidence DESC, m.updated_at DESC
     LIMIT ?
-  `).all(new Date().toISOString(), ...access.values, ...patterns, Math.max(1, limit))
+  `).all(new Date().toISOString(), ...access.values, ...patterns, boundedLimit)
+  return [...new Map([...rows, ...fallbackRows].map(row => [stringField(row.id), row])).values()]
+    .slice(0, boundedLimit)
 }
 
 function cognitiveAccessClause(identity: LumiCognitiveIdentity): {
@@ -792,18 +816,55 @@ function isCurrentCognitiveMemory(memory: LumiMemoryFragment): boolean {
     && (!memory.validUntil || Date.parse(memory.validUntil) > Date.now())
 }
 
-function cognitiveQueryTokens(query: string): string[] {
-  const normalized = query.toLocaleLowerCase().replace(/\s+/g, ' ').trim()
-  if (!normalized)
-    return []
-  const matches = normalized.match(/[\p{L}\p{N}_-]{2,}/gu) ?? []
-  return [...new Set(matches)]
-    .sort((left, right) => right.length - left.length)
-    .slice(0, 8)
-}
-
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, match => `\\${match}`)
+}
+
+function ensureMemoryFtsIndex(db: SqliteDatabase): void {
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS lumi_memories_fts USING fts5(
+      content,
+      tags_json,
+      content = 'lumi_memories',
+      content_rowid = 'rowid',
+      tokenize = 'trigram'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS lumi_memories_fts_after_insert
+    AFTER INSERT ON lumi_memories BEGIN
+      INSERT INTO lumi_memories_fts(rowid, content, tags_json)
+      VALUES (new.rowid, new.content, new.tags_json);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS lumi_memories_fts_after_delete
+    AFTER DELETE ON lumi_memories BEGIN
+      INSERT INTO lumi_memories_fts(lumi_memories_fts, rowid, content, tags_json)
+      VALUES ('delete', old.rowid, old.content, old.tags_json);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS lumi_memories_fts_after_update
+    AFTER UPDATE OF content, tags_json ON lumi_memories BEGIN
+      INSERT INTO lumi_memories_fts(lumi_memories_fts, rowid, content, tags_json)
+      VALUES ('delete', old.rowid, old.content, old.tags_json);
+      INSERT INTO lumi_memories_fts(rowid, content, tags_json)
+      VALUES (new.rowid, new.content, new.tags_json);
+    END;
+  `)
+  const memoryCount = Number(db.prepare('SELECT COUNT(*) AS count FROM lumi_memories').get()?.count ?? 0)
+  const indexCount = Number(db.prepare('SELECT COUNT(*) AS count FROM lumi_memories_fts').get()?.count ?? 0)
+  let requiresRebuild = memoryCount !== indexCount
+  if (!requiresRebuild) {
+    try {
+      // External-content FTS reads COUNT(*) from the content table, so equal
+      // counts alone cannot prove that the inverted index still exists.
+      db.prepare('INSERT INTO lumi_memories_fts(lumi_memories_fts, rank) VALUES (\'integrity-check\', 1)').run()
+    }
+    catch {
+      requiresRebuild = true
+    }
+  }
+  if (requiresRebuild)
+    db.prepare('INSERT INTO lumi_memories_fts(lumi_memories_fts) VALUES (\'rebuild\')').run()
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -1466,23 +1527,37 @@ function modelCacheFolderName(modelId: string) {
 
 function resolveVectorPythonCommand() {
   const configured = process.env.LUMI_MEMORY_VECTOR_PYTHON
-  if (configured && existsSync(configured))
+  if (configured)
     return { command: configured, args: [] as string[] }
 
   const bundled = bundledVectorPythonCandidates().find(candidate => existsSync(candidate))
   if (bundled)
     return { command: bundled, args: [] as string[] }
 
-  const candidates = [
-    'D:\\anaconda3\\envs\\airi\\python.exe',
-    'C:\\ProgramData\\anaconda3\\envs\\airi\\python.exe',
-    'C:\\Users\\abcdi000\\anaconda3\\envs\\airi\\python.exe',
-  ]
-  const found = candidates.find(candidate => existsSync(candidate))
-  if (found)
-    return { command: found, args: [] as string[] }
+  // Active virtual environments are portable development fallbacks. Packaged
+  // builds resolve the private runtime above and never depend on a user path.
+  const activeEnvironment = activeVectorPythonCandidates().find(candidate => existsSync(candidate))
+  if (activeEnvironment)
+    return { command: activeEnvironment, args: [] as string[] }
 
-  return { command: 'conda', args: ['run', '-n', 'airi', 'python'] }
+  return { command: process.platform === 'win32' ? 'python.exe' : 'python3', args: [] as string[] }
+}
+
+function activeVectorPythonCandidates() {
+  const roots = uniquePaths([
+    process.env.CONDA_PREFIX ?? '',
+    process.env.VIRTUAL_ENV ?? '',
+  ])
+  if (process.platform === 'win32') {
+    return roots.flatMap(root => [
+      join(root, 'python.exe'),
+      join(root, 'Scripts', 'python.exe'),
+    ])
+  }
+  return roots.flatMap(root => [
+    join(root, 'bin', 'python3'),
+    join(root, 'bin', 'python'),
+  ])
 }
 
 function bundledVectorPythonCandidates() {

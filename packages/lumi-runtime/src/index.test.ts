@@ -7,6 +7,7 @@ import {
   assessLumiRelationshipFallback,
   buildLumiContextualMemoryQuery,
   buildLumiMemoryCuratorUserPayload,
+  buildLumiMemoryLexicalQuery,
   buildLumiMemoryTopicAnalyzerUserPayload,
   checkLumiRelationshipGate,
   createDefaultLumiPersonaAnchor,
@@ -34,6 +35,18 @@ import {
 } from './index'
 
 describe('lumi runtime migration contracts', () => {
+  /** @example A Chinese decision query becomes bounded FTS trigrams without exposing syntax. */
+  it('builds safe CJK trigram terms and preserves short lexical fallbacks', () => {
+    const chinese = buildLumiMemoryLexicalQuery('以前想考西电，现在主要考虑西工大')
+    const mixed = buildLumiMemoryLexicalQuery('QQ "ID" birthday')
+
+    expect(chinese.matchExpression).toContain('"西工大"')
+    expect(chinese.matchExpression.split(' OR ').length).toBeLessThanOrEqual(24)
+    expect(chinese.fallbackTerms).toEqual([])
+    expect(mixed.matchExpression).toBe('"birthday"')
+    expect(mixed.fallbackTerms).toEqual(['qq', 'id'])
+  })
+
   it('detects user correction turns before memory recall continues a wrong topic', () => {
     const guard = analyzeLumiConversationGuard('\u4EC0\u4E48 Level 7\uFF0C\u6211\u90FD\u8BF4\u5176\u4ED6\u4E8B\u60C5\u4E86')
 
@@ -365,7 +378,7 @@ describe('lumi runtime migration contracts', () => {
       conversationType: 'direct',
     })
 
-    expect(result.route.queryIntent).toBe('project_context')
+    expect(result.route.queryIntent).toBe('project_continuity')
     expect(result.rankedMemories[0].memory.id).toBe('project-memory')
   })
 
@@ -394,7 +407,7 @@ describe('lumi runtime migration contracts', () => {
       conversationType: 'direct',
     })
 
-    expect(result.route.queryIntent).toBe('memory_recall')
+    expect(result.route.queryIntent).toBe('relationship')
     expect(result.rankedMemories[0].memory.id).toBe('relationship-identity-fact')
   })
 
@@ -423,7 +436,7 @@ describe('lumi runtime migration contracts', () => {
       conversationType: 'direct',
     })
 
-    expect(result.route.queryIntent).toBe('memory_recall')
+    expect(result.route.queryIntent).toBe('relationship')
     expect(result.rankedMemories[0].memory.id).toBe('account-username-fact')
   })
 

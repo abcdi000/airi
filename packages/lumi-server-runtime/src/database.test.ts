@@ -5,6 +5,11 @@ import type {
   LumiCognitiveIdentity,
 } from '@proj-airi/lumi-runtime'
 
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+
 import { createLumiWorkingMemory } from '@proj-airi/lumi-runtime'
 import { describe, expect, it } from 'vitest'
 
@@ -303,6 +308,106 @@ describe('lumiServerDatabase', () => {
     }
     finally {
       database.close()
+    }
+  })
+
+  /** @example BM25 finds an old authorized fact outside the legacy top-500 projection. */
+  it('searches the complete authorized corpus through the persistent FTS index', () => {
+    const database = LumiServerDatabase.open(':memory:')
+    try {
+      const oldTarget = database.storeMemoryCandidate({
+        actorPersonId: DOGGY_PERSON_ID,
+        conversationId: doggyDirectId,
+        candidate: memoryCandidate({
+          content: '很早以前确定过苍蓝档案纪念册放在旧硬盘里。',
+          importance: 0.01,
+          confidence: 0.7,
+        }),
+      })
+      database.setMemoryStatus(oldTarget.id, 'active')
+      for (let index = 0; index < 520; index += 1) {
+        const filler = database.storeMemoryCandidate({
+          actorPersonId: DOGGY_PERSON_ID,
+          conversationId: doggyDirectId,
+          candidate: memoryCandidate({
+            content: `Unrelated recent filler memory ${index}.`,
+            importance: 1,
+          }),
+        })
+        database.setMemoryStatus(filler.id, 'active')
+      }
+
+      const request = memoryRequest(DOGGY_PERSON_ID, doggyDirectId)
+      expect(database.listAccessibleMemories(request, 500).some(memory => memory.id === oldTarget.id)).toBe(false)
+      expect(database.searchAccessibleMemoriesLexically(request, '苍蓝档案纪念册', 5).map(memory => memory.id)).toContain(oldTarget.id)
+      expect(database.searchAccessibleMemoriesLexically(
+        memoryRequest(MOUSSY_PERSON_ID, moussyDirectId),
+        '苍蓝档案纪念册',
+        5,
+      )).toEqual([])
+    }
+    finally {
+      database.close()
+    }
+  })
+
+  /** @example FTS triggers and startup repair keep restored memory searchable. */
+  it('maintains and rebuilds the persistent lexical index', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'lumi-memory-fts-'))
+    const databasePath = join(directory, 'lumi.sqlite')
+    let database: LumiServerDatabase | undefined
+    try {
+      database = LumiServerDatabase.open(databasePath)
+      const memory = database.storeMemoryCandidate({
+        actorPersonId: DOGGY_PERSON_ID,
+        conversationId: doggyDirectId,
+        candidate: memoryCandidate({ content: '最初把瀚海灯塔计划放进项目记录。' }),
+      })
+      database.setMemoryStatus(memory.id, 'active')
+      const request = memoryRequest(DOGGY_PERSON_ID, doggyDirectId)
+      expect(database.searchAccessibleMemoriesLexically(request, '瀚海灯塔', 5).map(item => item.id)).toEqual([memory.id])
+      database.close()
+      database = undefined
+
+      const raw = new DatabaseSync(databasePath)
+      raw.prepare('UPDATE lumi_memories SET content = ?, updated_at = ? WHERE id = ?')
+        .run('后来把星海罗盘计划放进项目记录。', new Date().toISOString(), memory.id)
+      raw.close()
+
+      database = LumiServerDatabase.open(databasePath)
+      expect(database.searchAccessibleMemoriesLexically(request, '瀚海灯塔', 5)).toEqual([])
+      expect(database.searchAccessibleMemoriesLexically(request, '星海罗盘', 5).map(item => item.id)).toEqual([memory.id])
+      const backup = database.exportBackup()
+      database.close()
+      database = undefined
+
+      const corrupted = new DatabaseSync(databasePath)
+      corrupted.exec('DROP TABLE lumi_memories_fts')
+      corrupted.close()
+
+      database = LumiServerDatabase.open(databasePath)
+      expect(database.searchAccessibleMemoriesLexically(request, '星海罗盘', 5).map(item => item.id)).toEqual([memory.id])
+
+      const restored = LumiServerDatabase.open(':memory:')
+      try {
+        restored.restoreBackup(backup)
+        expect(restored.searchAccessibleMemoriesLexically(request, '星海罗盘', 5).map(item => item.id)).toEqual([memory.id])
+      }
+      finally {
+        restored.close()
+      }
+
+      database.close()
+      database = undefined
+      const afterDelete = new DatabaseSync(databasePath)
+      afterDelete.prepare('DELETE FROM lumi_memories WHERE id = ?').run(memory.id)
+      afterDelete.close()
+      database = LumiServerDatabase.open(databasePath)
+      expect(database.searchAccessibleMemoriesLexically(request, '星海罗盘', 5)).toEqual([])
+    }
+    finally {
+      database?.close()
+      rmSync(directory, { recursive: true, force: true })
     }
   })
 
@@ -753,8 +858,25 @@ describe('lumiServerDatabase', () => {
         }),
       })
 
+      // ROOT CAUSE:
+      //
+      // The old list query applied LIMIT before ACL filtering. Enough high-value
+      // private rows owned by another person could crowd the viewer's authorized
+      // rows out of the SQL window even though none were later disclosed.
+      for (let index = 0; index < 520; index += 1) {
+        database.storeMemoryCandidate({
+          actorPersonId: MOUSSY_PERSON_ID,
+          conversationId: moussyDirectId,
+          candidate: memoryCandidate({
+            content: `Moussy private high-priority note ${index}.`,
+            importance: 1,
+            tags: [`moussy-private-${index}`],
+          }),
+        })
+      }
+
       const doggyVisibleMemoryIds = database
-        .listAccessibleMemories(memoryRequest(DOGGY_PERSON_ID, doggyDirectId))
+        .listAccessibleMemories(memoryRequest(DOGGY_PERSON_ID, doggyDirectId), 500)
         .map(item => item.id)
       expect(doggyMemory.status).toBe('active')
       expect(moussyMemory.status).toBe('active')

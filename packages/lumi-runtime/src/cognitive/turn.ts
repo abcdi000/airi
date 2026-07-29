@@ -152,16 +152,21 @@ export async function prepareLumiCognitiveTurn(
   })
   throwIfAborted(input.signal)
 
-  const recalled = query.reusedPreviousState
-    ? await reusedRecall(input, query.reusedMemoryIds)
+  const recallPromise = query.reusedPreviousState
+    ? reusedRecall(input, query.reusedMemoryIds)
     : query.query.trim()
-      ? await input.repository.recall({
+      ? input.repository.recall({
           identity: input.identity,
           query: query.query,
           limit: 5,
           signal: input.signal,
         })
       : emptyRecall('empty_query')
+  const projectionPromise = input.repository.loadProjectionState(input.identity)
+  const [recalled, projection] = await Promise.all([
+    recallPromise,
+    projectionPromise,
+  ])
   throwIfAborted(input.signal)
 
   const recallState = buildRecallState(previous.recallState, query, recalled.memories, now)
@@ -185,7 +190,6 @@ export async function prepareLumiCognitiveTurn(
     feedback,
     workingMemory,
   })
-  const projection = await input.repository.loadProjectionState(input.identity)
   throwIfAborted(input.signal)
 
   return assembleLumiCognitiveContext({

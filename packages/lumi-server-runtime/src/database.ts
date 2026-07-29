@@ -33,6 +33,7 @@ import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import {
+  buildLumiMemoryLexicalQuery,
   canAccessLumiMemory,
   classifyLumiMemoryCandidate,
   createEmptySocialLanguageSnapshot,
@@ -885,10 +886,18 @@ export class LumiServerDatabase {
       conversationId: conversation?.id,
       participantUserIds: conversation?.participantPersonIds ?? [actorPersonId],
     }
-    const relevantActiveMemories = this.rows('SELECT * FROM lumi_memories WHERE status = \'active\'')
+    const access = memoryAccessSql(memoryRequest, actorPersonId)
+    const relevantActiveMemories = this.rows(`
+      SELECT memory.* FROM lumi_memories memory
+      WHERE memory.status = 'active'
+        AND (${access.sql})
+        AND EXISTS (
+          SELECT 1 FROM json_each(memory.subject_user_ids_json) subject
+          WHERE subject.value IN (${classification.subjectUserIds.map(() => '?').join(', ')})
+        )
+    `, ...access.values, ...classification.subjectUserIds)
       .map(memoryFromRow)
       .filter(memory => canAccessLumiMemory(memory, memoryRequest))
-      .filter(memory => (memory.subjectUserIds ?? []).some(subjectId => classification.subjectUserIds.includes(subjectId)))
     const decision = decideLumiMemoryStatus(
       input.candidate,
       relevantActiveMemories,
@@ -1036,15 +1045,85 @@ export class LumiServerDatabase {
   listAccessibleMemories(request: LumiMemorySearchRequest, limit = 500): LumiMemoryFragment[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 2_000)
       throw new Error('Memory limit must be between 1 and 2000')
-    this.assertPerson(requiredText(request.viewerUserId || request.userId, 'viewerUserId', 160))
+    const viewerPersonId = requiredText(request.viewerUserId || request.userId, 'viewerUserId', 160)
+    this.assertPerson(viewerPersonId)
+    const access = memoryAccessSql(request, viewerPersonId)
     return this.rows(`
-      SELECT * FROM lumi_memories
-      WHERE status = 'active'
-      ORDER BY importance DESC, updated_at DESC
+      SELECT memory.* FROM lumi_memories memory
+      WHERE memory.status = 'active'
+        AND (${access.sql})
+      ORDER BY memory.importance DESC, memory.updated_at DESC
       LIMIT ?
-    `, limit)
+    `, ...access.values, limit)
       .map(memoryFromRow)
       .filter(memory => canAccessLumiMemory(memory, request))
+  }
+
+  /**
+   * Searches the complete authorized memory corpus through the persistent FTS5 index.
+   *
+   * Use when:
+   * - Automatic recall needs lexical/BM25 candidates before Planner
+   * - Semantic retrieval is unavailable and must degrade without a recency window
+   *
+   * Expects:
+   * - The request carries the immutable authenticated viewer and conversation
+   *
+   * Returns:
+   * - Current, non-superseded memories ordered by FTS relevance and host policy
+   */
+  searchAccessibleMemoriesLexically(
+    request: LumiMemorySearchRequest,
+    query: string,
+    limit = 80,
+  ): LumiMemoryFragment[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 2_000)
+      throw new Error('Lexical memory limit must be between 1 and 2000')
+    const viewerPersonId = requiredText(request.viewerUserId || request.userId, 'viewerUserId', 160)
+    this.assertPerson(viewerPersonId)
+    const lexicalQuery = buildLumiMemoryLexicalQuery(requiredText(query, 'memory query', 50_000))
+    if (!lexicalQuery.matchExpression && lexicalQuery.fallbackTerms.length === 0)
+      return []
+
+    const access = memoryAccessSql(request, viewerPersonId)
+    const boundedLimit = Math.max(1, limit)
+    const rows = lexicalQuery.matchExpression
+      ? this.rows(`
+          SELECT memory.*, bm25(lumi_memories_fts, 1.0, 0.35) AS lexical_rank
+          FROM lumi_memories_fts
+          INNER JOIN lumi_memories memory ON memory.rowid = lumi_memories_fts.rowid
+          WHERE lumi_memories_fts MATCH ?
+            AND memory.status = 'active'
+            AND memory.superseded_by_id IS NULL
+            AND (memory.valid_until IS NULL OR memory.valid_until > ?)
+            AND (${access.sql})
+          ORDER BY lexical_rank, memory.importance DESC, memory.confidence DESC
+          LIMIT ?
+        `, lexicalQuery.matchExpression, new Date().toISOString(), ...access.values, boundedLimit)
+      : []
+    if (lexicalQuery.fallbackTerms.length > 0 && rows.length < boundedLimit) {
+      const fallback = lexicalQuery.fallbackTerms
+        .map(() => `(memory.content LIKE ? ESCAPE '\\' OR memory.tags_json LIKE ? ESCAPE '\\')`)
+        .join(' OR ')
+      const patterns = lexicalQuery.fallbackTerms
+        .flatMap(term => [`%${escapeLikePattern(term)}%`, `%${escapeLikePattern(term)}%`])
+      rows.push(...this.rows(`
+        SELECT memory.* FROM lumi_memories memory
+        WHERE memory.status = 'active'
+          AND memory.superseded_by_id IS NULL
+          AND (memory.valid_until IS NULL OR memory.valid_until > ?)
+          AND (${access.sql})
+          AND (${fallback})
+        ORDER BY memory.importance DESC, memory.confidence DESC, memory.updated_at DESC
+        LIMIT ?
+      `, new Date().toISOString(), ...access.values, ...patterns, boundedLimit))
+    }
+
+    return [...new Map(rows
+      .map(memoryFromRow)
+      .filter(memory => canAccessLumiMemory(memory, request))
+      .map(memory => [memory.id, memory] as const)).values()]
+      .slice(0, boundedLimit)
   }
 
   /** Returns non-rejected memories whose current content has no matching vector. */
@@ -2086,6 +2165,7 @@ export class LumiServerDatabase {
     this.addColumnIfMissing('lumi_memories', 'evidence_origin', 'TEXT NOT NULL DEFAULT \'legacy_import\'')
     this.addColumnIfMissing('lumi_memory_vectors', 'device', 'TEXT')
     this.addColumnIfMissing('lumi_devices', 'session_id', 'TEXT')
+    this.ensureMemoryFtsIndex()
   }
 
   private seedKnownPeopleAndConversations() {
@@ -3082,6 +3162,53 @@ export class LumiServerDatabase {
       this.database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
   }
 
+  private ensureMemoryFtsIndex() {
+    this.database.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS lumi_memories_fts USING fts5(
+        content,
+        tags_json,
+        content = 'lumi_memories',
+        content_rowid = 'rowid',
+        tokenize = 'trigram'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS lumi_memories_fts_after_insert
+      AFTER INSERT ON lumi_memories BEGIN
+        INSERT INTO lumi_memories_fts(rowid, content, tags_json)
+        VALUES (new.rowid, new.content, new.tags_json);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS lumi_memories_fts_after_delete
+      AFTER DELETE ON lumi_memories BEGIN
+        INSERT INTO lumi_memories_fts(lumi_memories_fts, rowid, content, tags_json)
+        VALUES ('delete', old.rowid, old.content, old.tags_json);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS lumi_memories_fts_after_update
+      AFTER UPDATE OF content, tags_json ON lumi_memories BEGIN
+        INSERT INTO lumi_memories_fts(lumi_memories_fts, rowid, content, tags_json)
+        VALUES ('delete', old.rowid, old.content, old.tags_json);
+        INSERT INTO lumi_memories_fts(rowid, content, tags_json)
+        VALUES (new.rowid, new.content, new.tags_json);
+      END;
+    `)
+    const memoryCount = Number(this.row('SELECT COUNT(*) AS count FROM lumi_memories')?.count ?? 0)
+    const indexCount = Number(this.row('SELECT COUNT(*) AS count FROM lumi_memories_fts')?.count ?? 0)
+    let requiresRebuild = memoryCount !== indexCount
+    if (!requiresRebuild) {
+      try {
+        // External-content FTS reads COUNT(*) from the content table, so equal
+        // counts alone cannot prove that the inverted index still exists.
+        this.database.prepare('INSERT INTO lumi_memories_fts(lumi_memories_fts, rank) VALUES (\'integrity-check\', 1)').run()
+      }
+      catch {
+        requiresRebuild = true
+      }
+    }
+    if (requiresRebuild)
+      this.database.prepare('INSERT INTO lumi_memories_fts(lumi_memories_fts) VALUES (\'rebuild\')').run()
+  }
+
   private tableExists(table: string) {
     return Boolean(this.row('SELECT name FROM sqlite_master WHERE type = \'table\' AND name = ?', table))
   }
@@ -3552,6 +3679,47 @@ function cognitiveMemoryRequest(identity: LumiCognitiveIdentity): LumiMemorySear
     conversationId: identity.conversationId,
     participantUserIds: [...identity.participantUserIds],
   }
+}
+
+function memoryAccessSql(
+  request: LumiMemorySearchRequest,
+  viewerPersonId: string,
+): { sql: string, values: SqliteValue[] } {
+  if (request.conversationType === 'group') {
+    return {
+      sql: `(
+        (memory.scope IN ('global', 'shared') AND memory.sensitivity != 'private')
+        OR (
+          memory.scope = 'group'
+          AND memory.conversation_id = ?
+          AND memory.sensitivity != 'private'
+        )
+      )`,
+      values: [optionalText(request.conversationId, 160) ?? ''],
+    }
+  }
+
+  return {
+    sql: `(
+      (memory.scope IN ('global', 'shared') AND memory.sensitivity != 'private')
+      OR (
+        memory.scope IN ('relationship', 'private')
+        AND (
+          memory.user_id = ?
+          OR memory.owner_id = ?
+          OR EXISTS (
+            SELECT 1 FROM json_each(memory.participant_user_ids_json) participant
+            WHERE participant.value = ?
+          )
+        )
+      )
+    )`,
+    values: [viewerPersonId, viewerPersonId, viewerPersonId],
+  }
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, match => `\\${match}`)
 }
 
 function cognitiveIdentityForBelief(belief: LumiBeliefHypothesis): LumiCognitiveIdentity {

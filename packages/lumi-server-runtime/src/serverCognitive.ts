@@ -13,6 +13,7 @@ import type { LumiServerDatabase } from './database'
 
 import {
   prepareLumiCognitiveTurn,
+  retrieveLumiMemories,
   selectPlannerSocialBehaviors,
 } from '@proj-airi/lumi-runtime'
 
@@ -65,49 +66,58 @@ export function createServerCognitiveContextPort(
           async recall(input) {
             const startedAt = Date.now()
             const request = memoryRequest(input.identity, input.query, input.limit)
-            let candidateIds: string[]
+            const lexical = options.database.searchAccessibleMemoriesLexically(
+              request,
+              input.query,
+              Math.max(input.limit * 6, 30),
+            )
+            let semantic: LumiMemoryFragment[] = []
             let vectorIndexStatus: string
             let fallbackReason: string | undefined
             if (options.semanticMemorySearch) {
               try {
-                const semantic = await options.semanticMemorySearch(request, input.limit)
+                semantic = await options.semanticMemorySearch(request, Math.max(input.limit * 6, 30))
                 throwIfAborted(input.signal)
-                candidateIds = semantic.map(memory => memory.id)
                 vectorIndexStatus = 'server_semantic_service'
               }
               catch {
-                candidateIds = options.database
-                  .listAccessibleMemories(request, Math.max(input.limit * 4, 20))
-                  .map(memory => memory.id)
                 vectorIndexStatus = 'structured_lexical_fallback'
                 fallbackReason = 'semantic_recall_failed'
               }
             }
             else {
-              candidateIds = options.database
-                .listAccessibleMemories(request, Math.max(input.limit * 4, 20))
-                .map(memory => memory.id)
               vectorIndexStatus = 'structured_lexical_fallback'
               fallbackReason = 'semantic_recall_unconfigured'
             }
             throwIfAborted(input.signal)
-            const uniqueIds = [...new Set(candidateIds)]
-            const memories = options.database
-              .loadAccessibleMemoriesByIds(input.identity, uniqueIds)
-              .slice(0, input.limit)
+            const uniqueIds = [...new Set([
+              ...lexical.map(memory => memory.id),
+              ...semantic.map(memory => memory.id),
+            ])]
+            const accessible = options.database.loadAccessibleMemoriesByIds(input.identity, uniqueIds)
+            const semanticScores = Object.fromEntries(semantic.map((memory, index) => [
+              memory.id,
+              Math.max(0.35, 1 - index / Math.max(1, semantic.length)),
+            ]))
+            const retrieval = retrieveLumiMemories(accessible, request, {
+              externalVectorScores: semanticScores,
+              vectorEnabled: !fallbackReason,
+              now: new Date(),
+            })
+            const memories = retrieval.rankedMemories.map(item => item.memory)
             return {
               memories,
               trace: {
                 ran: true,
                 reusedPreviousState: false,
                 aclInputCount: uniqueIds.length,
-                aclOutputCount: memories.length,
-                lexicalCandidateCount: fallbackReason ? uniqueIds.length : 0,
-                annCandidateCount: fallbackReason ? 0 : uniqueIds.length,
+                aclOutputCount: accessible.length,
+                lexicalCandidateCount: lexical.length,
+                annCandidateCount: fallbackReason ? 0 : semantic.length,
                 mergedCandidateCount: uniqueIds.length,
-                rerankedCandidateCount: memories.length,
-                thresholdRejectedCount: Math.max(0, uniqueIds.length - memories.length),
-                conflictRejectedCount: 0,
+                rerankedCandidateCount: retrieval.rankedMemories.length,
+                thresholdRejectedCount: Math.max(0, accessible.length - retrieval.rankedMemories.length),
+                conflictRejectedCount: Math.max(0, uniqueIds.length - accessible.length),
                 injectedCount: memories.length,
                 durationMs: Date.now() - startedAt,
                 vectorIndexStatus,

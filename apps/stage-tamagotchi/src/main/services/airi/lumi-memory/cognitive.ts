@@ -416,12 +416,17 @@ export function consolidateMemoryIntoCognition(
     }
   }
 
-  const existing = db.prepare(`
+  const existingRow = db.prepare(`
     SELECT payload_json FROM lumi_cognitive_beliefs
-    WHERE subject_id = ? AND status != 'expired'
+    WHERE subject_id = ?
+      AND status != 'expired'
+      AND json_extract(payload_json, '$.predicate') = ?
     ORDER BY updated_at DESC
-    LIMIT 500
-  `).all(memory.userId).flatMap(row => parsedPayload<LumiBeliefHypothesis>(row.payload_json)).find(item => item.predicate === derived.observation.predicate)
+    LIMIT 1
+  `).get(memory.userId, derived.observation.predicate)
+  const existing = existingRow
+    ? parsedPayload<LumiBeliefHypothesis>(existingRow.payload_json)[0]
+    : undefined
   const belief = observeLumiBeliefHypothesis(existing, derived.observation)
   const supersededMemoryIds = correction
     ? supersedeMemoriesFromOldBelief(db, memory, existing, sourceEvidence.occurredAt)
@@ -811,6 +816,13 @@ function ensureCognitiveSchema(db: SqliteDatabase): void {
       ON lumi_cognitive_feedback(actor_id, occurred_at DESC);
     CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_belief_subject_status
       ON lumi_cognitive_beliefs(subject_id, status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_belief_subject_predicate_status
+      ON lumi_cognitive_beliefs(
+        subject_id,
+        json_extract(payload_json, '$.predicate'),
+        status,
+        updated_at DESC
+      );
     CREATE INDEX IF NOT EXISTS idx_lumi_cognitive_profile_subject_status
       ON lumi_cognitive_profile_projections(subject_id, status, layer, updated_at DESC);
   `)

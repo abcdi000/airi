@@ -1,6 +1,29 @@
 # Lumi Context Continuity
 
-Lumi keeps long conversations through a token-aware rolling summary. Message-count slicing is disabled for Lumi conversations.
+Lumi keeps long conversations through two complementary layers: a deterministic
+conversation-scoped Working Memory for immediate continuity, and a token-aware
+rolling summary for model context pressure. Message-count slicing is disabled
+for Lumi conversations.
+
+## Working Memory and rolling summaries
+
+Working Memory is owned by the cognitive host and keyed by immutable
+`actorId + personaId + conversationId`. It tracks active topics, entity
+bindings, goals, projects, open loops, temporary user state, continuation point,
+and the previous automatic memory `RecallState`. It is updated incrementally on
+every verified direct turn without another model request.
+
+Pure acknowledgements such as `嗯`, `对`, and `继续` reuse the previous
+RecallState and assistant continuation context while it remains valid. A short
+message with new semantics builds a new query from the current message, recent
+complete user/assistant turns, active topics, and the previous query.
+
+The rolling summary serves a different purpose: it preserves older chronology
+when native messages would exceed the active Planner budget. It never replaces
+Working Memory, and neither projection deletes the original timeline. When a
+summary advances, the host may also consolidate the covered primary evidence
+into an idempotent `conversation_episode` memory with the exact source message
+range.
 
 ## Provider ceiling and active budgets
 
@@ -40,17 +63,18 @@ DeepSeek context caching is automatic. Lumi therefore keeps stable persona and c
 
 ```mermaid
 flowchart TD
-  A[Complete authorized conversation history] --> B[Estimate token budget]
-  B --> C[Choose dynamic Planner and Replyer budgets]
-  C --> D{Planner projection below 82 percent?}
-  D -->|Yes| E[Use existing summary plus uncovered messages]
-  D -->|No| F[Send older chunks to the consciousness model]
-  F --> G[Persist rolling conversation-scoped summary]
-  G --> H[Planner sees summary plus broad recent history and tools]
-  E --> H
-  H --> I[Planner returns semantic intent and tool conclusions]
-  I --> J[Replyer sees summary plus compact recent history and selected learning assets]
-  J --> K[Visible reply]
+  A[Complete authorized conversation history] --> B[Update Working Memory and automatic recall]
+  B --> C[Estimate token budget]
+  C --> D[Choose dynamic Planner and Replyer budgets]
+  D --> E{Planner projection below 82 percent?}
+  E -->|Yes| F[Use existing summary plus uncovered messages]
+  E -->|No| G[Send older chunks to the consciousness model]
+  G --> H[Persist summary and consolidate covered episode]
+  H --> I[Planner sees cognitive bundle, summary, broad recent history, and tools]
+  F --> I
+  I --> J[Planner returns semantic intent and tool conclusions]
+  J --> K[Replyer sees compact history and wording-only cognitive projection]
+  K --> L[Visible reply]
 ```
 
 The summarizer must preserve speakers, chronology, unresolved questions, promises, corrections, emotional changes, decisions, and privacy scope. It may not invent facts. Original stored messages are not deleted.
@@ -61,6 +85,9 @@ The summarizer must preserve speakers, chronology, unresolved questions, promise
 - Online summaries are stored per server conversation in `lumi_conversation_summaries`.
 - Online summaries are included in full server backups.
 - Direct-chat and group summaries never share a key or projection.
+- Working Memory is persisted independently per actor, Lumi persona, and conversation.
+- Group conversations do not inherit a participant's direct Working Memory.
+- Consolidated episodes retain evidence lineage and the covered message range.
 
 ## Settings
 

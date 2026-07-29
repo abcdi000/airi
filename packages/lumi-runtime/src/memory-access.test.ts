@@ -77,7 +77,7 @@ describe('lumi memory access policy', () => {
 
     const result = retrieveLumiMemories([preference], request(MOUSSY, { query: 'Lumi favorite color cyan' }))
 
-    expect(result.route.queryIntent).toBe('memory_recall')
+    expect(result.route.queryIntent).toBe('preference')
     expect(result.route.preferredTypes).toContain('persona_preference')
     expect(result.rankedMemories[0]?.memory.id).toBe('lumi-favorite-color')
   })

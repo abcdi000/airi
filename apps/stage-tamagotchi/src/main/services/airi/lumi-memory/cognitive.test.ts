@@ -340,6 +340,37 @@ describe('desktop cognitive service', () => {
       VALUES (?, ?, 'active', 'private', NULL, ?)
     `).run(oldMemory.id, identity.actorId, oldMemory.updatedAt)
     const first = consolidateMemoryIntoCognition(db as SqliteDatabase, oldMemory)
+    if (!first.beliefId)
+      throw new Error('Expected the first memory to produce a cognitive belief')
+    const sourceBelief = JSON.parse(String(db.prepare(`
+      SELECT payload_json FROM lumi_cognitive_beliefs WHERE id = ?
+    `).get(first.beliefId)?.payload_json)) as LumiBeliefHypothesis
+
+    // ROOT CAUSE:
+    //
+    // The old implementation loaded only the 500 newest beliefs and searched
+    // their JSON in JavaScript. An older matching predicate disappeared once a
+    // person accumulated more beliefs, so corrections created a second truth.
+    // The indexed predicate query now finds the exact prior belief directly.
+    const insertFillerBelief = db.prepare(`
+      INSERT INTO lumi_cognitive_beliefs (
+        id, subject_id, conversation_id, status, payload_json, updated_at
+      ) VALUES (?, ?, ?, 'supported', ?, ?)
+    `)
+    for (let index = 0; index < 520; index += 1) {
+      insertFillerBelief.run(
+        `belief:filler:${index}`,
+        identity.actorId,
+        identity.conversationId,
+        JSON.stringify({
+          ...sourceBelief,
+          id: `belief:filler:${index}`,
+          predicate: `unrelated.${index}`,
+          value: `unrelated value ${index}`,
+        }),
+        new Date(Date.now() + index + 1_000).toISOString(),
+      )
+    }
 
     await prepareTurn({
       identity,
@@ -363,7 +394,7 @@ describe('desktop cognitive service', () => {
       VALUES (?, ?, 'candidate', 'private', NULL, ?)
     `).run(correctedMemory.id, identity.actorId, correctedMemory.updatedAt)
     const corrected = consolidateMemoryIntoCognition(db as SqliteDatabase, correctedMemory)
-    if (!first.beliefId || !correctedMemory.sourceMessageId)
+    if (!correctedMemory.sourceMessageId)
       throw new Error('Expected the tested memory to retain cognitive lineage')
 
     const beliefRow = db.prepare('SELECT payload_json FROM lumi_cognitive_beliefs WHERE id = ?').get(first.beliefId)

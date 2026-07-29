@@ -31,7 +31,9 @@
 | Shareable daily events and moods | shared; all known Lumi users, normal sensitivity only |
 | Group experiences | group conversation + explicit participants |
 | Sensitive user memory | private; explicit user audience only |
-| Short-term continuation state | user + Lumi persona |
+| Working Memory and RecallState | user + Lumi persona + conversation |
+| Tentative beliefs and profile projections | subject user + evidence ACL |
+| Cognitive evidence and feedback | verified actor + source conversation |
 | Trust, familiarity, conflict, boundaries | user + Lumi persona |
 | Lumi mood and autonomous self-state | Lumi-global |
 | Diary and private notes | Lumi-private, with provenance and disclosure metadata |
@@ -53,6 +55,13 @@ The host reclassifies every curator proposal before persistence. Stored memories
 
 Model recall and raw inspection are separate permissions. A normal-sensitivity `shared` memory may be retrieved by Lumi in another user's direct conversation, but its raw content is not listed in that user's memory settings. The inspector lists Lumi-global self facts, memories owned by the active user, and memories belonging to groups that include that user. Group turns can retrieve global/shared memories and memories owned by that exact group, but never a participant's relationship or private memory.
 
+The cognitive context assembler repeats these checks after retrieval. It removes
+inactive and superseded memories, rejects hypotheses whose evidence is not
+visible to the immutable actor, omits all direct profile projections in groups,
+and strips temporary user and relationship state from group Working Memory.
+Language affinity, expression ownership, and learned behavior never expand this
+authorization.
+
 Legacy relationship memories are never widened automatically. The memory settings page derives an operator review queue by re-running host policy against active records owned by the selected user. Only explicit `lumi_self` persona facts/preferences and normal-sensitivity `shared_event`/`emotional_echo` records can appear. Private records, ordinary user facts, inactive records, and anything sourced from a group are excluded. Each promotion is revalidated at execution time, recorded as a `promote` audit event, persisted with its updated disclosure metadata, and projected into already-loaded user snapshots without requiring an identity switch.
 
 ## External Identity Key
@@ -72,9 +81,28 @@ The first migration is copy-then-verify:
 
 Development and installed desktop builds may use different Electron `userData` directories. The development database under `@proj-airi/stage-tamagotchi` is not an automatic mirror of the installed `lumi` database. Cross-directory transfer must use the trusted archive/import flow or an explicit verified migration; the runtime must not silently merge databases.
 
+The cognitive migration also follows copy, verify, activate. Legacy profile,
+current-state, and memory projections are marked `legacy_import`; they are not
+promoted to verified primary user statements. Cognitive evidence, lineage,
+Working Memory, beliefs, feedback, profile projections, long-term memories, and
+vector records are included in the trusted archive and validated before import.
+
+An actor-scoped cognitive erasure deletes that person's evidence, Working
+Memory, beliefs, feedback, profile projections, memories, associated vectors,
+and legacy person state in one transaction. Identity bindings and message
+timelines remain intact. Other people's data remains untouched, and foreign-key
+constraints reject an erasure that would silently break valid cross-person
+evidence lineage.
+
 ## Concurrency
 
 Core services accept an explicit interaction identity and must not read a mutable desktop active user. The desktop UI may serialize identity switching, while future QQ or other channel adapters can run multiple user interactions concurrently with independent request contexts.
+
+The cognitive repository receives the same immutable identity for loading,
+automatic recall, committing the fast loop, loading projections, and recording
+actual context use. A repository implementation rejects a Working Memory or
+evidence record that changes actor, persona, conversation, participants, or
+conversation type during one turn.
 
 The core sender owns one FIFO queue per execution lane, so unrelated conversations can progress concurrently and `sending` remains true until every active turn settles. Prompt contexts, memory tools, traces, user profile state, and short-term state are bound to the immutable actor captured for the turn. Direct conversations use `lumi-user:<actorId>` lanes, while group conversations use `lumi-conversation:<sessionId>` lanes. This preserves order within one person's direct relationship and within one group timeline without globally serializing Doggy and Moussy.
 

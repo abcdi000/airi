@@ -342,15 +342,34 @@ function resolveVectorRuntime(config: LumiServerProcessConfig) {
         join(root, 'apps', 'stage-tamagotchi', 'resources', 'python', 'python.exe'),
       ]))
     : firstExisting(resourceRoots.flatMap(root => [join(root, 'python', 'bin', 'python3'), join(root, 'python', 'bin', 'python')]))
+  const activeEnvironmentPython = firstExisting(activeVectorPythonCandidates())
   const pythonCommand = config.vector.pythonPath
     ?? process.env.LUMI_MEMORY_VECTOR_PYTHON
     ?? bundledPython
+    ?? activeEnvironmentPython
     ?? (process.platform === 'win32' ? 'python.exe' : 'python3')
   const bundledModelCacheRoot = firstExisting(resourceRoots.flatMap(root => [
     join(root, 'vector-model-cache'),
     join(root, 'apps', 'stage-tamagotchi', 'resources', 'vector-model-cache'),
   ]))
   return { workerScriptPath, pythonCommand, bundledModelCacheRoot }
+}
+
+function activeVectorPythonCandidates() {
+  const roots = uniquePaths([
+    process.env.CONDA_PREFIX ?? '',
+    process.env.VIRTUAL_ENV ?? '',
+  ])
+  if (process.platform === 'win32') {
+    return roots.flatMap(root => [
+      join(root, 'python.exe'),
+      join(root, 'Scripts', 'python.exe'),
+    ])
+  }
+  return roots.flatMap(root => [
+    join(root, 'bin', 'python3'),
+    join(root, 'bin', 'python'),
+  ])
 }
 
 function ancestorPaths(start: string) {

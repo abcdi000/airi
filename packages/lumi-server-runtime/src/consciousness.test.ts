@@ -70,7 +70,7 @@ describe('createLumiNodeConsciousness', () => {
       const authorizedEvidence = request.messages.find(message => message.content.includes('[Lumi authorized turn evidence]'))
       expect(authorizedEvidence?.content).toContain('Doggy likes building houses.')
       expect(authorizedEvidence?.content).toContain('Minecraft')
-      expect(request.messages.at(-1)?.content).toContain('[Lumi planner turn context]')
+      expect(request.messages.at(-1)?.content).toContain('<Lumi规划回合上下文>')
     }
     finally {
       database.close()
@@ -102,7 +102,7 @@ describe('createLumiNodeConsciousness', () => {
       const authorizedEvidence = request.messages.find(message => message.content.includes('[Lumi authorized turn evidence]'))
       expect(authorizedEvidence?.content).toMatch(/^\[Moussy\] Do you remember\?/)
       expect(authorizedEvidence?.content).toContain('[Lumi authorized turn evidence]')
-      expect(request.messages.at(-1)?.content).toContain('[Lumi planner turn context]')
+      expect(request.messages.at(-1)?.content).toContain('<Lumi规划回合上下文>')
       expect(request.messages[0].content).not.toContain('privateTopic')
       expect(request.messages[0].content).not.toContain('Current authenticated speaker: Moussy')
       expect(authorizedEvidence?.name).toBe('Moussy')

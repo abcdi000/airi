@@ -654,6 +654,79 @@ describe('lumi cognitive fast loop', () => {
     })
   })
 
+  /** @example Hybrid recall and cognitive projections start together before Planner. */
+  it('loads automatic recall and cognitive projections in parallel', async () => {
+    const starts: string[] = []
+    let releaseRecall = () => {}
+    let releaseProjection = () => {}
+    const recallGate = new Promise<void>((resolve) => {
+      releaseRecall = resolve
+    })
+    const projectionGate = new Promise<void>((resolve) => {
+      releaseProjection = resolve
+    })
+    const repository: LumiCognitiveTurnRepository = {
+      async loadWorkingMemory() {
+        return undefined
+      },
+      async commitFastLoop() {},
+      async recall() {
+        starts.push('recall')
+        await recallGate
+        return {
+          memories: [],
+          trace: {
+            ran: true,
+            reusedPreviousState: false,
+            aclInputCount: 0,
+            aclOutputCount: 0,
+            lexicalCandidateCount: 0,
+            annCandidateCount: 0,
+            mergedCandidateCount: 0,
+            rerankedCandidateCount: 0,
+            thresholdRejectedCount: 0,
+            conflictRejectedCount: 0,
+            injectedCount: 0,
+            durationMs: 1,
+          },
+        }
+      },
+      async loadMemoriesByIds() {
+        return []
+      },
+      async loadProjectionState() {
+        starts.push('projection')
+        await projectionGate
+        return { evidence: [], hypotheses: [], profile: [] }
+      },
+    }
+    const task = prepareLumiCognitiveTurn({
+      identity: {
+        actorId: DOGGY,
+        personaId: 'lumi',
+        conversationId: 'direct-doggy',
+        conversationType: 'direct',
+        participantUserIds: [DOGGY],
+      },
+      sourceMessageId: 'message-parallel',
+      userText: '继续检查 Patchright 项目',
+      recentTurns: [{ id: 'message-parallel', role: 'user', content: '继续检查 Patchright 项目' }],
+      repository,
+      now: NOW,
+    })
+
+    try {
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(starts).toEqual(['recall', 'projection'])
+    }
+    finally {
+      releaseRecall()
+      releaseProjection()
+    }
+    await task
+  })
+
   /** @example “对” reloads previous memory IDs without another semantic recall. */
   it('reuses persisted RecallState for a pure acknowledgement without a new embedding path', async () => {
     const workingMemory = createLumiWorkingMemory({

@@ -23,6 +23,14 @@ interface VectorMatch {
   score: number
 }
 
+/** Bounded FTS5 query plus short terms that need a LIKE fallback. */
+export interface LumiMemoryLexicalQuery {
+  /** Escaped FTS5 expression suitable for a trigram index. */
+  matchExpression: string
+  /** One- or two-character terms that a trigram tokenizer cannot index. */
+  fallbackTerms: string[]
+}
+
 const MEMORY_VECTOR_CACHE_LIMIT = 5000
 const QUERY_VECTOR_CACHE_LIMIT = 300
 const memoryVectorCache = new Map<string, { signature: string, vector: number[] }>()
@@ -71,6 +79,54 @@ const QUERY_STOPWORDS = new Set([
   '\u8BB0\u5F97',
   '\u8FD8\u8BB0',
 ])
+
+/**
+ * Normalizes a natural-language memory query for SQLite FTS5 trigram search.
+ *
+ * Before:
+ * - `以前想考西电，现在主要考虑西工大` (one uninterrupted CJK run)
+ * - `QQ "ID"` (FTS syntax mixed with a short term)
+ *
+ * After:
+ * - A bounded OR expression of escaped CJK trigrams, including `"西工大"`
+ * - Safe indexed terms plus `QQ` in `fallbackTerms`
+ */
+export function buildLumiMemoryLexicalQuery(
+  query: string,
+  maximumIndexedTerms = 24,
+  maximumFallbackTerms = 8,
+): LumiMemoryLexicalQuery {
+  const normalized = query.normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, ' ').trim()
+  if (!normalized)
+    return { matchExpression: '', fallbackTerms: [] }
+
+  const indexedTerms: string[] = []
+  const fallbackTerms: string[] = []
+  const runs = normalized.match(/\p{Script=Han}+|[\p{L}\p{N}_-]+/gu) ?? []
+  for (const run of runs) {
+    const characters = [...run]
+    if (/^\p{Script=Han}+$/u.test(run)) {
+      if (characters.length < 3) {
+        fallbackTerms.push(run)
+        continue
+      }
+      for (let index = 0; index <= characters.length - 3; index += 1)
+        indexedTerms.push(characters.slice(index, index + 3).join(''))
+      continue
+    }
+
+    if (characters.length >= 3)
+      indexedTerms.push(run)
+    else
+      fallbackTerms.push(run)
+  }
+
+  const boundedIndexed = [...new Set(indexedTerms)].slice(0, Math.max(1, maximumIndexedTerms))
+  return {
+    matchExpression: boundedIndexed.map(term => `"${term.replaceAll('"', '""')}"`).join(' OR '),
+    fallbackTerms: [...new Set(fallbackTerms)].slice(0, Math.max(1, maximumFallbackTerms)),
+  }
+}
 
 export function retrieveLumiMemories(
   fragments: LumiMemoryFragment[],

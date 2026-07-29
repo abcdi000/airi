@@ -57,6 +57,7 @@ import {
   deleteCognitiveActorData,
   exportCognitiveActorData,
   importCognitiveActorData,
+  runDesktopCognitiveMaintenance,
 } from './cognitive'
 
 type SqliteValue = string | number | null
@@ -65,6 +66,7 @@ const LUMI_MEMORY_EMBEDDING_BATCH_SIZE = 32
 const LUMI_MEMORY_VECTOR_SEARCH_LIMIT = 800
 const LUMI_MEMORY_VECTOR_BACKFILL_LIMIT = 2000
 const LUMI_MEMORY_VECTOR_REQUEST_TIMEOUT_MS = 1_800_000
+const LUMI_COGNITIVE_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000
 const MAIN_MODULE_DIR = dirname(fileURLToPath(import.meta.url))
 const LUMI_MEMORY_VECTOR_DEVICE = process.env.LUMI_MEMORY_VECTOR_DEVICE || 'auto'
 const DOGGY_USER_ID = 'lumi-user-00000000-0000-4000-8000-000000000001'
@@ -86,6 +88,9 @@ const MEMORY_ACCESS_SQL = `(
     )
   )
 )`
+
+let cognitiveMaintenanceTimer: ReturnType<typeof setTimeout> | undefined
+let cognitiveMaintenanceRunning = false
 
 export interface SqliteStatement {
   all: (...values: SqliteValue[]) => Record<string, any>[]
@@ -520,6 +525,32 @@ export function createLumiMemoryService(params: {
     loadLegacyCurrentState: async actorId => (await loadCurrentStateFromDatabase(actorId)).state,
     loadLegacyProfile: async actorId => (await loadProfileFromDatabase(actorId)).entries,
   })
+  scheduleDesktopCognitiveMaintenance()
+}
+
+function scheduleDesktopCognitiveMaintenance(): void {
+  if (cognitiveMaintenanceTimer)
+    return
+  const schedule = (delayMs: number) => {
+    cognitiveMaintenanceTimer = setTimeout(() => {
+      cognitiveMaintenanceTimer = undefined
+      if (cognitiveMaintenanceRunning) {
+        schedule(LUMI_COGNITIVE_MAINTENANCE_INTERVAL_MS)
+        return
+      }
+      cognitiveMaintenanceRunning = true
+      void getDatabase()
+        .then(({ db }) => runDesktopCognitiveMaintenance(db))
+        .catch(error => console.warn('[lumi-cognitive] background maintenance failed', error))
+        .finally(() => {
+          cognitiveMaintenanceRunning = false
+          schedule(LUMI_COGNITIVE_MAINTENANCE_INTERVAL_MS)
+        })
+    }, delayMs)
+    cognitiveMaintenanceTimer.unref?.()
+  }
+  // Startup delay keeps schema and profile maintenance away from first-paint IO.
+  schedule(60_000)
 }
 
 async function getSocialLanguageSnapshot(): Promise<ElectronLumiSocialLanguageSnapshot> {

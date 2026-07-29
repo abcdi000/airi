@@ -22,6 +22,7 @@ import type { SqliteDatabase } from './index'
 import { defineInvokeHandler } from '@moeru/eventa'
 import {
   deriveLumiMemoryCognitiveObservation,
+  maintainLumiCognitiveState,
   observeLumiBeliefHypothesis,
   prepareLumiCognitiveTurn,
   projectLumiBeliefsToProfile,
@@ -106,6 +107,147 @@ export interface LumiMemoryCognitiveConsolidationResult {
   projectionIds: string[]
   /** Long-term memories invalidated by an explicit correction. */
   supersededMemoryIds: string[]
+}
+
+/** Privacy-safe counts produced by one desktop cognitive maintenance pass. */
+export interface LumiDesktopCognitiveMaintenanceReport {
+  /** Number of immutable actors whose beliefs were examined. */
+  actorCount: number
+  /** Number of beliefs processed after actor filtering. */
+  beliefCount: number
+  /** Number of beliefs that expired during this pass. */
+  expiredCount: number
+  /** Number of beliefs downgraded by deterministic decay. */
+  downgradedCount: number
+  /** Number of fresh profile projections materialized. */
+  projectionCount: number
+  /** Number of expired conversation working-memory rows removed. */
+  expiredWorkingMemoryCount: number
+  /** ISO timestamp used consistently by the pass. */
+  completedAt: string
+}
+
+/**
+ * Runs deterministic desktop cognitive maintenance outside the reply path.
+ *
+ * Use when:
+ * - The Electron main process starts its daily background maintenance pass
+ * - An administrator repairs one immutable actor after importing an archive
+ *
+ * Expects:
+ * - Existing cognitive rows have already passed ingress identity validation
+ * - `actorId`, when supplied, is one immutable internal Person identifier
+ *
+ * Returns:
+ * - Privacy-safe counts without evidence, memory, or profile content
+ */
+export function runDesktopCognitiveMaintenance(
+  db: SqliteDatabase,
+  input: {
+    actorId?: string
+    now?: string
+  } = {},
+): LumiDesktopCognitiveMaintenanceReport {
+  ensureCognitiveSchema(db)
+  const completedAt = isoTimestamp(input.now ?? new Date().toISOString(), 'cognitive maintenance now')
+  const actorId = input.actorId?.trim()
+  if (input.actorId !== undefined && !actorId)
+    throw new Error('Desktop cognitive maintenance actor is invalid')
+  const actorIds = actorId
+    ? [actorId]
+    : db.prepare(`
+        SELECT DISTINCT subject_id FROM lumi_cognitive_beliefs ORDER BY subject_id
+      `).all().map(row => stringValue(row.subject_id)).filter(Boolean)
+  let beliefCount = 0
+  let expiredCount = 0
+  let downgradedCount = 0
+  let projectionCount = 0
+  let expiredWorkingMemoryCount = 0
+
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    for (const subjectId of actorIds) {
+      const sourceBeliefs = db.prepare(`
+        SELECT payload_json FROM lumi_cognitive_beliefs
+        WHERE subject_id = ? ORDER BY id
+      `).all(subjectId).flatMap(row => parsedPayload<LumiBeliefHypothesis>(row.payload_json))
+      const evidenceIds = [...new Set(sourceBeliefs.flatMap(belief => [
+        ...belief.evidenceIds,
+        ...belief.counterEvidenceIds,
+      ]))]
+      const evidenceById = new Map(
+        (evidenceIds.length === 0
+          ? []
+          : db.prepare(`
+              SELECT * FROM lumi_cognitive_evidence
+              WHERE id IN (${evidenceIds.map(() => '?').join(', ')})
+            `).all(...evidenceIds).flatMap(rowToEvidence))
+          .map(evidence => [evidence.id, evidence] as const),
+      )
+      const maintained = maintainLumiCognitiveState({
+        subjectId,
+        beliefs: sourceBeliefs,
+        evidenceById,
+        now: completedAt,
+      })
+      beliefCount += maintained.beliefs.length
+      expiredCount += maintained.expiredCount
+      downgradedCount += maintained.downgradedCount
+      for (const belief of maintained.beliefs)
+        writeBelief(db, belief)
+
+      db.prepare(`
+        UPDATE lumi_cognitive_profile_projections SET
+          status = 'pending',
+          payload_json = json_set(payload_json, '$.status', 'pending'),
+          updated_at = ?
+        WHERE subject_id = ? AND status = 'active'
+      `).run(completedAt, subjectId)
+      for (const projection of maintained.projections) {
+        if (projection.scope === 'group')
+          continue
+        writeProfileProjection(db, projection)
+        projectionCount += 1
+      }
+    }
+
+    const expiredRows = actorId
+      ? Number(db.prepare(`
+          SELECT COUNT(*) AS count FROM lumi_cognitive_working_memory
+          WHERE person_id = ? AND expires_at <= ?
+        `).get(actorId, completedAt)?.count ?? 0)
+      : Number(db.prepare(`
+          SELECT COUNT(*) AS count FROM lumi_cognitive_working_memory
+          WHERE expires_at <= ?
+        `).get(completedAt)?.count ?? 0)
+    if (actorId) {
+      db.prepare(`
+        DELETE FROM lumi_cognitive_working_memory
+        WHERE person_id = ? AND expires_at <= ?
+      `).run(actorId, completedAt)
+    }
+    else {
+      db.prepare(`
+        DELETE FROM lumi_cognitive_working_memory WHERE expires_at <= ?
+      `).run(completedAt)
+    }
+    expiredWorkingMemoryCount = expiredRows
+    db.exec('COMMIT')
+  }
+  catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+
+  return {
+    actorCount: actorIds.length,
+    beliefCount,
+    expiredCount,
+    downgradedCount,
+    projectionCount,
+    expiredWorkingMemoryCount,
+    completedAt,
+  }
 }
 
 /**
@@ -795,6 +937,12 @@ function writeBelief(db: SqliteDatabase, belief: LumiBeliefHypothesis): void {
     INSERT INTO lumi_cognitive_beliefs (
       id, subject_id, conversation_id, status, payload_json, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      subject_id = excluded.subject_id,
+      conversation_id = excluded.conversation_id,
+      status = excluded.status,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
   `).run(
     belief.id,
     belief.subjectId,
@@ -810,6 +958,12 @@ function writeProfileProjection(db: SqliteDatabase, projection: LumiCognitivePro
     INSERT INTO lumi_cognitive_profile_projections (
       id, subject_id, layer, status, payload_json, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      subject_id = excluded.subject_id,
+      layer = excluded.layer,
+      status = excluded.status,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
   `).run(
     projection.id,
     projection.subjectId,

@@ -1,4 +1,8 @@
-import type { LumiMemoryFragment } from '@proj-airi/lumi-runtime'
+import type {
+  LumiBeliefHypothesis,
+  LumiCognitiveProfileProjection,
+  LumiMemoryFragment,
+} from '@proj-airi/lumi-runtime'
 
 import type { SqliteDatabase } from './index'
 
@@ -18,6 +22,7 @@ import {
   deleteCognitiveActorData,
   exportCognitiveActorData,
   importCognitiveActorData,
+  runDesktopCognitiveMaintenance,
 } from './cognitive'
 
 const identity = {
@@ -456,5 +461,150 @@ describe('desktop cognitive service', () => {
     expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_evidence WHERE actor_id = ?').get(identity.actorId)?.count).toBe(1)
     expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_beliefs WHERE subject_id = ?').get(identity.actorId)?.count).toBe(1)
     expect(db.prepare('SELECT COUNT(*) AS count FROM lumi_cognitive_evidence WHERE actor_id = ?').get(moussyIdentity.actorId)?.count).toBe(1)
+  })
+
+  /** @example Daily maintenance expires Doggy state without touching Moussy state. */
+  it('maintains only the requested actor and removes expired working memory', async () => {
+    const db = database()
+    const context = createContext()
+    createLumiDesktopCognitiveService({
+      context: context as never,
+      getDatabase: async () => ({ db: db as SqliteDatabase }),
+      recall: async () => ({
+        memories: [],
+        trace: {
+          ran: true,
+          reusedPreviousState: false,
+          aclInputCount: 0,
+          aclOutputCount: 0,
+          lexicalCandidateCount: 0,
+          annCandidateCount: 0,
+          mergedCandidateCount: 0,
+          rerankedCandidateCount: 0,
+          thresholdRejectedCount: 0,
+          conflictRejectedCount: 0,
+          injectedCount: 0,
+          durationMs: 0,
+        },
+      }),
+      loadMemoriesByIds: async () => [],
+      getSocialLanguageSnapshot: async () => migrateSocialLanguageSnapshot({}),
+    })
+    const prepareTurn = defineInvoke(context, electronLumiCognitivePrepareTurn)
+    for (const actorIdentity of [identity, moussyIdentity]) {
+      await prepareTurn({
+        identity: actorIdentity,
+        sourceMessageId: `message:maintenance:${actorIdentity.actorId}`,
+        userText: '最近在测试认知维护。',
+        recentTurns: [],
+        platform: 'lumi-desktop',
+      })
+    }
+
+    const belief = (actorId: string, expiresAt: string): LumiBeliefHypothesis => ({
+      id: `belief:${actorId}`,
+      subjectId: actorId,
+      predicate: 'current_focus',
+      value: '认知维护',
+      confidence: 0.9,
+      stability: 0.9,
+      evidenceCount: 1,
+      independentEvidenceCount: 1,
+      familiarity: 0.5,
+      ownership: 0,
+      positiveFeedback: 0,
+      negativeFeedback: 0,
+      rejectionCount: 0,
+      firstSeenAt: '2026-07-01T00:00:00.000Z',
+      lastSeenAt: '2026-07-01T00:00:00.000Z',
+      decay: 0,
+      evidenceIds: [`evidence:message:${actorId === identity.actorId ? identity.conversationId : moussyIdentity.conversationId}:message:maintenance:${actorId}`],
+      counterEvidenceIds: [],
+      firstObservedAt: '2026-07-01T00:00:00.000Z',
+      lastObservedAt: '2026-07-01T00:00:00.000Z',
+      expiresAt,
+      status: 'stable',
+      scope: 'private',
+      sensitivity: 'private',
+      conversationId: actorId === identity.actorId ? identity.conversationId : moussyIdentity.conversationId,
+      participantUserIds: [actorId],
+    })
+    const doggyBelief = belief(identity.actorId, '2026-07-02T00:00:00.000Z')
+    const moussyBelief = belief(moussyIdentity.actorId, '2027-07-02T00:00:00.000Z')
+    const doggyProjection: LumiCognitiveProfileProjection = {
+      id: `profile:${doggyBelief.id}:daily`,
+      subjectId: identity.actorId,
+      layer: 'daily',
+      key: doggyBelief.predicate,
+      value: String(doggyBelief.value),
+      beliefIds: [doggyBelief.id],
+      evidenceIds: [...doggyBelief.evidenceIds],
+      confidence: doggyBelief.confidence,
+      stability: doggyBelief.stability,
+      expiresAt: doggyBelief.expiresAt,
+      status: 'active',
+      scope: 'private',
+      sensitivity: 'private',
+      updatedAt: doggyBelief.lastObservedAt,
+    }
+    const insertBelief = db.prepare(`
+      INSERT INTO lumi_cognitive_beliefs (id, subject_id, conversation_id, status, payload_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `)
+    for (const item of [doggyBelief, moussyBelief]) {
+      insertBelief.run(
+        item.id,
+        item.subjectId,
+        item.conversationId ?? null,
+        item.status,
+        JSON.stringify(item),
+        item.lastObservedAt,
+      )
+    }
+    db.prepare(`
+      INSERT INTO lumi_cognitive_profile_projections
+        (id, subject_id, layer, status, payload_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      doggyProjection.id,
+      doggyProjection.subjectId,
+      doggyProjection.layer,
+      doggyProjection.status,
+      JSON.stringify(doggyProjection),
+      doggyProjection.updatedAt,
+    )
+    db.prepare(`
+      UPDATE lumi_cognitive_working_memory SET expires_at = ? WHERE person_id = ?
+    `).run('2026-07-02T00:00:00.000Z', identity.actorId)
+
+    const report = runDesktopCognitiveMaintenance(db as SqliteDatabase, {
+      actorId: identity.actorId,
+      now: '2026-07-29T00:00:00.000Z',
+    })
+    const maintainedDoggy = JSON.parse(String(db.prepare(`
+      SELECT payload_json FROM lumi_cognitive_beliefs WHERE id = ?
+    `).get(doggyBelief.id)?.payload_json)) as LumiBeliefHypothesis
+    const untouchedMoussy = JSON.parse(String(db.prepare(`
+      SELECT payload_json FROM lumi_cognitive_beliefs WHERE id = ?
+    `).get(moussyBelief.id)?.payload_json)) as LumiBeliefHypothesis
+
+    expect(report).toMatchObject({
+      actorCount: 1,
+      beliefCount: 1,
+      expiredCount: 1,
+      projectionCount: 0,
+      expiredWorkingMemoryCount: 1,
+    })
+    expect(maintainedDoggy.status).toBe('expired')
+    expect(untouchedMoussy.status).toBe('stable')
+    expect(db.prepare(`
+      SELECT status FROM lumi_cognitive_profile_projections WHERE id = ?
+    `).get(doggyProjection.id)?.status).toBe('pending')
+    expect(db.prepare(`
+      SELECT COUNT(*) AS count FROM lumi_cognitive_working_memory WHERE person_id = ?
+    `).get(identity.actorId)?.count).toBe(0)
+    expect(db.prepare(`
+      SELECT COUNT(*) AS count FROM lumi_cognitive_working_memory WHERE person_id = ?
+    `).get(moussyIdentity.actorId)?.count).toBe(1)
   })
 })

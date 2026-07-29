@@ -13,7 +13,6 @@ import {
   migratedLumiUserProfiles,
 } from '../../../../../lumi-runtime/src'
 import { LUMI_AIRI_CARD_ID } from '../../../constants/lumi-card'
-import { useLumiCurrentStateStore } from '../../lumi-current-state'
 import { useLumiEmotionStore } from '../../lumi-emotion'
 import { LUMI_DOGGY_USER_ID, LUMI_MOUSSY_USER_ID, useLumiIdentityStore } from '../../lumi-identity'
 import { useLumiToolMeshStore } from '../../lumi-tool-mesh'
@@ -66,8 +65,6 @@ export function createLumiContext(input: LumiContextProviderInput = {}): Context
         messageText: input.messageText ?? '',
         limit: 8,
       }, actorUserId)
-  const currentStateStore = useLumiCurrentStateStore()
-  const currentStateContext = isGroupConversation ? '' : currentStateStore.buildPromptContext(actorUserId)
   const toolMeshStore = useLumiToolMeshStore()
   if (toolMeshStore.definitions.length === 0)
     toolMeshStore.initializeCoreTools()
@@ -84,7 +81,6 @@ export function createLumiContext(input: LumiContextProviderInput = {}): Context
       gate,
       guard,
       userProfileContext,
-      currentStateContext,
       toolMeshContext,
       activeUser,
       input.interaction,
@@ -113,7 +109,6 @@ function buildLumiContextText(
   gate: LumiRelationshipGateResult | undefined,
   guard: ReturnType<typeof analyzeLumiConversationGuard>,
   userProfileContext = '',
-  currentStateContext = '',
   toolMeshContext = '',
   activeUser?: LumiUserRecord,
   interaction?: ChatInteractionContext,
@@ -177,15 +172,6 @@ function buildLumiContextText(
 
   if (userProfileContext)
     lines.push(userProfileContext)
-
-  if (currentStateContext) {
-    lines.push([
-      '[Lumi current_state / 短期意识状态]',
-      '以下内容只代表最近语境，不得覆盖 Core Profile；如与 Core Profile 冲突，Core Profile 优先。',
-      currentStateContext,
-      '[/Lumi current_state]',
-    ].join('\n'))
-  }
 
   if (toolMeshContext) {
     lines.push([

@@ -2,8 +2,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createDefaultLumiStateSnapshot } from '../../../../../lumi-runtime/src'
+import { useLumiCurrentStateStore } from '../../lumi-current-state'
 import { useLumiEmotionStore } from '../../lumi-emotion'
-import { LUMI_MOUSSY_USER_ID } from '../../lumi-identity'
+import { LUMI_DOGGY_USER_ID, LUMI_MOUSSY_USER_ID } from '../../lumi-identity'
 import { useLumiMemoryStore } from '../../lumi-memory'
 import { useAiriCardStore } from '../../modules/airi-card'
 import { createLumiContext } from './lumi'
@@ -139,6 +140,38 @@ describe('lumi migrated context provider', () => {
     expect(context?.text).toContain('不要套用 Doggy 或其他用户的称呼与关系')
     expect(context?.text).not.toContain('关系设定：当前交流对象是 Doggy')
     expect(useLumiEmotionStore().getStateForUser('qq-user-2048')).not.toBeNull()
+  })
+
+  // ROOT CAUSE:
+  //
+  // The legacy Persona context provider injected current_state independently
+  // after the cognitive host had already assembled authoritative Working Memory.
+  // This duplicated recent state and could project a mutable foreground user
+  // into another direct conversation.
+  /** @example Legacy state is never injected beside the cognitive bundle. */
+  it('does not inject legacy current_state into a direct conversation', async () => {
+    const cardStore = useAiriCardStore()
+    cardStore.initialize()
+    cardStore.activeCardId = 'lumi'
+    await useLumiCurrentStateStore().saveCurrentState({
+      recentTopics: ['legacy topic must not enter the prompt'],
+      lastContinuationPoint: 'legacy continuation must not enter the prompt',
+    })
+
+    const context = createLumiContext({
+      messageText: '继续',
+      interaction: {
+        conversationId: 'direct-doggy',
+        conversationType: 'direct',
+        actorId: LUMI_DOGGY_USER_ID,
+        actorDisplayName: 'Doggy',
+        participantIds: [LUMI_DOGGY_USER_ID],
+      },
+    })
+
+    expect(context?.text).not.toContain('[Lumi current_state')
+    expect(context?.text).not.toContain('legacy topic must not enter the prompt')
+    expect(context?.text).not.toContain('legacy continuation must not enter the prompt')
   })
 
   it('injects migrated Lumi memories and relationship-gated emotion runtime', () => {

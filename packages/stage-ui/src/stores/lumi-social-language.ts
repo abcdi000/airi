@@ -6,6 +6,7 @@ import type {
   LearnedExpression,
   LearnedExpressionProposal,
   LearnedSocialBehavior,
+  LumiFeedbackEvent,
   LumiLanguageFeedback,
   SocialLanguageCandidateIngress,
   SocialLanguageEvidence,
@@ -22,13 +23,13 @@ import {
   applyExpressionFeedback,
   behaviorSemanticKey,
   canCreateSocialLanguageCandidates,
+  cognitiveFeedbackTargetIds,
   completeGroupObservationBatch,
   createEmptySocialLanguageSnapshot,
   decayLearnedExpression,
   DEFAULT_LANGUAGE_LEARNING_CONFIG,
   enqueueGroupObservation,
   expressionIdsActuallyUsed,
-  expressionIdsForDecisionFeedback,
   expressionSemanticKey,
   isTrustedSocialLanguageEvidence,
   maintainSocialLanguageSnapshot,
@@ -41,6 +42,8 @@ import {
   observeSocialBehavior,
   parseSocialLanguageLearningOutput,
   parseSocialLanguageLearningResult,
+  projectCognitiveFeedbackToLanguage,
+  socialBehaviorFeedbackOutcome,
 } from '../../../lumi-runtime/src'
 
 export type {
@@ -405,6 +408,7 @@ export const useLumiSocialLanguageStore = defineStore('lumi-social-language', ()
     conversationId: string
     personId?: string
     feedback?: LumiLanguageFeedback
+    feedbackEvents?: readonly LumiFeedbackEvent[]
     now?: number
   }) {
     if (!config.value.enabled || !config.value.feedbackLearningEnabled)
@@ -416,14 +420,21 @@ export const useLumiSocialLanguageStore = defineStore('lumi-social-language', ()
     )
     if (decisionIndex < 0)
       return
-    if (!input.feedback)
+    const feedbackEvents = input.feedbackEvents ?? []
+    const feedback = input.feedback ?? projectCognitiveFeedbackToLanguage(feedbackEvents)
+    if (!feedback)
       return
     const decision = snapshot.value.decisions[decisionIndex]
-    const feedback = input.feedback
-    const selectedExpressionIds = expressionIdsForDecisionFeedback(snapshot.value.expressions, decision)
+    const explicitTargetIds = cognitiveFeedbackTargetIds(feedbackEvents)
+    const restrictToExplicitTargets = feedbackEvents.length > 0
+    const selectedExpressionIds = expressionIdsActuallyUsed(snapshot.value.expressions, decision)
     snapshot.value.expressions = snapshot.value.expressions.map((expression) => {
-      if (!selectedExpressionIds.has(expression.id))
+      if (
+        !selectedExpressionIds.has(expression.id)
+        || (restrictToExplicitTargets && !explicitTargetIds.has(expression.id))
+      ) {
         return expression
+      }
       const next = applyExpressionFeedback(expression, feedback, input.now ?? Date.now())
       if (config.value.globalDiffusionEnabled && hasStrongPositiveFeedback(feedback)) {
         return {
@@ -436,17 +447,18 @@ export const useLumiSocialLanguageStore = defineStore('lumi-social-language', ()
       }
       return next
     })
-    const selectedBehaviorIds = new Set(decision.selectedBehaviors)
+    const selectedBehaviorIds = new Set(decision.selectedBehaviors.filter(id =>
+      !restrictToExplicitTargets || explicitTargetIds.has(id),
+    ))
+    const behaviorOutcome = socialBehaviorFeedbackOutcome(feedback, feedbackEvents)
     snapshot.value.behaviors = snapshot.value.behaviors.map((behavior) => {
       if (!selectedBehaviorIds.has(behavior.id))
         return behavior
-      const failed = feedback.explicitRejection || feedback.misunderstanding || feedback.aiStyleComplaint
-      const succeeded = feedback.explicitPraise || feedback.playfulContinuation || feedback.phraseEcho
       return {
         ...behavior,
-        successCount: behavior.successCount + Number(succeeded),
-        failureCount: behavior.failureCount + Number(failed),
-        confidence: Math.max(0, Math.min(1, behavior.confidence + Number(succeeded) * 0.03 - Number(failed) * 0.06)),
+        successCount: behavior.successCount + Number(behaviorOutcome.succeeded),
+        failureCount: behavior.failureCount + Number(behaviorOutcome.failed),
+        confidence: Math.max(0, Math.min(1, behavior.confidence + Number(behaviorOutcome.succeeded) * 0.03 - Number(behaviorOutcome.failed) * 0.06)),
       }
     })
     snapshot.value.decisions = snapshot.value.decisions.map((item, index) =>

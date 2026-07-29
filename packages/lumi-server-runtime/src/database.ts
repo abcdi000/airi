@@ -35,6 +35,7 @@ import {
   createEmptySocialLanguageSnapshot,
   decideLumiMemoryStatus,
   deriveLumiMemoryCognitiveObservation,
+  maintainLumiCognitiveState,
   migrateSocialLanguageSnapshot,
   normalizeMemoryScores,
   observeLumiBeliefHypothesis,
@@ -200,6 +201,17 @@ export interface LumiCognitiveFastLoopCommit {
   evidence: LumiCognitiveEvidence
   feedback: readonly LumiFeedbackEvent[]
   workingMemory: LumiWorkingMemory
+}
+
+/** Audit counts returned by one deterministic server cognitive maintenance pass. */
+export interface LumiCognitiveMaintenanceReport {
+  actorCount: number
+  beliefCount: number
+  expiredCount: number
+  downgradedCount: number
+  projectionCount: number
+  expiredWorkingMemoryCount: number
+  completedAt: string
 }
 
 export interface LumiMigrationMessage {
@@ -846,9 +858,23 @@ export class LumiServerDatabase {
       requestedSubjectUserIds: input.candidate.subjectUserIds,
     })
     const now = new Date().toISOString()
+    const memoryRequest: LumiMemorySearchRequest = {
+      query: input.candidate.content,
+      userId: actorPersonId,
+      viewerUserId: actorPersonId,
+      personaId: LUMI_PERSONA_ID,
+      limit: 2_000,
+      conversationType: conversation?.type ?? 'direct',
+      conversationId: conversation?.id,
+      participantUserIds: conversation?.participantPersonIds ?? [actorPersonId],
+    }
+    const relevantActiveMemories = this.rows('SELECT * FROM lumi_memories WHERE status = \'active\'')
+      .map(memoryFromRow)
+      .filter(memory => canAccessLumiMemory(memory, memoryRequest))
+      .filter(memory => (memory.subjectUserIds ?? []).some(subjectId => classification.subjectUserIds.includes(subjectId)))
     const decision = decideLumiMemoryStatus(
       input.candidate,
-      this.rows('SELECT * FROM lumi_memories WHERE status = \'active\'').map(memoryFromRow),
+      relevantActiveMemories,
     )
     const memory = normalizeMemoryScores({
       id: randomUUID(),
@@ -943,7 +969,19 @@ export class LumiServerDatabase {
         lastConfirmedAt: correctedAt,
         supersedesId: supersededMemoryIds[0],
       }
-      this.writeMemory(consolidatedMemory)
+      const updated = this.database.prepare(`
+        UPDATE lumi_memories SET status = 'active', valid_from = ?, last_confirmed_at = ?,
+          supersedes_id = ?, updated_at = ? WHERE id = ? AND user_id = ?
+      `).run(
+        consolidatedMemory.validFrom ?? correctedAt,
+        correctedAt,
+        consolidatedMemory.supersedesId ?? null,
+        consolidatedMemory.updatedAt,
+        consolidatedMemory.id,
+        consolidatedMemory.userId,
+      )
+      if (Number(updated.changes) !== 1)
+        throw new Error('Corrected memory was not found for cognitive consolidation')
     }
     this.upsertCognitiveBelief(identity, belief)
     for (const layer of ['daily', 'dynamic', 'core']) {
@@ -2223,6 +2261,96 @@ export class LumiServerDatabase {
     })
   }
 
+  /**
+   * Runs deterministic decay and projection rebuilding outside the reply path.
+   *
+   * Use when:
+   * - The durable background worker runs daily cognitive maintenance
+   * - An administrator repairs one actor after importing historical state
+   *
+   * Expects:
+   * - Existing beliefs already passed evidence-lineage validation
+   * - `actorPersonId`, when supplied, identifies one active internal person
+   *
+   * Returns:
+   * - Privacy-safe maintenance counts without cognitive content
+   */
+  runCognitiveMaintenance(input: {
+    actorPersonId?: string
+    now?: string
+  } = {}): LumiCognitiveMaintenanceReport {
+    const completedAt = requiredIsoTimestamp(input.now ?? new Date().toISOString(), 'cognitive maintenance now')
+    const actorPersonId = input.actorPersonId
+      ? requiredText(input.actorPersonId, 'actorPersonId', 160)
+      : undefined
+    if (actorPersonId)
+      this.assertPerson(actorPersonId)
+    const actorIds = actorPersonId
+      ? [actorPersonId]
+      : this.rows(`
+          SELECT DISTINCT subject_id FROM lumi_cognitive_beliefs ORDER BY subject_id
+        `).map(row => String(row.subject_id))
+    let beliefCount = 0
+    let expiredCount = 0
+    let downgradedCount = 0
+    let projectionCount = 0
+
+    for (const actorId of actorIds) {
+      const sourceBeliefs = this.rows(`
+        SELECT * FROM lumi_cognitive_beliefs WHERE subject_id = ? ORDER BY id
+      `, actorId).map(row => this.cognitiveBeliefFromRow(row))
+      const evidenceById = new Map<string, LumiCognitiveEvidence>()
+      for (const sourceBelief of sourceBeliefs) {
+        const identity = cognitiveIdentityForBelief(sourceBelief)
+        for (const item of this.loadCognitiveEvidenceByIds(identity, [
+          ...sourceBelief.evidenceIds,
+          ...sourceBelief.counterEvidenceIds,
+        ])) {
+          evidenceById.set(item.id, item)
+        }
+      }
+      const maintained = maintainLumiCognitiveState({
+        subjectId: actorId,
+        beliefs: sourceBeliefs,
+        evidenceById,
+        now: completedAt,
+      })
+      beliefCount += maintained.beliefs.length
+      expiredCount += maintained.expiredCount
+      downgradedCount += maintained.downgradedCount
+      for (const maintainedBelief of maintained.beliefs)
+        this.upsertCognitiveBelief(cognitiveIdentityForBelief(maintainedBelief), maintainedBelief)
+      this.database.prepare(`
+        UPDATE lumi_cognitive_profile_projections SET status = 'pending', updated_at = ?
+        WHERE subject_id = ? AND status = 'active'
+      `).run(completedAt, actorId)
+      for (const projection of maintained.projections) {
+        const sourceBelief = maintained.beliefs.find(item => projection.beliefIds.includes(item.id))
+        if (!sourceBelief || sourceBelief.scope === 'group')
+          continue
+        this.upsertCognitiveProfileProjection(cognitiveIdentityForBelief(sourceBelief), projection)
+        projectionCount += 1
+      }
+    }
+
+    const expiredWorkingMemory = actorPersonId
+      ? this.database.prepare(`
+          DELETE FROM lumi_cognitive_working_memory WHERE person_id = ? AND expires_at <= ?
+        `).run(actorPersonId, completedAt)
+      : this.database.prepare(`
+          DELETE FROM lumi_cognitive_working_memory WHERE expires_at <= ?
+        `).run(completedAt)
+    return {
+      actorCount: actorIds.length,
+      beliefCount,
+      expiredCount,
+      downgradedCount,
+      projectionCount,
+      expiredWorkingMemoryCount: Number(expiredWorkingMemory.changes),
+      completedAt,
+    }
+  }
+
   /** Loads evidence-backed beliefs and profile projections for one direct actor. */
   loadCognitiveProjectionState(identity: LumiCognitiveIdentity): LumiCognitiveProjectionState {
     this.assertCognitiveIdentity(identity)
@@ -3282,6 +3410,17 @@ function cognitiveMemoryRequest(identity: LumiCognitiveIdentity): LumiMemorySear
     conversationType: identity.conversationType === 'group' ? 'group' : 'direct',
     conversationId: identity.conversationId,
     participantUserIds: [...identity.participantUserIds],
+  }
+}
+
+function cognitiveIdentityForBelief(belief: LumiBeliefHypothesis): LumiCognitiveIdentity {
+  const conversationType = belief.scope === 'group' ? 'group' : 'direct'
+  return {
+    actorId: belief.subjectId,
+    personaId: LUMI_PERSONA_ID,
+    conversationId: belief.conversationId ?? `lumi-direct:${belief.subjectId}`,
+    conversationType,
+    participantUserIds: [...new Set([belief.subjectId, ...belief.participantUserIds])],
   }
 }
 

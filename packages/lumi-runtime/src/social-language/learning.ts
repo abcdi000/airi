@@ -1,3 +1,4 @@
+import type { LumiFeedbackEvent } from '../cognitive/types'
 import type {
   JargonKnowledge,
   JargonKnowledgeProposal,
@@ -12,6 +13,105 @@ import type {
 } from './types'
 
 import { clamp01, isRecord, parseJsonObject, stringArray, stringValue } from './json'
+
+/**
+ * Projects explicit cognitive feedback into the existing language-learning signal shape.
+ *
+ * Use when:
+ * - The cognitive fast loop already classified a verified user message
+ * - Social-language learning should avoid another model request for explicit feedback
+ *
+ * Expects:
+ * - Events belong to the same immutable actor and conversation as the pending decision
+ *
+ * Returns:
+ * - One merged language signal, or undefined when there is no explicit event
+ */
+export function projectCognitiveFeedbackToLanguage(
+  events: readonly LumiFeedbackEvent[],
+): LumiLanguageFeedback | undefined {
+  if (events.length === 0)
+    return undefined
+  const feedback: LumiLanguageFeedback = {}
+  for (const event of events) {
+    switch (event.kind) {
+      case 'explicit_praise':
+      case 'expression_natural':
+        feedback.explicitPraise = true
+        break
+      case 'explicit_rejection':
+        feedback.explicitRejection = true
+        break
+      case 'expression_ai_like':
+      case 'expression_repeated':
+        feedback.aiStyleComplaint = true
+        break
+      case 'topic_continued':
+      case 'decision_confirmed':
+      case 'tool_succeeded':
+        feedback.normalContinuation = true
+        break
+      default:
+        break
+    }
+  }
+  if (Object.keys(feedback).length === 0)
+    feedback.normalContinuation = true
+  return feedback
+}
+
+/**
+ * Resolves the stable asset IDs carried by explicit feedback events.
+ *
+ * Use when:
+ * - A reducer must update only assets actually involved in the prior reply
+ *
+ * Expects:
+ * - Target IDs were copied from the persisted assistant decision, not inferred from text
+ *
+ * Returns:
+ * - A deduplicated target set
+ */
+export function cognitiveFeedbackTargetIds(events: readonly LumiFeedbackEvent[]): Set<string> {
+  return new Set(events.flatMap(event => event.targetIds).map(id => id.trim()).filter(Boolean))
+}
+
+/**
+ * Derives behavior success and failure independently from expression feedback.
+ *
+ * Use when:
+ * - Updating one Planner-selected social behavior after a verified next turn
+ *
+ * Expects:
+ * - The caller already checked the behavior ID against the feedback target set
+ *
+ * Returns:
+ * - Independent success/failure flags; one event can update other domains by different rules
+ */
+export function socialBehaviorFeedbackOutcome(
+  feedback: LumiLanguageFeedback,
+  events: readonly LumiFeedbackEvent[],
+): { succeeded: boolean, failed: boolean } {
+  const kinds = new Set(events.map(event => event.kind))
+  return {
+    succeeded: Boolean(
+      feedback.explicitPraise
+      || feedback.playfulContinuation
+      || feedback.phraseEcho
+      || kinds.has('decision_confirmed')
+      || kinds.has('topic_continued')
+      || kinds.has('tool_succeeded'),
+    ),
+    failed: Boolean(
+      feedback.explicitRejection
+      || feedback.misunderstanding
+      || feedback.aiStyleComplaint
+      || kinds.has('decision_revoked')
+      || kinds.has('topic_switched')
+      || kinds.has('tool_failed'),
+    ),
+  }
+}
 
 const EXCLUDED_SOURCES = new Set<SocialLanguageEvidence['sourceKind']>([
   'system',

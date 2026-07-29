@@ -346,6 +346,7 @@ chatOrchestratorStore.setDesktopCognitivePort({
         id: turn.messageIds.at(-1) ?? `dialogue:${turn.timestamp}:${index}`,
         role: turn.role,
         content: turn.textSegments.join('\n'),
+        feedbackTargetIds: [...(turn.feedbackTargetIds ?? [])],
       })),
       platform: envelope.platform,
     }))

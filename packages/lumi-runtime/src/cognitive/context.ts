@@ -5,6 +5,7 @@ import type {
   LumiCognitiveEvidence,
   LumiCognitiveIdentity,
   LumiCognitiveProfileProjection,
+  LumiFeedbackEvent,
   LumiRecallTrace,
   LumiWorkingMemory,
 } from './types'
@@ -38,6 +39,8 @@ export interface LumiCognitiveContextAssemblyInput {
   contradictions?: readonly string[]
   /** Automatic recall trace. */
   recallTrace: LumiRecallTrace
+  /** Explicit feedback persisted by the current fast loop. */
+  feedbackEvents?: readonly LumiFeedbackEvent[]
   /** Current ISO timestamp. @default new Date().toISOString() */
   now?: string
 }
@@ -99,6 +102,7 @@ export function assembleLumiCognitiveContext(
     expressionAssets: uniqueStrings(input.expressionAssets ?? []),
     contradictions: uniqueStrings(input.contradictions ?? []),
     recallTrace: input.recallTrace,
+    feedbackEvents: input.feedbackEvents?.map(event => ({ ...event, targetIds: [...event.targetIds] })) ?? [],
   }
 }
 

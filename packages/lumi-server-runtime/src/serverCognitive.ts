@@ -173,6 +173,7 @@ function dialogueTurns(turns: readonly CognitiveDialogueTurn[]) {
     id: turn.messageIds.join('+'),
     role: turn.role,
     content: turn.textSegments.join('\n'),
+    feedbackTargetIds: [...(turn.feedbackTargetIds ?? [])],
   }))
 }
 

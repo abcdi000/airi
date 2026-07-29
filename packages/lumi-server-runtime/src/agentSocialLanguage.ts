@@ -27,6 +27,7 @@ import {
   buildSocialLanguageFeedbackMessages,
   normalizeLanguageLearningConfig,
   parseSocialLanguageFeedbackOutput,
+  projectCognitiveFeedbackToLanguage,
   retrieveExpressionCandidates,
   selectExpressionsLocally,
   selectPlannerSocialBehaviors,
@@ -183,7 +184,7 @@ export function createServerSocialLanguagePort(options: {
       }
     },
 
-    async observeDirectFeedback({ envelope }) {
+    async observeDirectFeedback({ envelope, feedbackEvents }) {
       if (!config.enabled || !config.feedbackLearningEnabled)
         return
       const unresolved = options.database.getSocialLanguageSnapshot().decisions.findLast(decision =>
@@ -193,18 +194,20 @@ export function createServerSocialLanguagePort(options: {
       )
       if (!unresolved)
         return
-      let feedback
-      try {
-        feedback = parseSocialLanguageFeedbackOutput(await options.model.generate(
-          buildSocialLanguageFeedbackMessages({
-            userText: envelope.text ?? '',
-            decision: unresolved,
-          }),
-          'feedback',
-        ))
-      }
-      catch {
-        return
+      let feedback = projectCognitiveFeedbackToLanguage(feedbackEvents)
+      if (!feedback) {
+        try {
+          feedback = parseSocialLanguageFeedbackOutput(await options.model.generate(
+            buildSocialLanguageFeedbackMessages({
+              userText: envelope.text ?? '',
+              decision: unresolved,
+            }),
+            'feedback',
+          ))
+        }
+        catch {
+          return
+        }
       }
       if (!feedback)
         return
@@ -215,6 +218,7 @@ export function createServerSocialLanguagePort(options: {
           personId: envelope.personId,
           userText: envelope.text ?? '',
           feedback,
+          feedbackEvents,
           config,
         }))
       })

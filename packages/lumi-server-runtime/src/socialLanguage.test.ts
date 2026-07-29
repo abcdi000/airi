@@ -1,3 +1,5 @@
+import type { LumiFeedbackEvent } from '@proj-airi/lumi-runtime'
+
 import {
   createEmptySocialLanguageSnapshot,
   createFallbackLumiReplyIntent,
@@ -45,6 +47,24 @@ function evidence(sourceKind: 'chat' | 'group_chat') {
     source: 'human' as const,
     sourceKind,
     authorVerified: true,
+  }
+}
+
+function explicitPraise(targetIds: string[]): LumiFeedbackEvent {
+  return {
+    id: `feedback-${targetIds.join('-')}`,
+    actorId: 'doggy',
+    conversationId: 'direct-doggy',
+    conversationType: 'direct',
+    kind: 'explicit_praise',
+    sourceId: 'message-feedback',
+    evidenceId: 'evidence-feedback',
+    targetIds,
+    strength: 1,
+    occurredAt: '2026-07-29T10:00:00.000Z',
+    authorVerified: true,
+    scope: 'private',
+    sensitivity: 'private',
   }
 }
 
@@ -139,5 +159,75 @@ describe('server social-language candidate boundary', () => {
     expect(afterFeedback.expressions).toHaveLength(1)
     expect(afterFeedback.expressions[0]?.successfulUseCount).toBeGreaterThan(beforeFeedback.successfulUseCount)
     expect(afterFeedback.decisions[0]?.laterFeedback).toEqual({ explicitPraise: true })
+  })
+
+  /** @example One feedback event updates only the exact expression or behavior ID it carries. */
+  it('routes cognitive feedback by stable asset ID without matching reply text', () => {
+    const learned = observeServerLanguageEvidence({
+      snapshot: createEmptySocialLanguageSnapshot(0),
+      evidence: evidence('group_chat'),
+      config: DEFAULT_LANGUAGE_LEARNING_CONFIG,
+      ingress: 'group_observation',
+      modelOutput,
+    })
+    const expression = learned.expressions[0]!
+    const behavior = learned.behaviors[0]!
+    const withDecision = recordServerLanguageDecision({
+      snapshot: learned,
+      decision: {
+        id: 'decision-targeted-feedback',
+        timestamp: 200,
+        personId: 'doggy',
+        conversationId: 'direct-doggy',
+        platform: 'qq',
+        plannerIntent: createFallbackLumiReplyIntent({ rawDraft: expression.phrase ?? '' }),
+        retrievedExpressions: [expression.id],
+        selectedExpressions: [expression.id],
+        realizedExpressions: [expression.id],
+        selectedExpressionReasons: { [expression.id]: ['fits the turn'] },
+        selectedBehaviors: [behavior.id],
+        selectedJargon: [],
+        generatedReply: {
+          messages: [{ text: expression.phrase ?? '' }],
+          appliedExpressionIds: [expression.id],
+        },
+        actuallySentReply: {
+          messages: [{ text: expression.phrase ?? '' }],
+          appliedExpressionIds: [expression.id],
+        },
+        emotionState: {},
+        defenseState: {},
+        validator: {
+          passed: true,
+          attempts: 1,
+          issues: [],
+          fallbackUsed: false,
+        },
+      },
+    })
+
+    const behaviorOnly = applyServerLanguageFeedback({
+      snapshot: withDecision,
+      conversationId: 'direct-doggy',
+      personId: 'doggy',
+      userText: '这次不错',
+      feedbackEvents: [explicitPraise([behavior.id])],
+      config: DEFAULT_LANGUAGE_LEARNING_CONFIG,
+      now: 300,
+    })
+    const expressionOnly = applyServerLanguageFeedback({
+      snapshot: withDecision,
+      conversationId: 'direct-doggy',
+      personId: 'doggy',
+      userText: '这次不错',
+      feedbackEvents: [explicitPraise([expression.id])],
+      config: DEFAULT_LANGUAGE_LEARNING_CONFIG,
+      now: 300,
+    })
+
+    expect(behaviorOnly.expressions[0]?.successfulUseCount).toBe(withDecision.expressions[0]?.successfulUseCount)
+    expect(behaviorOnly.behaviors[0]?.successCount).toBe((withDecision.behaviors[0]?.successCount ?? 0) + 1)
+    expect(expressionOnly.expressions[0]?.successfulUseCount).toBe((withDecision.expressions[0]?.successfulUseCount ?? 0) + 1)
+    expect(expressionOnly.behaviors[0]?.successCount).toBe(withDecision.behaviors[0]?.successCount)
   })
 })

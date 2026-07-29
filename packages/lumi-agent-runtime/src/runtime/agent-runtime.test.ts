@@ -117,6 +117,7 @@ function cognitiveBundle(
       injectedCount: 1,
       durationMs: 12,
     },
+    feedbackEvents: [],
     ...overrides,
   }
 }
@@ -557,6 +558,71 @@ describe('lumiAgentRuntime direct session', () => {
     expect(socialLanguage.recordSentReply).toHaveBeenCalledWith(expect.objectContaining({
       selectedReferenceIds: ['expression-1', 'behavior-1', 'jargon-1'],
       replyerPromptSnapshot: expect.any(Array),
+    }))
+  })
+
+  /** @example The next verified turn receives exact prior expression and behavior IDs for feedback. */
+  it('persists actual social asset IDs into the next cognitive feedback turn', async () => {
+    const preparedTurns: Parameters<CognitiveContextPort['prepareTurn']>[0][] = []
+    const feedbackEvent = {
+      id: 'feedback-2',
+      actorId: 'doggy',
+      conversationId: 'direct-doggy',
+      conversationType: 'direct' as const,
+      kind: 'explicit_praise' as const,
+      sourceId: 'message-2',
+      evidenceId: 'evidence-2',
+      targetIds: ['expression-1', 'behavior-1', 'sent-1'],
+      strength: 1,
+      occurredAt: '2026-07-29T10:00:00.000Z',
+      authorVerified: true,
+      scope: 'private' as const,
+      sensitivity: 'private' as const,
+    }
+    const prepareTurn = vi.fn<CognitiveContextPort['prepareTurn']>(async (input) => {
+      preparedTurns.push(input)
+      return cognitiveBundle(input.envelope, {
+        feedbackEvents: input.envelope.sourceMessageId === 'message-2' ? [feedbackEvent] : [],
+      })
+    })
+    const socialLanguage: SocialLanguagePort = {
+      plannerReferences: vi.fn(async () => []),
+      replyReferences: vi.fn<SocialLanguagePort['replyReferences']>(async () => ({
+        expressions: [{ id: 'expression-1', kind: 'expression', content: '自然短句' }],
+        behaviors: [{ id: 'behavior-1', kind: 'behavior', content: '先接住当前情绪' }],
+        jargon: [{ id: 'jargon-1', kind: 'jargon', content: '炸了：出问题' }],
+      })),
+      observeDirectFeedback: vi.fn(async () => {}),
+      recordSentReply: vi.fn(async () => {}),
+    }
+    const harness = createHarness({
+      plannerModel: {
+        generateStep: vi.fn()
+          .mockResolvedValueOnce(plannerStep([replyCall('reply-first')]))
+          .mockResolvedValueOnce(plannerStep([replyCall('reply-second')])),
+      },
+      cognitive: { prepareTurn },
+      socialLanguage,
+      replyOutputs: [
+        JSON.stringify({
+          messages: [{ text: '第一条回复' }],
+          appliedExpressionIds: ['expression-1'],
+        }),
+        JSON.stringify({
+          messages: [{ text: '第二条回复' }],
+          appliedExpressionIds: [],
+        }),
+      ],
+    })
+
+    await harness.runtime.ingestDirect(envelope(1, '先回复一次'))
+    await harness.runtime.ingestDirect(envelope(2, '这次不错'))
+
+    expect(preparedTurns[1]?.recentTurns.find(turn => turn.role === 'assistant')).toMatchObject({
+      feedbackTargetIds: ['expression-1', 'behavior-1'],
+    })
+    expect(socialLanguage.observeDirectFeedback).toHaveBeenLastCalledWith(expect.objectContaining({
+      feedbackEvents: [feedbackEvent],
     }))
   })
 

@@ -152,9 +152,16 @@ export function decayLumiBeliefHypothesis(
   }
   const elapsedDays = Math.max(0, (Date.parse(now) - Date.parse(hypothesis.lastObservedAt)) / 86_400_000)
   const decay = clamp01(hypothesis.decay + elapsedDays * 0.015)
+  const confidence = clamp01(hypothesis.confidence * (1 - Math.min(0.35, elapsedDays * 0.01)))
+  const status = hypothesis.status === 'stable' && (confidence < 0.78 || hypothesis.stability < 0.65)
+    ? confidence >= 0.55 ? 'supported' : 'tentative'
+    : hypothesis.status === 'supported' && confidence < 0.55
+      ? 'tentative'
+      : hypothesis.status
   return {
     ...hypothesis,
-    confidence: clamp01(hypothesis.confidence * (1 - Math.min(0.35, elapsedDays * 0.01))),
+    confidence,
+    status,
     decay,
   }
 }

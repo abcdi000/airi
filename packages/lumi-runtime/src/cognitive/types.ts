@@ -394,4 +394,6 @@ export interface LumiCognitiveContextBundle {
   contradictions: string[]
   /** Automatic recall observability. */
   recallTrace: LumiRecallTrace
+  /** Explicit feedback persisted this turn, routed by stable asset IDs. */
+  feedbackEvents: LumiFeedbackEvent[]
 }

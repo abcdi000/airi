@@ -65,6 +65,7 @@ function cognitiveIdentity(
 function cognitiveEvidence(
   sourceMessageId: string,
   content = '继续处理 Patchright 的默认浏览器方案。',
+  patch: Partial<LumiCognitiveEvidence> = {},
 ): LumiCognitiveEvidence {
   const identity = cognitiveIdentity()
   return {
@@ -86,6 +87,7 @@ function cognitiveEvidence(
     participantUserIds: [...identity.participantUserIds],
     derivedFromEvidenceIds: [],
     schemaVersion: 1,
+    ...patch,
   }
 }
 
@@ -547,6 +549,150 @@ describe('lumiServerDatabase', () => {
     finally {
       source.close()
       restored.close()
+    }
+  })
+
+  it('consolidates an explicit correction and supersedes only its prior evidence-backed memory', () => {
+    const database = LumiServerDatabase.open(':memory:')
+    try {
+      database.acceptUserMessage({
+        conversationId: doggyDirectId,
+        actorPersonId: DOGGY_PERSON_ID,
+        messageId: 'preference-old',
+        idempotencyKey: 'preference-old',
+        content: 'I like concise replies.',
+        createdAt: Date.parse('2026-07-29T06:00:00.000Z'),
+      })
+      const identity = cognitiveIdentity()
+      const oldEvidence = cognitiveEvidence('preference-old', 'I like concise replies.')
+      database.commitCognitiveFastLoop({
+        identity,
+        evidence: oldEvidence,
+        feedback: [],
+        workingMemory: createLumiWorkingMemory({
+          personId: identity.actorId,
+          personaId: identity.personaId,
+          conversationId: identity.conversationId,
+          conversationType: identity.conversationType,
+          now: oldEvidence.occurredAt,
+        }),
+      })
+      const oldMemory = database.storeMemoryCandidate({
+        actorPersonId: DOGGY_PERSON_ID,
+        conversationId: doggyDirectId,
+        candidate: memoryCandidate({
+          type: 'user_preference',
+          content: 'Doggy likes concise replies.',
+          sourceMessageId: 'preference-old',
+          tags: ['communication'],
+        }),
+      })
+
+      database.acceptUserMessage({
+        conversationId: doggyDirectId,
+        actorPersonId: DOGGY_PERSON_ID,
+        messageId: 'preference-correction',
+        idempotencyKey: 'preference-correction',
+        content: 'Correction: I dislike concise replies.',
+        createdAt: Date.parse('2026-07-29T06:05:00.000Z'),
+      })
+      const correctionEvidence = cognitiveEvidence(
+        'preference-correction',
+        'Correction: I dislike concise replies.',
+        {
+          kind: 'user_correction',
+          occurredAt: '2026-07-29T06:05:00.000Z',
+        },
+      )
+      database.commitCognitiveFastLoop({
+        identity,
+        evidence: correctionEvidence,
+        feedback: [],
+        workingMemory: createLumiWorkingMemory({
+          personId: identity.actorId,
+          personaId: identity.personaId,
+          conversationId: identity.conversationId,
+          conversationType: identity.conversationType,
+          now: correctionEvidence.occurredAt,
+        }),
+      })
+      const correctedMemory = database.storeMemoryCandidate({
+        actorPersonId: DOGGY_PERSON_ID,
+        conversationId: doggyDirectId,
+        candidate: memoryCandidate({
+          type: 'user_preference',
+          content: 'Doggy dislikes concise replies.',
+          sourceMessageId: 'preference-correction',
+          tags: ['communication'],
+        }),
+      })
+
+      const backup = database.exportBackup()
+      const oldRow = backup.sections.memories.find(row => row.id === oldMemory.id)
+      const correctedRow = backup.sections.memories.find(row => row.id === correctedMemory.id)
+      const beliefRow = backup.sections.cognitiveBeliefs?.find(row => row.subject_id === DOGGY_PERSON_ID)
+      const projectionRow = backup.sections.cognitiveProfileProjections?.find(row => row.subject_id === DOGGY_PERSON_ID)
+
+      expect(oldMemory.status).toBe('active')
+      expect(correctedMemory).toMatchObject({
+        status: 'active',
+        supersedesId: oldMemory.id,
+      })
+      expect(oldRow).toMatchObject({
+        status: 'contradicted',
+        superseded_by_id: correctedMemory.id,
+      })
+      expect(correctedRow).toMatchObject({
+        status: 'active',
+        supersedes_id: oldMemory.id,
+      })
+      expect(JSON.parse(String(beliefRow?.value_json))).toBe('Doggy dislikes concise replies.')
+      expect(JSON.parse(String(beliefRow?.counter_evidence_ids_json))).toEqual([oldEvidence.id])
+      expect(projectionRow).toMatchObject({
+        layer: 'dynamic',
+        status: 'pending',
+      })
+      expect(database.loadAccessibleMemoriesByIds(identity, [oldMemory.id])).toEqual([])
+      expect(database.loadAccessibleMemoriesByIds(identity, [correctedMemory.id]).map(item => item.id))
+        .toEqual([correctedMemory.id])
+    }
+    finally {
+      database.close()
+    }
+  })
+
+  it('does not let another user private memory affect candidate conflict status', () => {
+    const database = LumiServerDatabase.open(':memory:')
+    try {
+      const doggyMemory = database.storeMemoryCandidate({
+        actorPersonId: DOGGY_PERSON_ID,
+        conversationId: doggyDirectId,
+        candidate: memoryCandidate({
+          type: 'user_preference',
+          content: 'Doggy likes cooperative games.',
+          tags: ['games'],
+        }),
+      })
+      const moussyMemory = database.storeMemoryCandidate({
+        actorPersonId: MOUSSY_PERSON_ID,
+        conversationId: moussyDirectId,
+        candidate: memoryCandidate({
+          type: 'user_preference',
+          content: 'Moussy dislikes cooperative games.',
+          tags: ['games'],
+        }),
+      })
+
+      const doggyVisibleMemoryIds = database
+        .listAccessibleMemories(memoryRequest(DOGGY_PERSON_ID, doggyDirectId))
+        .map(item => item.id)
+      expect(doggyMemory.status).toBe('active')
+      expect(moussyMemory.status).toBe('active')
+      expect(doggyVisibleMemoryIds).toContain(doggyMemory.id)
+      expect(doggyVisibleMemoryIds).not.toContain(moussyMemory.id)
+    }
+    finally {
+      database.close()
     }
   })
 })

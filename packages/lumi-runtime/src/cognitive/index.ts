@@ -1,6 +1,7 @@
 export * from './beliefs'
 export * from './context'
 export * from './feedback'
+export * from './maintenance'
 export * from './memory-consolidation'
 export * from './turn'
 export * from './types'

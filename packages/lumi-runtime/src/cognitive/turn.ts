@@ -28,6 +28,8 @@ export interface LumiCognitiveDialogueTurn {
   role: 'user' | 'assistant'
   /** Visible text only. */
   content: string
+  /** Stable social-language assets actually involved in an assistant reply. */
+  feedbackTargetIds?: readonly string[]
 }
 
 /** Non-memory projections loaded by a host for the immutable turn actor. */
@@ -205,6 +207,7 @@ export async function prepareLumiCognitiveTurn(
       reusedPreviousState: query.reusedPreviousState,
       injectedCount: recalled.memories.length,
     },
+    feedbackEvents: feedback,
     now,
   })
 }
@@ -249,6 +252,10 @@ function feedbackEvent(
     .reverse()
     .find(turn => turn.role === 'assistant')
     ?.id
+  const recentAssistantTargets = [...input.recentTurns]
+    .reverse()
+    .find(turn => turn.role === 'assistant')
+    ?.feedbackTargetIds ?? []
   return {
     id: `feedback:${input.identity.conversationId}:${input.sourceMessageId}:${kind}`,
     actorId: input.identity.actorId,
@@ -257,7 +264,10 @@ function feedbackEvent(
     kind,
     sourceId: input.sourceMessageId,
     evidenceId: evidence.id,
-    targetIds: recentAssistantId ? [recentAssistantId] : [],
+    targetIds: [...new Set([
+      ...recentAssistantTargets,
+      ...(recentAssistantId ? [recentAssistantId] : []),
+    ].map(value => value.trim()).filter(Boolean))],
     strength: 1,
     occurredAt,
     authorVerified: true,

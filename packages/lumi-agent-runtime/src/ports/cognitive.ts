@@ -12,6 +12,8 @@ export interface CognitiveDialogueTurn {
   messageIds: readonly string[]
   /** Ordered visible text segments. */
   textSegments: readonly string[]
+  /** Social-language assets actually involved in an assistant reply. */
+  feedbackTargetIds?: readonly string[]
   /** Original event timestamp. */
   timestamp: number
 }

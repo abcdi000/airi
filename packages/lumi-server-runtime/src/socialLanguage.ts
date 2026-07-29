@@ -3,6 +3,7 @@ import type {
   LanguageLearningConfig,
   LearnedBehaviorProposal,
   LearnedExpressionProposal,
+  LumiFeedbackEvent,
   LumiLanguageFeedback,
   SocialLanguageEvidence,
   SocialLanguageSnapshot,
@@ -14,8 +15,8 @@ import {
   applyExpressionFeedback,
   behaviorSemanticKey,
   canCreateSocialLanguageCandidates,
+  cognitiveFeedbackTargetIds,
   expressionIdsActuallyUsed,
-  expressionIdsForDecisionFeedback,
   expressionSemanticKey,
   isTrustedSocialLanguageEvidence,
   maintainSocialLanguageSnapshot,
@@ -25,6 +26,8 @@ import {
   observeLearnedExpression,
   observeSocialBehavior,
   parseSocialLanguageLearningOutput,
+  projectCognitiveFeedbackToLanguage,
+  socialBehaviorFeedbackOutcome,
 } from '@proj-airi/lumi-runtime'
 
 /**
@@ -39,6 +42,7 @@ export function applyServerLanguageFeedback(input: {
   personId: string
   userText: string
   feedback?: LumiLanguageFeedback
+  feedbackEvents?: readonly LumiFeedbackEvent[]
   config: LanguageLearningConfig
   now?: number
 }): SocialLanguageSnapshot {
@@ -57,20 +61,28 @@ export function applyServerLanguageFeedback(input: {
     return snapshot
 
   const decision = snapshot.decisions[decisionIndex]
-  if (!input.feedback)
+  const feedbackEvents = input.feedbackEvents ?? []
+  const feedback = input.feedback ?? projectCognitiveFeedbackToLanguage(feedbackEvents)
+  if (!feedback)
     return snapshot
-  const feedback = input.feedback
-  const selectedExpressions = expressionIdsForDecisionFeedback(snapshot.expressions, decision)
-  const selectedBehaviors = new Set(decision.selectedBehaviors)
+  const explicitTargetIds = cognitiveFeedbackTargetIds(feedbackEvents)
+  const restrictToExplicitTargets = feedbackEvents.length > 0
+  const selectedExpressions = expressionIdsActuallyUsed(snapshot.expressions, decision)
+  const selectedBehaviors = new Set(decision.selectedBehaviors.filter(id =>
+    !restrictToExplicitTargets || explicitTargetIds.has(id),
+  ))
   const positive = feedback.explicitPraise || feedback.phraseEcho || feedback.playfulContinuation
-  const failed = feedback.explicitRejection || feedback.misunderstanding || feedback.aiStyleComplaint
-  const succeeded = positive
+  const behaviorOutcome = socialBehaviorFeedbackOutcome(feedback, feedbackEvents)
   const now = input.now ?? Date.now()
   return {
     ...snapshot,
     expressions: snapshot.expressions.map((expression) => {
-      if (!selectedExpressions.has(expression.id))
+      if (
+        !selectedExpressions.has(expression.id)
+        || (restrictToExplicitTargets && !explicitTargetIds.has(expression.id))
+      ) {
         return expression
+      }
       const updated = applyExpressionFeedback(expression, feedback, now)
       if (!input.config.globalDiffusionEnabled || !positive)
         return updated
@@ -85,9 +97,9 @@ export function applyServerLanguageFeedback(input: {
     behaviors: snapshot.behaviors.map(behavior => selectedBehaviors.has(behavior.id)
       ? {
           ...behavior,
-          successCount: behavior.successCount + Number(succeeded),
-          failureCount: behavior.failureCount + Number(failed),
-          confidence: Math.max(0, Math.min(1, behavior.confidence + Number(succeeded) * 0.03 - Number(failed) * 0.06)),
+          successCount: behavior.successCount + Number(behaviorOutcome.succeeded),
+          failureCount: behavior.failureCount + Number(behaviorOutcome.failed),
+          confidence: Math.max(0, Math.min(1, behavior.confidence + Number(behaviorOutcome.succeeded) * 0.03 - Number(behaviorOutcome.failed) * 0.06)),
         }
       : behavior),
     decisions: snapshot.decisions.map((item, index) =>

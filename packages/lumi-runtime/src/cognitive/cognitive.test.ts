@@ -16,6 +16,7 @@ import {
   createLumiWorkingMemory,
   decayLumiBeliefHypothesis,
   formatLumiPlannerCognitiveContext,
+  maintainLumiCognitiveState,
   observeLumiBeliefHypothesis,
   prepareLumiCognitiveTurn,
   projectLumiBeliefsToProfile,
@@ -335,6 +336,42 @@ describe('lumi hypotheses and profile projection', () => {
     expect(decayLumiBeliefHypothesis(belief, LATER).status).toBe('expired')
   })
 
+  /** @example A stale stable belief is downgraded and no longer produces a Core projection. */
+  it('decays stale cognition and rebuilds profile projections without a model call', () => {
+    const sourceEvidence = evidence({
+      id: 'evidence-stale-preference',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+    })
+    const initialBelief = observeLumiBeliefHypothesis(undefined, {
+      subjectId: DOGGY,
+      predicate: 'communication_preference',
+      value: '简短自然',
+      evidence: sourceEvidence,
+    })
+    const staleBelief: LumiBeliefHypothesis = {
+      ...initialBelief,
+      confidence: 0.8,
+      stability: 0.7,
+      status: 'stable',
+      evidenceIds: [sourceEvidence.id],
+      independentEvidenceCount: 3,
+      lastObservedAt: sourceEvidence.occurredAt,
+      lastSeenAt: sourceEvidence.occurredAt,
+      expiresAt: '2027-01-01T00:00:00.000Z',
+    }
+
+    const result = maintainLumiCognitiveState({
+      subjectId: DOGGY,
+      beliefs: [staleBelief],
+      evidenceById: new Map([[sourceEvidence.id, sourceEvidence]]),
+      now: '2026-03-15T00:00:00.000Z',
+    })
+
+    expect(result.beliefs[0]?.status).toBe('tentative')
+    expect(result.downgradedCount).toBe(1)
+    expect(result.projections.every(projection => projection.layer !== 'core')).toBe(true)
+  })
+
   it('marks tentative hypotheses explicitly in Planner context', () => {
     const workingMemory = createLumiWorkingMemory({
       personId: DOGGY,
@@ -543,6 +580,39 @@ describe('lumi cognitive privacy and feedback', () => {
 })
 
 describe('lumi cognitive fast loop', () => {
+  /** @example Explicit feedback retains exact expression and behavior IDs from the prior sent reply. */
+  it('routes explicit feedback to persisted assistant asset IDs without text matching', async () => {
+    const host = cognitiveRepository({})
+    const bundle = await prepareLumiCognitiveTurn({
+      identity: {
+        actorId: DOGGY,
+        personaId: 'lumi',
+        conversationId: 'direct-doggy',
+        conversationType: 'direct',
+        participantUserIds: [DOGGY],
+      },
+      sourceMessageId: 'message-feedback',
+      userText: '你这样说自然多了',
+      recentTurns: [
+        {
+          id: 'assistant-before',
+          role: 'assistant',
+          content: '这次就按你说的来',
+          feedbackTargetIds: ['expression-natural', 'behavior-follow-user'],
+        },
+        { id: 'message-feedback', role: 'user', content: '你这样说自然多了' },
+      ],
+      repository: host.repository,
+      now: NOW,
+    })
+
+    expect(bundle.feedbackEvents).toEqual([expect.objectContaining({
+      kind: 'expression_natural',
+      targetIds: ['expression-natural', 'behavior-follow-user', 'assistant-before'],
+    })])
+    expect(host.commits[0]?.feedback).toEqual(bundle.feedbackEvents)
+  })
+
   /** @example One verified user turn becomes evidence before Planner context is assembled. */
   it('commits primary evidence, working memory, and authorized shallow recall together', async () => {
     const recalled = memory({ id: 'memory-project' })

@@ -210,7 +210,7 @@ describe('lumi tool mesh', () => {
     const retrieveSemantic = vi.spyOn(memory, 'retrieveSemantic').mockResolvedValue({
       route: {
         preferredTypes: [],
-        queryIntent: 'memory_recall',
+        queryIntent: 'explicit_history',
         reason: 'test',
       },
       rankedMemories: [],

@@ -1,4 +1,4 @@
-import type { LumiCognitiveContextBundle, LumiVisibleReply } from '@proj-airi/lumi-runtime'
+import type { LumiCognitiveContextBundle, LumiFeedbackEvent, LumiVisibleReply } from '@proj-airi/lumi-runtime'
 
 import type {
   DialogueAssistantMessage,
@@ -374,7 +374,7 @@ export class SessionRuntime {
         this.#replaceCurrentProfileReference(profile)
       await this.#refreshPlannerLanguageReferences(turn.envelope)
     }
-    this.#scheduleDirectFeedback(turn.envelope)
+    this.#scheduleDirectFeedback(turn.envelope, this.#activeCognitiveContext?.feedbackEvents ?? [])
 
     let consecutiveNoToolSteps = 0
     let responseFormatRetries = 0
@@ -824,6 +824,7 @@ export class SessionRuntime {
       onSent: async (input: {
         reply: LumiVisibleReply
         messageIds: readonly string[]
+        feedbackTargetIds: readonly string[]
         stickerId?: string
       }) => {
         turn.replied = true
@@ -834,6 +835,7 @@ export class SessionRuntime {
           messageIds: input.messageIds,
           textSegments: input.reply.messages.map(message => message.text),
           appliedExpressionIds: input.reply.appliedExpressionIds ?? [],
+          feedbackTargetIds: [...input.feedbackTargetIds],
           stickerId: input.stickerId,
           timestamp: Date.now(),
           countInContext: true,
@@ -966,6 +968,7 @@ export class SessionRuntime {
             role: 'assistant',
             messageIds: message.messageIds,
             textSegments: message.textSegments,
+            feedbackTargetIds: message.feedbackTargetIds,
             timestamp: message.timestamp,
           })
   }
@@ -1120,7 +1123,10 @@ export class SessionRuntime {
     }
   }
 
-  #scheduleDirectFeedback(envelope: DirectPerceptionEnvelope): void {
+  #scheduleDirectFeedback(
+    envelope: DirectPerceptionEnvelope,
+    feedbackEvents: readonly LumiFeedbackEvent[],
+  ): void {
     if (!this.#socialLanguage || !this.#config.directLanguageFeedbackEnabled)
       return
     const recentAssistant = this.#history
@@ -1130,6 +1136,7 @@ export class SessionRuntime {
       envelope,
       recentAssistantMessageIds: recentAssistant.flatMap(message => message.messageIds),
       recentAssistantTexts: recentAssistant.flatMap(message => message.textSegments),
+      feedbackEvents,
     }).catch(error => console.warn(
       '[lumi-agent-runtime] failed to apply direct social-language feedback',
       error,

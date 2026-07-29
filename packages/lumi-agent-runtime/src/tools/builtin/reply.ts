@@ -27,6 +27,7 @@ export interface ReplyToolRuntimeContext {
   onSent: (input: {
     reply: LumiVisibleReply
     messageIds: readonly string[]
+    feedbackTargetIds: readonly string[]
     stickerId?: string
   }) => Promise<void> | void
 }
@@ -209,9 +210,17 @@ export function createReplyTool(options: {
           })
         }
       }
+      const appliedExpressionIds = new Set(generated.reply.appliedExpressionIds ?? [])
+      const feedbackTargetIds = [
+        ...languageReferences?.expressions
+          .filter(reference => appliedExpressionIds.has(reference.id))
+          .map(reference => reference.id) ?? [],
+        ...languageReferences?.behaviors.map(reference => reference.id) ?? [],
+      ]
       await context.onSent({
         reply: generated.reply,
         messageIds,
+        feedbackTargetIds,
         stickerId,
       })
       if (options.socialLanguage) {

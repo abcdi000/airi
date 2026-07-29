@@ -1,4 +1,4 @@
-import type { LumiReplyIntent, LumiVisibleReply } from '@proj-airi/lumi-runtime'
+import type { LumiFeedbackEvent, LumiReplyIntent, LumiVisibleReply } from '@proj-airi/lumi-runtime'
 
 import type { DirectPerceptionEnvelope } from '../input'
 
@@ -40,6 +40,8 @@ export interface SocialLanguagePort {
     envelope: DirectPerceptionEnvelope
     recentAssistantMessageIds: readonly string[]
     recentAssistantTexts: readonly string[]
+    /** Explicit events already persisted by the cognitive fast loop. */
+    feedbackEvents: readonly LumiFeedbackEvent[]
   }) => Promise<void>
   recordSentReply: (input: {
     envelope: DirectPerceptionEnvelope

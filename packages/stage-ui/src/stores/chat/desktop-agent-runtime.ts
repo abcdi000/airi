@@ -57,6 +57,7 @@ import {
   buildExpressionSelectorMessages,
   buildSocialLanguageFeedbackMessages,
   parseSocialLanguageFeedbackOutput,
+  projectCognitiveFeedbackToLanguage,
   retrieveExpressionCandidates,
   selectExpressionsLocally,
   selectPlannerSocialBehaviors,
@@ -661,7 +662,7 @@ function createDesktopSocialLanguagePort(model: LanguageModelPort, readOnly: boo
         })),
       }
     },
-    async observeDirectFeedback({ envelope }) {
+    async observeDirectFeedback({ envelope, feedbackEvents }) {
       if (readOnly)
         return
       const store = useLumiSocialLanguageStore()
@@ -669,7 +670,8 @@ function createDesktopSocialLanguagePort(model: LanguageModelPort, readOnly: boo
       if (!pending || !store.config.feedbackLearningEnabled)
         return
       try {
-        const feedback = parseSocialLanguageFeedbackOutput(await model.generate(
+        const explicitFeedback = projectCognitiveFeedbackToLanguage(feedbackEvents)
+        const feedback = explicitFeedback ?? parseSocialLanguageFeedbackOutput(await model.generate(
           buildSocialLanguageFeedbackMessages({
             userText: envelope.text ?? '',
             decision: pending,
@@ -680,6 +682,7 @@ function createDesktopSocialLanguagePort(model: LanguageModelPort, readOnly: boo
           conversationId: envelope.conversationId,
           personId: envelope.personId,
           feedback,
+          feedbackEvents,
         })
       }
       catch {
@@ -990,6 +993,7 @@ function dialogueHistory(messages: readonly ChatHistoryItem[]): LumiAgentContext
       messageIds: [message.id],
       textSegments: [text],
       appliedExpressionIds: [],
+      feedbackTargetIds: [],
       timestamp: message.createdAt ?? Date.now(),
       countInContext: true,
       remainingUses: null,

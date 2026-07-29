@@ -29,6 +29,7 @@ export class LumiBackgroundLife {
   }
 
   scheduleInitialJobs() {
+    this.options.database.enqueueJobIfIdle('cognitive-maintenance', {}, Date.now() + 60_000)
     if (this.options.diary.enabled)
       this.options.database.enqueueJobIfIdle('diary-daily', {}, nextDailyTime(this.options.diary.dailyTime))
     if (this.options.autonomousLife.enabled)
@@ -37,9 +38,21 @@ export class LumiBackgroundLife {
 
   handlers(): Record<string, LumiServerJobHandler> {
     return {
+      'cognitive-maintenance': (job, signal) => this.maintainCognition(job, signal),
       'diary-daily': (job, signal) => this.writeDiary(job, signal),
       'autonomous-life-tick': (job, signal) => this.runLifeTick(job, signal),
     }
+  }
+
+  private async maintainCognition(job: LumiServerJob, signal: AbortSignal) {
+    signal.throwIfAborted()
+    // Cognitive decay is intentionally a daily durable job so it never adds
+    // model latency or database scans to an interactive reply.
+    if (job.attempts === 1)
+      this.options.database.enqueueJob('cognitive-maintenance', {}, Date.now() + 24 * 60 * 60 * 1_000)
+    const report = this.options.database.runCognitiveMaintenance()
+    signal.throwIfAborted()
+    return { ...report }
   }
 
   private async writeDiary(job: LumiServerJob, signal: AbortSignal) {

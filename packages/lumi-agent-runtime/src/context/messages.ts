@@ -38,6 +38,8 @@ export interface DialogueAssistantMessage extends ContextMessageBase {
   messageIds: readonly string[]
   textSegments: readonly string[]
   appliedExpressionIds: readonly string[]
+  /** Exact expression and behavior assets eligible for later user feedback. */
+  feedbackTargetIds?: readonly string[]
   stickerId?: string
 }
 

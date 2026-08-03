@@ -1,18 +1,22 @@
 import type { ProviderChatRoundInput, ProviderChatRoundResult, StreamUsage, TransportChatProvider } from '@proj-airi/core-agent'
-import type { Sub2ApiInputContentPart, Sub2ApiInputItem } from '@proj-airi/lumi-runtime/providers/sub2api'
+import type {
+  Sub2ApiChatContentPart,
+  Sub2ApiChatMessage,
+  Sub2ApiClientAccountStatus,
+  Sub2ApiClientTransport,
+  Sub2ApiFunctionTool,
+  Sub2ApiInputContentPart,
+  Sub2ApiInputItem,
+  Sub2ApiProtocol,
+} from '@proj-airi/lumi-runtime/providers/sub2api'
 import type { Message, Tool, ToolChoice } from '@xsai/shared-chat'
 
-import { errorMessageFrom } from '@moeru/std'
 import { providerChatTransport } from '@proj-airi/core-agent'
 import {
-  canFallbackFromSub2ApiResponses,
+  createDirectSub2ApiClientTransport,
   deriveAccountApiRoot,
   normalizeAccountApiRoot,
   normalizeModelApiRoot,
-  parseSub2ApiModelList,
-  resolveProviderEndpoint,
-  Sub2ApiProviderError,
-  Sub2ApiResponsesClient,
 } from '@proj-airi/lumi-runtime/providers/sub2api'
 import { z } from 'zod'
 
@@ -42,24 +46,23 @@ export interface Sub2ApiClientDiagnostics {
   responseId?: string
 }
 
-export interface Sub2ApiClientAccountStatus {
-  fetchedAt: string
-  accountTokenConfigured: boolean
-  balance?: number
-  frozenBalance?: number
-  concurrency?: number
-  rpmLimit?: number
-  effectiveRateMultiplier?: number
-  platformQuotas: Array<{
-    platform: string
-    dailyUsageUsd?: number
-    dailyLimitUsd?: number | null
-  }>
-  errors: string[]
-}
+export type { Sub2ApiClientAccountStatus, Sub2ApiClientTransport }
 
 export type Sub2ApiClientProvider = TransportChatProvider & {
   diagnostics: () => Sub2ApiClientDiagnostics
+}
+
+const webDirectTransport = createDirectSub2ApiClientTransport({ browserMode: true })
+let clientTransport: Sub2ApiClientTransport = webDirectTransport
+
+/** Installs the platform network boundary before Sub2API provider instances are created. */
+export function setSub2ApiClientTransport(transport: Sub2ApiClientTransport): void {
+  clientTransport = transport
+}
+
+/** Returns the current Web-direct or Electron-injected Sub2API transport. */
+export function getSub2ApiClientTransport(): Sub2ApiClientTransport {
+  return clientTransport
 }
 
 /** Returns diagnostics from a Sub2API client provider without exposing credentials. */
@@ -176,7 +179,69 @@ export function toSub2ApiResponsesInput(
   }
 }
 
-function responsesTool(tool: Tool) {
+function chatUserContent(content: Message['content'], multimodalEnabled: boolean): string | Sub2ApiChatContentPart[] {
+  if (typeof content === 'string')
+    return content
+  if (!Array.isArray(content))
+    return ''
+  const parts = content.flatMap((part): Sub2ApiChatContentPart[] => {
+    if (part.type === 'text')
+      return [{ type: 'text', text: part.text }]
+    if (part.type === 'image_url' && multimodalEnabled) {
+      return [{
+        type: 'image_url',
+        image_url: {
+          url: part.image_url.url,
+          ...(part.image_url.detail ? { detail: part.image_url.detail } : {}),
+        },
+      }]
+    }
+    return []
+  })
+  return parts.length ? parts : ''
+}
+
+/** Converts sanitized client history into a structured-clone-safe Chat Completions payload. */
+export function toSub2ApiChatMessages(
+  messages: readonly Message[],
+  multimodalEnabled: boolean,
+): Sub2ApiChatMessage[] {
+  return messages.map((message): Sub2ApiChatMessage => {
+    if (message.role === 'tool') {
+      return {
+        role: 'tool',
+        tool_call_id: message.tool_call_id,
+        content: textContent(message.content),
+      }
+    }
+    if (message.role === 'assistant') {
+      return {
+        role: 'assistant',
+        content: textContent(message.content),
+        ...(message.tool_calls?.length
+          ? {
+              tool_calls: message.tool_calls.map(call => ({
+                id: call.id,
+                type: 'function' as const,
+                function: {
+                  name: call.function.name ?? '',
+                  arguments: call.function.arguments ?? '',
+                },
+              })),
+            }
+          : {}),
+      }
+    }
+    return {
+      role: message.role,
+      content: message.role === 'user'
+        ? chatUserContent(message.content, multimodalEnabled)
+        : textContent(message.content),
+    }
+  })
+}
+
+function responsesTool(tool: Tool): Sub2ApiFunctionTool {
   return {
     type: 'function' as const,
     name: tool.function.name,
@@ -190,113 +255,77 @@ function responsesToolChoice(choice: ToolChoice | undefined): 'auto' | 'required
   return choice === 'none' || choice === 'required' ? choice : 'auto'
 }
 
-function createChatFetch(
-  reasoningEffort: Sub2ApiClientConfig['reasoningEffort'],
-): typeof globalThis.fetch {
-  return async (request, init) => {
-    if (reasoningEffort === 'auto' || typeof init?.body !== 'string')
-      return await globalThis.fetch(request, init)
-    const body = JSON.parse(init.body) as Record<string, unknown>
-    body.reasoning_effort = reasoningEffort
-    return await globalThis.fetch(request, { ...init, body: JSON.stringify(body) })
-  }
-}
-
 function createSub2ApiClientProvider(config: Sub2ApiClientConfig): Sub2ApiClientProvider {
   const baseURL = normalizeModelApiRoot(config.baseUrl)
   const apiKey = config.apiKey.trim()
-  let resolvedProtocol = config.protocol === 'auto' ? undefined : config.protocol
+  const transport = getSub2ApiClientTransport()
+  let resolvedProtocol: Sub2ApiProtocol = config.protocol
   let fallbackUsed = false
   let diagnostics: Sub2ApiClientDiagnostics = {
-    protocol: resolvedProtocol === 'chat-completions' ? 'chat-completions' : 'responses',
+    protocol: config.protocol === 'chat-completions' ? 'chat-completions' : 'responses',
     fallbackUsed: false,
   }
 
-  const streamRound = async (input: ProviderChatRoundInput): Promise<ProviderChatRoundResult | undefined> => {
-    if (resolvedProtocol === 'chat-completions') {
-      diagnostics = { ...diagnostics, protocol: 'chat-completions', fallbackUsed }
-      return undefined
-    }
-
+  const streamRound = async (input: ProviderChatRoundInput): Promise<ProviderChatRoundResult> => {
     let emittedText = false
     let emittedReasoning = false
-    const streamedCalls = new Set<string>()
-    try {
-      const result = await new Sub2ApiResponsesClient({
-        baseURL,
+    const round = await transport.runRound({
+      config: {
+        modelApiBaseUrl: baseURL,
         apiKey,
-        model: input.model,
+        protocol: resolvedProtocol,
         reasoningEffort: config.reasoningEffort,
-      }).request({
-        ...toSub2ApiResponsesInput(input.messages, config.multimodalEnabled),
-        tools: input.tools?.map(responsesTool),
-        toolChoice: responsesToolChoice(input.toolChoice),
-        maxOutputTokens: input.maxOutputTokens,
-        signal: input.abortSignal,
-        onTextDelta(delta) {
+      },
+      model: input.model,
+      responses: toSub2ApiResponsesInput(input.messages, config.multimodalEnabled),
+      chatMessages: toSub2ApiChatMessages(input.messages, config.multimodalEnabled),
+      tools: input.tools?.map(responsesTool),
+      toolChoice: responsesToolChoice(input.toolChoice),
+      maxOutputTokens: input.maxOutputTokens,
+    }, {
+      signal: input.abortSignal,
+      onEvent(event) {
+        if (event.type === 'text-delta') {
           emittedText = true
-          input.onEvent?.({ type: 'text-delta', text: delta })
-        },
-        onReasoningDelta(delta) {
-          emittedReasoning = true
-          input.onEvent?.({ type: 'reasoning-delta', text: delta })
-        },
-        onToolCallDelta(delta) {
-          if (!streamedCalls.has(delta.callId)) {
-            streamedCalls.add(delta.callId)
-            input.onEvent?.({
-              type: 'tool-call-streaming-start',
-              toolCallId: delta.callId,
-              toolName: delta.name,
-            })
-          }
-          input.onEvent?.({
-            type: 'tool-call-delta',
-            toolCallId: delta.callId,
-            toolName: delta.name,
-            argsTextDelta: delta.argumentsDelta,
-          })
-        },
-      })
-      resolvedProtocol = 'responses'
-      if (result.text && !emittedText)
-        input.onEvent?.({ type: 'text-delta', text: result.text })
-      if (result.reasoning && !emittedReasoning)
-        input.onEvent?.({ type: 'reasoning-delta', text: result.reasoning })
-      diagnostics = {
-        protocol: 'responses',
-        fallbackUsed,
-        requestedModel: result.requestedModel,
-        resolvedModel: result.resolvedModel,
-        requestId: result.requestId,
-        responseId: result.responseId,
-      }
-      return {
-        text: result.text,
-        reasoning: result.reasoning,
-        toolCalls: result.toolCalls.map(call => ({
-          args: call.arguments,
-          toolCallId: call.id,
-          toolCallType: 'function',
-          toolName: call.name,
-        })),
-        usage: normalizeReasoningUsage(result.usage),
-        finishReason: result.toolCalls.length ? 'tool_calls' : 'stop',
-        model: result.resolvedModel ?? result.requestedModel,
-      }
-    }
-    catch (error) {
-      if (config.protocol === 'auto' && input.stepNumber === 0 && canFallbackFromSub2ApiResponses(error)) {
-        resolvedProtocol = 'chat-completions'
-        fallbackUsed = true
-        diagnostics = {
-          protocol: 'chat-completions',
-          fallbackUsed: true,
-          requestedModel: input.model,
+          input.onEvent?.(event)
+          return
         }
-        return undefined
-      }
-      throw error
+        if (event.type === 'reasoning-delta') {
+          emittedReasoning = true
+          input.onEvent?.(event)
+          return
+        }
+        if (event.type === 'tool-call-streaming-start' || event.type === 'tool-call-delta')
+          input.onEvent?.(event)
+      },
+    })
+    resolvedProtocol = round.protocol
+    fallbackUsed ||= round.fallbackUsed
+    const result = round.value
+    if (result.text && !emittedText)
+      input.onEvent?.({ type: 'text-delta', text: result.text })
+    if (result.reasoning && !emittedReasoning)
+      input.onEvent?.({ type: 'reasoning-delta', text: result.reasoning })
+    diagnostics = {
+      protocol: round.protocol,
+      fallbackUsed,
+      requestedModel: result.requestedModel,
+      resolvedModel: result.resolvedModel,
+      requestId: result.requestId,
+      responseId: result.responseId,
+    }
+    return {
+      text: result.text,
+      reasoning: result.reasoning,
+      toolCalls: result.toolCalls.map(call => ({
+        args: call.arguments,
+        toolCallId: call.id,
+        toolCallType: 'function',
+        toolName: call.name,
+      })),
+      usage: normalizeReasoningUsage(result.usage),
+      finishReason: result.finishReason ?? (result.toolCalls.length ? 'tool_calls' : 'stop'),
+      model: result.resolvedModel ?? result.requestedModel,
     }
   }
 
@@ -305,61 +334,10 @@ function createSub2ApiClientProvider(config: Sub2ApiClientConfig): Sub2ApiClient
       apiKey,
       baseURL,
       model,
-      fetch: createChatFetch(config.reasoningEffort),
     }),
     [providerChatTransport]: { streamRound },
     diagnostics: () => ({ ...diagnostics }),
   }
-}
-
-async function fetchSub2ApiModels(config: Sub2ApiClientConfig, signal?: AbortSignal) {
-  const response = await globalThis.fetch(resolveProviderEndpoint(normalizeModelApiRoot(config.baseUrl), 'models'), {
-    headers: {
-      accept: 'application/json',
-      ...(config.apiKey.trim() ? { authorization: `Bearer ${config.apiKey.trim()}` } : {}),
-    },
-    signal,
-  })
-  if (!response.ok) {
-    throw new Sub2ApiProviderError(
-      response.status === 401 ? 'unauthorized' : 'unknown',
-      `Sub2API model list failed (${response.status}): ${await response.text().catch(() => response.statusText)}`,
-      { status: response.status, endpoint: '/models' },
-    )
-  }
-  return parseSub2ApiModelList(await response.json())
-}
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined
-}
-
-function finiteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-async function accountJson(url: URL, token: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-  const response = await globalThis.fetch(url, {
-    headers: {
-      accept: 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-    signal,
-  })
-  if (!response.ok) {
-    throw new Sub2ApiProviderError(
-      response.status === 401 ? 'account_token_expired' : 'account_endpoint_unavailable',
-      `Sub2API account request failed (${response.status}): ${await response.text().catch(() => response.statusText)}`,
-      { status: response.status, endpoint: url.pathname },
-    )
-  }
-  const payload: unknown = await response.json()
-  const root = object(payload)
-  if (!root)
-    throw new Sub2ApiProviderError('invalid_response', 'Sub2API account endpoint returned invalid JSON')
-  return root
 }
 
 /** Queries optional Sub2API account data without making it a chat prerequisite. */
@@ -367,58 +345,12 @@ export async function fetchSub2ApiClientAccountStatus(
   config: Sub2ApiClientConfig,
   signal?: AbortSignal,
 ): Promise<Sub2ApiClientAccountStatus> {
-  const accountToken = config.accountAccessToken.trim()
-  const status: Sub2ApiClientAccountStatus = {
-    fetchedAt: new Date().toISOString(),
-    accountTokenConfigured: Boolean(accountToken),
-    platformQuotas: [],
-    errors: [],
-  }
-
-  const tasks = [
-    accountJson(
-      resolveProviderEndpoint(normalizeModelApiRoot(config.baseUrl), 'sub2api/billing'),
-      config.apiKey.trim(),
-      signal,
-    ).then((billing) => {
-      status.effectiveRateMultiplier = finiteNumber(billing.effective_rate_multiplier)
-    }),
-  ]
-  if (accountToken) {
-    const accountRoot = sub2ApiAccountRoot(config)
-    tasks.push(
-      accountJson(resolveProviderEndpoint(accountRoot, 'user/profile'), accountToken, signal).then((payload) => {
-        const data = object(payload.data)
-        status.balance = finiteNumber(data?.balance)
-        status.frozenBalance = finiteNumber(data?.frozen_balance)
-        status.concurrency = finiteNumber(data?.concurrency)
-        status.rpmLimit = finiteNumber(data?.rpm_limit)
-      }),
-      accountJson(resolveProviderEndpoint(accountRoot, 'user/platform-quotas'), accountToken, signal).then((payload) => {
-        const data = object(payload.data)
-        status.platformQuotas = Array.isArray(data?.platform_quotas)
-          ? data.platform_quotas.flatMap((entry) => {
-              const quota = object(entry)
-              return typeof quota?.platform === 'string'
-                ? [{
-                    platform: quota.platform,
-                    dailyUsageUsd: finiteNumber(quota.daily_usage_usd),
-                    dailyLimitUsd: quota.daily_limit_usd === null
-                      ? null
-                      : finiteNumber(quota.daily_limit_usd),
-                  }]
-                : []
-            })
-          : []
-      }),
-    )
-  }
-
-  const settled = await Promise.allSettled(tasks)
-  status.errors = settled.flatMap(result => result.status === 'rejected'
-    ? [errorMessageFrom(result.reason) ?? 'Sub2API account request failed']
-    : [])
-  return status
+  return await getSub2ApiClientTransport().getAccountStatus({
+    modelApiBaseUrl: config.baseUrl,
+    modelApiKey: config.apiKey,
+    accountApiBaseUrl: config.accountApiBaseUrl,
+    accountAccessToken: config.accountAccessToken,
+  }, signal)
 }
 
 export const providerSub2Api = defineProvider<Sub2ApiClientConfig>({
@@ -443,7 +375,10 @@ export const providerSub2Api = defineProvider<Sub2ApiClientConfig>({
   createProvider: createSub2ApiClientProvider,
   extraMethods: {
     async listModels(config, _provider, options) {
-      return (await fetchSub2ApiModels(config, options?.signal)).map(model => ({
+      return (await getSub2ApiClientTransport().listModels({
+        modelApiBaseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+      }, options?.signal)).map(model => ({
         id: model.id,
         name: model.displayName ?? model.id,
         provider: 'sub2api',

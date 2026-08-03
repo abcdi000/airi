@@ -16,13 +16,18 @@ state, or avatar control logic in this package.
 
 ## Sub2API protocol
 
-`@proj-airi/lumi-runtime/providers/sub2api` is the browser-safe protocol layer
-shared by Lumi Server and the offline Electron client. It owns URL
-normalization, model-catalog parsing, Responses request/SSE handling, strict
-Auto fallback classification, usage mapping, and redacted provider errors.
+`@proj-airi/lumi-runtime/providers/sub2api` is the browser-safe protocol and
+direct HTTP transport shared by Lumi Server, Stage Web, and the offline
+Electron client. It owns URL normalization, model-catalog parsing, Responses
+and Chat Completions request/SSE handling, strict Auto fallback classification,
+usage mapping, cancellation, account-status normalization, and redacted
+provider errors.
 
 Use this entrypoint when implementing a Sub2API transport. Keep account storage,
 provider configuration, model execution, tool authorization, and tool execution
-in their owning server or client runtime. The module intentionally depends only
-on Web Platform APIs and must remain safe to bundle into an Electron renderer.
+in their owning server or client runtime. Stage Web uses the direct transport.
+Electron Main also uses it, but Electron Renderer reaches it only through the
+desktop's fixed Eventa business contracts so third-party requests never depend
+on browser CORS. The module intentionally depends only on Web Platform APIs and
+must remain safe to bundle into an Electron renderer.
 

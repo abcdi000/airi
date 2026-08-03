@@ -1,8 +1,23 @@
+import type { Sub2ApiClientTransport } from '@proj-airi/lumi-runtime/providers/sub2api'
 import type { Message } from '@xsai/shared-chat'
 
-import { describe, expect, it } from 'vitest'
+import type { Sub2ApiClientProvider } from './index'
 
-import { toSub2ApiResponsesInput } from './index'
+import { getProviderChatTransport } from '@proj-airi/core-agent'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import {
+  getSub2ApiClientTransport,
+  providerSub2Api,
+  setSub2ApiClientTransport,
+  toSub2ApiResponsesInput,
+} from './index'
+
+const defaultTransport = getSub2ApiClientTransport()
+
+afterEach(() => {
+  setSub2ApiClientTransport(defaultTransport)
+})
 
 describe('offline Sub2API Responses message conversion', () => {
   /** @example toSub2ApiResponsesInput(messages, true) */
@@ -64,5 +79,51 @@ describe('offline Sub2API Responses message conversion', () => {
       role: 'user',
       content: [{ type: 'input_text', text: '视觉模块的文字理解' }],
     }])
+  })
+})
+
+describe('offline Sub2API platform transport', () => {
+  /** @example providerSub2Api.createProvider(config) */
+  it('uses the injected desktop transport for model rounds', async () => {
+    // ROOT CAUSE:
+    //
+    // Before the desktop transport boundary, this provider called
+    // globalThis.fetch in Renderer and third-party CORS preflight returned 403.
+    const transport: Sub2ApiClientTransport = {
+      listModels: vi.fn(),
+      getAccountStatus: vi.fn(),
+      runRound: vi.fn(async () => ({
+        protocol: 'responses' as const,
+        fallbackUsed: false,
+        value: {
+          text: 'from-main',
+          toolCalls: [],
+          requestedModel: 'gpt-test',
+        },
+      })),
+    }
+    setSub2ApiClientTransport(transport)
+    const provider = await providerSub2Api.createProvider({
+      apiKey: 'test-api-key',
+      baseUrl: 'https://sub2api.example/v1/',
+      preferredModel: 'gpt-test',
+      protocol: 'auto',
+      reasoningEffort: 'auto',
+      maxToolSteps: 64,
+      multimodalEnabled: false,
+      accountApiBaseUrl: '',
+      accountAccessToken: '',
+      apiTestPassed: false,
+    })
+
+    const chatProvider = provider as Sub2ApiClientProvider
+    const result = await getProviderChatTransport(chatProvider)?.streamRound({
+      model: 'gpt-test',
+      messages: [{ role: 'user', content: 'hello' }],
+      stepNumber: 0,
+    })
+
+    expect(transport.runRound).toHaveBeenCalledTimes(1)
+    expect(result?.text).toBe('from-main')
   })
 })

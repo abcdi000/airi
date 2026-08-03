@@ -43,9 +43,12 @@ export {
 export {
   fetchSub2ApiClientAccountStatus,
   getSub2ApiClientDiagnostics,
+  getSub2ApiClientTransport,
+  setSub2ApiClientTransport,
 } from './sub2api'
 export type {
   Sub2ApiClientAccountStatus,
   Sub2ApiClientConfig,
   Sub2ApiClientDiagnostics,
+  Sub2ApiClientTransport,
 } from './sub2api'

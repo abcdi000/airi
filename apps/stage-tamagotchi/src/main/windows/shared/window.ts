@@ -19,6 +19,7 @@ import { createLumiIdentityService } from '../../services/airi/lumi-identity'
 import { createLumiMemoryService } from '../../services/airi/lumi-memory'
 import { createLumiOnlineClientService } from '../../services/airi/lumi-online'
 import { createLumiUserProfileService } from '../../services/airi/lumi-user-profile'
+import { createSub2ApiService } from '../../services/airi/sub2api'
 import { createAppService, createPowerMonitorService, createScreenService, createSystemPreferencesService, createWindowService } from '../../services/electron'
 
 export function toggleWindowShow(window?: BrowserWindow | null): void {
@@ -119,6 +120,7 @@ export async function setupBaseWindowElectronInvokes(params: {
   createLumiCurrentStateService({ context: params.context })
   createLumiDiaryExportService({ context: params.context })
   createClaudeCodeAgentService({ context: params.context })
+  createSub2ApiService({ context: params.context, window: params.window })
 
   await createI18nService({ context: params.context, window: params.window, i18n: params.i18n })
 

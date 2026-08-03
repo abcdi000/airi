@@ -99,6 +99,7 @@ export interface Sub2ApiNormalizedResult {
   reasoning?: string
   toolCalls: Sub2ApiNormalizedToolCall[]
   usage?: Sub2ApiNormalizedUsage
+  finishReason?: string
   requestedModel: string
   resolvedModel?: string
   responseId?: string
@@ -158,6 +159,37 @@ export interface Sub2ApiResponsesClientOptions {
   timeoutMs?: number
   fetch?: typeof globalThis.fetch
 }
+
+export type Sub2ApiChatContentPart
+  = | { type: 'text', text: string }
+    | { type: 'image_url', image_url: { url: string, detail?: 'auto' | 'high' | 'low' } }
+
+export interface Sub2ApiChatToolCall {
+  id: string
+  type: 'function'
+  function: {
+    name: string
+    arguments: string
+  }
+}
+
+export type Sub2ApiChatMessage
+  = | { role: 'system' | 'developer' | 'user', content: string | readonly Sub2ApiChatContentPart[] }
+    | { role: 'assistant', content: string, tool_calls?: readonly Sub2ApiChatToolCall[] }
+    | { role: 'tool', content: string, tool_call_id: string }
+
+export interface Sub2ApiChatCompletionsRequest {
+  messages: readonly Sub2ApiChatMessage[]
+  tools?: readonly Sub2ApiFunctionTool[]
+  toolChoice?: 'auto' | 'required' | 'none'
+  maxOutputTokens?: number
+  signal?: AbortSignal
+  onTextDelta?: (delta: string) => void
+  onReasoningDelta?: (delta: string) => void
+  onToolCallDelta?: (delta: { callId: string, name: string, argumentsDelta: string }) => void
+}
+
+export type Sub2ApiChatCompletionsClientOptions = Sub2ApiResponsesClientOptions
 
 export interface Sub2ApiProtocolRunResult<T> {
   value: T
@@ -424,6 +456,202 @@ export class Sub2ApiResponsesClient {
   }
 }
 
+/** Native `/v1/chat/completions` streaming client sharing Sub2API error policy. */
+export class Sub2ApiChatCompletionsClient {
+  readonly #apiKey?: string
+  readonly #baseURL: string
+  readonly #fetch: typeof globalThis.fetch
+  readonly #maxOutputTokens?: number
+  readonly #model: string
+  readonly #reasoningEffort: Sub2ApiReasoningEffort
+  readonly #temperature?: number
+  readonly #timeoutMs: number
+
+  constructor(options: Sub2ApiChatCompletionsClientOptions) {
+    this.#baseURL = normalizeModelApiRoot(options.baseURL)
+    this.#apiKey = options.apiKey?.trim() || undefined
+    this.#model = requiredText(options.model, 'model', 240)
+    this.#temperature = options.temperature
+    this.#maxOutputTokens = options.maxOutputTokens
+    this.#reasoningEffort = options.reasoningEffort ?? 'auto'
+    this.#timeoutMs = boundedInteger(options.timeoutMs ?? 300_000, 1_000, 600_000, 'timeoutMs')
+    this.#fetch = options.fetch ?? globalThis.fetch
+  }
+
+  async request(input: Sub2ApiChatCompletionsRequest): Promise<Sub2ApiNormalizedResult> {
+    const endpoint = resolveProviderEndpoint(this.#baseURL, 'chat/completions')
+    const signal = createRequestSignal(input.signal, this.#timeoutMs)
+    const body = {
+      model: this.#model,
+      messages: input.messages,
+      ...(input.tools?.length
+        ? {
+            tools: input.tools.map(tool => ({
+              type: 'function' as const,
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+                strict: tool.strict,
+              },
+            })),
+            tool_choice: input.toolChoice ?? 'auto',
+          }
+        : {}),
+      stream: true,
+      stream_options: { include_usage: true },
+      ...(this.#temperature !== undefined ? { temperature: this.#temperature } : {}),
+      ...(boundedOutputTokens(this.#maxOutputTokens, input.maxOutputTokens) !== undefined
+        ? { max_tokens: boundedOutputTokens(this.#maxOutputTokens, input.maxOutputTokens) }
+        : {}),
+      ...(this.#reasoningEffort !== 'auto' ? { reasoning_effort: this.#reasoningEffort } : {}),
+    }
+
+    try {
+      let response: Response
+      try {
+        response = await this.#fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'accept': 'text/event-stream, application/json',
+            'content-type': 'application/json',
+            ...(this.#apiKey ? { authorization: `Bearer ${this.#apiKey}` } : {}),
+          },
+          body: JSON.stringify(body),
+          signal: signal.signal,
+        })
+      }
+      catch (error) {
+        throw requestTransportError(error, signal, {
+          protocol: 'chat-completions',
+          model: this.#model,
+          endpoint: endpoint.pathname,
+        })
+      }
+
+      const requestId = providerRequestId(response.headers)
+      if (!response.ok)
+        throw await responseError(response, 'chat-completions', this.#model, endpoint.pathname, requestId)
+
+      const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
+      if (contentType.includes('text/event-stream') && response.body) {
+        return await parseSub2ApiChatCompletionsStream(response.body, {
+          requestedModel: this.#model,
+          requestId,
+          onTextDelta: input.onTextDelta,
+          onReasoningDelta: input.onReasoningDelta,
+          onToolCallDelta: input.onToolCallDelta,
+        })
+      }
+
+      const text = await response.text()
+      if (/^\s*(?:event:|data:)/.test(text)) {
+        return await parseSub2ApiChatCompletionsStream(streamFromText(text), {
+          requestedModel: this.#model,
+          requestId,
+          onTextDelta: input.onTextDelta,
+          onReasoningDelta: input.onReasoningDelta,
+          onToolCallDelta: input.onToolCallDelta,
+        })
+      }
+      return normalizeChatCompletionsDocument(parseJson(text, 'invalid_response'), this.#model, requestId)
+    }
+    catch (error) {
+      if (signal.timedOut() && (!(error instanceof Sub2ApiProviderError) || error.kind !== 'timeout')) {
+        throw new Sub2ApiProviderError('timeout', 'Sub2API 请求超时', {
+          protocol: 'chat-completions',
+          model: this.#model,
+          endpoint: endpoint.pathname,
+        }, { cause: error })
+      }
+      if (signal.aborted() && (!(error instanceof Sub2ApiProviderError) || error.kind !== 'cancelled')) {
+        throw new Sub2ApiProviderError('cancelled', 'Sub2API 请求已取消', {
+          protocol: 'chat-completions',
+          model: this.#model,
+          endpoint: endpoint.pathname,
+        }, { cause: error })
+      }
+      throw error
+    }
+    finally {
+      signal.dispose()
+    }
+  }
+}
+
+interface ParseChatStreamOptions {
+  requestedModel: string
+  requestId?: string
+  onTextDelta?: (delta: string) => void
+  onReasoningDelta?: (delta: string) => void
+  onToolCallDelta?: (delta: { callId: string, name: string, argumentsDelta: string }) => void
+}
+
+/** Parses arbitrarily chunked Chat Completions SSE into Lumi's provider-neutral result. */
+export async function parseSub2ApiChatCompletionsStream(
+  stream: ReadableStream<Uint8Array>,
+  options: ParseChatStreamOptions,
+): Promise<Sub2ApiNormalizedResult> {
+  const state = {
+    text: '',
+    reasoning: '',
+    toolCalls: new Map<number, MutableToolCall>(),
+    completed: false,
+    finishReason: undefined as string | undefined,
+    responseId: undefined as string | undefined,
+    resolvedModel: undefined as string | undefined,
+    usage: undefined as Sub2ApiNormalizedUsage | undefined,
+  }
+
+  try {
+    for await (const payload of parseSseData(stream)) {
+      if (payload === '[DONE]') {
+        state.completed = true
+        continue
+      }
+      applyChatCompletionsEvent(parseJson(payload, 'invalid_sse'), state, options)
+    }
+  }
+  catch (error) {
+    if (error instanceof Sub2ApiProviderError) {
+      throw new Sub2ApiProviderError(error.kind, error.message, {
+        ...error.details,
+        protocol: 'chat-completions',
+        model: options.requestedModel,
+        requestId: options.requestId,
+        partialOutput: state.text.length > 0,
+      }, { cause: error })
+    }
+    throw new Sub2ApiProviderError('stream_interrupted', 'Sub2API Chat Completions 流读取失败', {
+      protocol: 'chat-completions',
+      model: options.requestedModel,
+      requestId: options.requestId,
+      partialOutput: state.text.length > 0,
+    }, { cause: error })
+  }
+
+  if (!state.completed) {
+    throw new Sub2ApiProviderError('stream_interrupted', 'Sub2API Chat Completions 流提前结束', {
+      protocol: 'chat-completions',
+      model: options.requestedModel,
+      requestId: options.requestId,
+      partialOutput: state.text.length > 0,
+    })
+  }
+
+  return {
+    text: state.text,
+    ...(state.reasoning ? { reasoning: state.reasoning } : {}),
+    toolCalls: [...state.toolCalls.values()],
+    ...(state.usage ? { usage: state.usage } : {}),
+    ...(state.finishReason ? { finishReason: state.finishReason } : {}),
+    requestedModel: options.requestedModel,
+    ...(state.resolvedModel ? { resolvedModel: state.resolvedModel } : {}),
+    ...(state.responseId ? { responseId: state.responseId } : {}),
+    ...(options.requestId ? { requestId: options.requestId } : {}),
+  }
+}
+
 interface ParseStreamOptions {
   requestedModel: string
   requestId?: string
@@ -562,6 +790,77 @@ function nextLineEnd(value: string): { index: number, length: number } | undefin
   if (cr >= 0 && (lf < 0 || cr < lf))
     return { index: cr, length: value[cr + 1] === '\n' ? 2 : 1 }
   return { index: lf, length: 1 }
+}
+
+function applyChatCompletionsEvent(
+  event: Record<string, unknown>,
+  state: {
+    text: string
+    reasoning: string
+    toolCalls: Map<number, MutableToolCall>
+    completed: boolean
+    finishReason?: string
+    responseId?: string
+    resolvedModel?: string
+    usage?: Sub2ApiNormalizedUsage
+  },
+  callbacks: Pick<ParseChatStreamOptions, 'onTextDelta' | 'onReasoningDelta' | 'onToolCallDelta'>,
+): void {
+  const failure = record(event.error)
+  if (failure)
+    throw eventFailure(failure)
+
+  state.responseId = text(event.id) || state.responseId
+  state.resolvedModel = text(event.model) || state.resolvedModel
+  state.usage = normalizeChatUsage(event.usage) ?? state.usage
+
+  const choice = record(array(event.choices)[0])
+  if (!choice)
+    return
+  const delta = record(choice.delta) ?? record(choice.message)
+  if (!delta)
+    return
+
+  const textDelta = text(delta.content)
+  if (textDelta) {
+    state.text += textDelta
+    callbacks.onTextDelta?.(textDelta)
+  }
+  const reasoningDelta = text(delta.reasoning_content) || text(delta.reasoning)
+  if (reasoningDelta) {
+    state.reasoning += reasoningDelta
+    callbacks.onReasoningDelta?.(reasoningDelta)
+  }
+
+  for (const [position, item] of array(delta.tool_calls).entries()) {
+    const call = record(item)
+    const function_ = record(call?.function)
+    if (!call || !function_)
+      continue
+    const index = typeof call.index === 'number' ? call.index : position
+    const current = state.toolCalls.get(index) ?? {
+      id: text(call.id) || `tool:${index}`,
+      name: '',
+      arguments: '',
+    }
+    if (!current.arguments && text(call.id))
+      current.id = text(call.id)
+    current.name = text(function_.name) || current.name
+    const argumentsDelta = text(function_.arguments)
+    current.arguments += argumentsDelta
+    state.toolCalls.set(index, current)
+    callbacks.onToolCallDelta?.({
+      callId: current.id,
+      name: current.name,
+      argumentsDelta,
+    })
+  }
+
+  const finishReason = text(choice.finish_reason)
+  if (finishReason) {
+    state.finishReason = finishReason
+    state.completed = true
+  }
 }
 
 function applyResponsesEvent(
@@ -703,6 +1002,44 @@ function normalizeResponsesDocument(
   }
 }
 
+function normalizeChatCompletionsDocument(
+  document: Record<string, unknown>,
+  requestedModel: string,
+  requestId?: string,
+): Sub2ApiNormalizedResult {
+  const failure = record(document.error)
+  if (failure)
+    throw eventFailure(failure)
+
+  const choice = record(array(document.choices)[0])
+  const message = record(choice?.message)
+  if (!message)
+    throw new Sub2ApiProviderError('invalid_response', 'Sub2API Chat Completions 没有返回消息')
+
+  const toolCalls = array(message.tool_calls).flatMap((item) => {
+    const call = record(item)
+    const function_ = record(call?.function)
+    const id = text(call?.id)
+    const name = text(function_?.name)
+    if (!id || !name)
+      return []
+    return [{ id, name, arguments: text(function_?.arguments) || '{}' }]
+  })
+  return {
+    text: text(message.content),
+    ...(text(message.reasoning_content) || text(message.reasoning)
+      ? { reasoning: text(message.reasoning_content) || text(message.reasoning) }
+      : {}),
+    toolCalls,
+    ...(normalizeChatUsage(document.usage) ? { usage: normalizeChatUsage(document.usage) } : {}),
+    ...(text(choice?.finish_reason) ? { finishReason: text(choice?.finish_reason) } : {}),
+    requestedModel,
+    ...(text(document.model) ? { resolvedModel: text(document.model) } : {}),
+    ...(text(document.id) ? { responseId: text(document.id) } : {}),
+    ...(requestId ? { requestId } : {}),
+  }
+}
+
 function mergeOutputItem(item: Record<string, unknown>, calls: Map<string, MutableToolCall>): void {
   if (item.type !== 'function_call')
     return
@@ -745,6 +1082,19 @@ function normalizeUsage(value: unknown): Sub2ApiNormalizedUsage | undefined {
     inputTokens: number(usage.input_tokens),
     cachedInputTokens: number(inputDetails?.cached_tokens),
     outputTokens: number(usage.output_tokens),
+    totalTokens: number(usage.total_tokens),
+  })
+}
+
+function normalizeChatUsage(value: unknown): Sub2ApiNormalizedUsage | undefined {
+  const usage = record(value)
+  if (!usage)
+    return undefined
+  const promptDetails = record(usage.prompt_tokens_details)
+  return compactUsage({
+    inputTokens: number(usage.prompt_tokens),
+    cachedInputTokens: number(promptDetails?.cached_tokens),
+    outputTokens: number(usage.completion_tokens),
     totalTokens: number(usage.total_tokens),
   })
 }

@@ -5,6 +5,7 @@ import Tres from '@tresjs/core'
 
 import { autoAnimatePlugin } from '@formkit/auto-animate/vue'
 import { PiniaColada } from '@pinia/colada'
+import { setSub2ApiClientTransport } from '@proj-airi/stage-ui/libs'
 import { MotionPlugin } from '@vueuse/motion'
 import { createPinia } from 'pinia'
 import { setupLayouts } from 'virtual:generated-layouts'
@@ -15,6 +16,7 @@ import { routes } from 'vue-router/auto-routes'
 import App from './App.vue'
 
 import { i18n } from './modules/i18n'
+import { createElectronSub2ApiClientTransport } from './services/sub2api'
 
 import '@unocss/reset/tailwind.css'
 import 'splitpanes/dist/splitpanes.css'
@@ -37,6 +39,8 @@ import '@fontsource/m-plus-rounded-1c/index.css'
 import '@fontsource-variable/nunito/index.css'
 
 const pinia = createPinia()
+
+setSub2ApiClientTransport(createElectronSub2ApiClientTransport())
 
 const router = createRouter({
   history: createWebHashHistory(),

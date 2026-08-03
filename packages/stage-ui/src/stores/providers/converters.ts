@@ -134,17 +134,17 @@ export function convertProviderDefinitionToMetadata(
     createProvider: async config => await definition.createProvider(config as any) as any,
     capabilities: {
       listModels: definition.extraMethods?.listModels
-        ? async (config) => {
+        ? async (config, options) => {
           const provider = await definition.createProvider(config as any)
           try {
-            const models = await definition.extraMethods!.listModels!(config as any, provider)
+            const models = await definition.extraMethods!.listModels!(config as any, provider, options)
             return mapModelsToMetadataModels(definition.id, models as any[])
           }
           finally {
             await (provider as { dispose?: () => Promise<void> | void }).dispose?.()
           }
         }
-        : async (config) => {
+        : async (config, options) => {
           const provider = await definition.createProvider(config as any)
           try {
             if (isModelProvider(provider)) {
@@ -160,6 +160,7 @@ export function convertProviderDefinitionToMetadata(
             const models = await listModels({
               baseURL: baseUrl,
               ...(apiKey ? { apiKey } : {}),
+              abortSignal: options?.signal,
             })
             return mapModelsToMetadataModels(definition.id, models as any[])
           }

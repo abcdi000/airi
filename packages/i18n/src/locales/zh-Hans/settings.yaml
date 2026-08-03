@@ -1255,6 +1255,9 @@ pages:
       deepseek:
         description: DeepSeek.com
         title: 深度求索 DeepSeek
+      sub2api:
+        description: 离线客户端可用的 Responses 与 Chat Completions 接口
+        title: Sub2API
       elevenlabs:
         description: Elevenlabs.io
         fields:

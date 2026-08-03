@@ -234,7 +234,7 @@ function splitLumiReplyText(text: string): string[] {
     const looksLikeCompactChatLines = lineParts.length > 1
       && lineParts.length <= LUMI_MAX_SPLIT_REPLIES
       && lineParts.every(part => part.length <= 160)
-      && lineParts.every(part => !/^\s*(?:[\-*+|]|\d+[.)]|#{1,6}\s|>\s)/.test(part))
+      && lineParts.every(part => !/^\s*(?:[-*+|]|\d+[.)]|#{1,6}\s|>\s)/.test(part))
 
     if (looksLikeCompactChatLines)
       return lineParts
@@ -735,7 +735,10 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
     }
     const providerConfig = providersStore.getProviderConfig(providerId)
 
+    const sub2ApiMultimodalEnabled = providerId === 'sub2api'
+      && providerConfig?.multimodalEnabled === true
     const useTextOnlyImageBridge = !!payload.attachments?.length
+      && !sub2ApiMultimodalEnabled
     const visionResult = useTextOnlyImageBridge
       // Lumi's original flow keeps chat text-only: Qwen Vision analyzes images,
       // then the selected consciousness/chat model reads the analysis as hidden turn context.

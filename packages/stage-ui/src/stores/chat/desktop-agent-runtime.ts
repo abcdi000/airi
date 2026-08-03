@@ -28,7 +28,7 @@ import type {
   ToolSideEffectType,
 } from '@proj-airi/lumi-agent-runtime'
 import type { ChatProvider } from '@xsai-ext/providers/utils'
-import type { AssistantMessage, Message, Tool } from '@xsai/shared-chat'
+import type { AssistantMessage, CommonContentPart, Message, Tool } from '@xsai/shared-chat'
 
 import type {
   LanguageDecisionLog,
@@ -41,6 +41,7 @@ import type { ChatHistoryItem, ChatInteractionContext } from '../../types/chat'
 import localforage from 'localforage'
 
 import { errorMessageFrom } from '@moeru/std'
+import { generateProviderChatRound } from '@proj-airi/core-agent'
 import {
   buildDefaultPlannerSystemPrompt,
   buildDefaultReplyerSystemPrompt,
@@ -107,6 +108,8 @@ export interface DesktopAgentIngestInput {
   text: string
   /** User-visible text kept separate from hidden multimodal understanding. */
   visibleText?: string
+  /** Current-turn content parts sent directly to a multimodal consciousness provider. */
+  providerContent?: CommonContentPart[]
   sessionId: string
   interaction: ChatInteractionContext
   runtimeConfig: LumiAgentRuntimeConfig
@@ -133,6 +136,7 @@ export class DesktopLumiAgentHost {
   readonly #runtimes = new Map<string, LumiAgentRuntime>()
   readonly #seedExclusions = new Map<string, string>()
   readonly #toolProgressListeners = new Map<string, DesktopAgentIngestInput['onToolProgress']>()
+  readonly #providerContent = new Map<string, CommonContentPart[]>()
   #cognitive?: CognitiveContextPort
   #clearTask?: Promise<void>
 
@@ -185,6 +189,8 @@ export class DesktopLumiAgentHost {
       appendVisibleUserMessage(envelope, input.interaction, input.visibleText)
 
     const runtime = this.#runtime(input)
+    if (input.providerContent?.length)
+      this.#providerContent.set(input.sessionId, input.providerContent)
     if (input.onToolProgress)
       this.#toolProgressListeners.set(input.sessionId, input.onToolProgress)
     try {
@@ -196,6 +202,7 @@ export class DesktopLumiAgentHost {
       this.#seedExclusions.delete(this.#persistenceKey(input.mode, input.sessionId))
       if (this.#toolProgressListeners.get(input.sessionId) === input.onToolProgress)
         this.#toolProgressListeners.delete(input.sessionId)
+      this.#providerContent.delete(input.sessionId)
     }
   }
 
@@ -247,7 +254,11 @@ export class DesktopLumiAgentHost {
     if (runtime)
       return runtime
 
-    const models = createDesktopModelPorts(input.sessionId, input.visible)
+    const models = createDesktopModelPorts(
+      input.sessionId,
+      input.visible,
+      () => this.#providerContent.get(input.sessionId),
+    )
     runtime = new LumiAgentRuntime({
       config: {
         ...input.runtimeConfig,
@@ -337,7 +348,11 @@ export class DesktopLumiAgentHost {
   }
 }
 
-function createDesktopModelPorts(conversationId: string, visible: boolean): {
+function createDesktopModelPorts(
+  conversationId: string,
+  visible: boolean,
+  currentProviderContent: () => CommonContentPart[] | undefined,
+): {
   plannerModel: PlannerModelPort
   languageModel: LanguageModelPort
 } {
@@ -370,41 +385,95 @@ function createDesktopModelPorts(conversationId: string, visible: boolean): {
           },
         )
         try {
-          const response = await chat({
-            ...context.chatProvider.chat(context.model),
+          const messages = withCurrentProviderContent(input.messages.map(message => toXsaiMessage(
+            message,
+            deepSeekThinkingActive,
+          )), currentProviderContent())
+          const tools = input.tools.length ? input.tools.map(toXsaiTool) : undefined
+          const providerRound = await generateProviderChatRound({
+            chatProvider: context.chatProvider,
+            model: context.model,
+            messages,
+            tools,
+            toolChoice: input.tools.length ? input.toolChoice ?? 'required' : undefined,
             abortSignal: input.signal,
-            messages: input.messages.map(message => toXsaiMessage(
-              message,
-              deepSeekThinkingActive,
-            )),
-            tools: input.tools.length ? input.tools.map(toXsaiTool) : undefined,
-            toolChoice: input.tools.length
-              ? (input.toolChoice ?? 'required')
-              : undefined,
           })
-          const document = await response.json() as PlannerResponseDocument
-          const message = document.choices?.[0]?.message
-          if (!message)
-            throw new Error('Desktop Planner returned no message')
-          const content = assistantText(message)
-          const toolCalls = parseToolCalls(message)
-          const observableResult = formatPlannerResult(content, toolCalls)
-          if (observableResult)
-            trace.append(observableResult)
-          if (document.usage)
-            trace.usage(document.usage)
-          trace.complete()
-          return {
-            content,
-            reasoning: message.reasoning ?? message.reasoning_content,
-            toolCalls,
-            usage: {
+          let content: string
+          let reasoning: string | undefined
+          let toolCalls: PlannerToolCall[]
+          let usage: {
+            inputTokens?: number
+            outputTokens?: number
+            cacheHitTokens?: number
+            cacheMissTokens?: number
+          }
+          let modelName: string
+
+          if (providerRound) {
+            content = providerRound.text
+            reasoning = providerRound.reasoning
+            toolCalls = providerRound.toolCalls.map((call) => {
+              const argumentsValue = parsePlannerToolArguments(call.args)
+              if (!argumentsValue) {
+                throw new PlannerResponseFormatError(
+                  `Planner tool call ${call.toolCallId} returned invalid JSON arguments`,
+                )
+              }
+              return {
+                id: call.toolCallId,
+                name: call.toolName,
+                arguments: argumentsValue,
+              }
+            })
+            usage = {
+              inputTokens: providerRound.usage?.prompt_tokens,
+              outputTokens: providerRound.usage?.completion_tokens,
+              cacheHitTokens: providerRound.usage?.prompt_cache_hit_tokens,
+              cacheMissTokens: providerRound.usage?.prompt_cache_miss_tokens,
+            }
+            modelName = providerRound.model ?? context.model
+          }
+          else {
+            const response = await chat({
+              ...context.chatProvider.chat(context.model),
+              abortSignal: input.signal,
+              messages,
+              tools,
+              toolChoice: input.tools.length
+                ? (input.toolChoice ?? 'required')
+                : undefined,
+            })
+            const document = await response.json() as PlannerResponseDocument
+            const message = document.choices?.[0]?.message
+            if (!message)
+              throw new Error('Desktop Planner returned no message')
+            content = assistantText(message)
+            reasoning = message.reasoning ?? message.reasoning_content
+            toolCalls = parseToolCalls(message)
+            usage = {
               inputTokens: document.usage?.prompt_tokens,
               outputTokens: document.usage?.completion_tokens,
               cacheHitTokens: document.usage?.prompt_cache_hit_tokens,
               cacheMissTokens: document.usage?.prompt_cache_miss_tokens,
-            },
-            modelName: document.model ?? context.model,
+            }
+            modelName = document.model ?? context.model
+          }
+          const observableResult = formatPlannerResult(content, toolCalls)
+          if (observableResult)
+            trace.append(observableResult)
+          trace.usage({
+            prompt_tokens: usage.inputTokens,
+            completion_tokens: usage.outputTokens,
+            prompt_cache_hit_tokens: usage.cacheHitTokens,
+            prompt_cache_miss_tokens: usage.cacheMissTokens,
+          })
+          trace.complete()
+          return {
+            content,
+            reasoning,
+            toolCalls,
+            usage,
+            modelName,
           }
         }
         catch (error) {
@@ -422,7 +491,10 @@ function createDesktopModelPorts(conversationId: string, visible: boolean): {
         if (projectsVisibleReply)
           beginVisibleReplyStream(conversationId)
         try {
-          await useLLM().stream(context.model, context.chatProvider, messages as Message[], {
+          const providerMessages = purpose === 'replyer' || purpose === 'replyer_retry'
+            ? withCurrentProviderContent(messages as Message[], currentProviderContent())
+            : messages as Message[]
+          await useLLM().stream(context.model, context.chatProvider, providerMessages, {
             abortSignal: signal,
             maxOutputTokens: options?.maxOutputTokens,
             supportsTools: false,
@@ -1065,6 +1137,31 @@ function socialTurnContext(envelope: DirectPerceptionEnvelope, intent: LumiReply
 
 function emptyLanguageReferences(): ReplyLanguageReferences {
   return { expressions: [], behaviors: [], jargon: [] }
+}
+
+/**
+ * Attaches the current image turn to the last user message sent to a model.
+ *
+ * Before:
+ * - `{ role: 'user', content: '看看这张图' }`
+ *
+ * After:
+ * - `{ role: 'user', content: [text, image_url] }`
+ */
+function withCurrentProviderContent(
+  messages: Message[],
+  content: CommonContentPart[] | undefined,
+): Message[] {
+  if (!content?.length)
+    return messages
+  const userIndex = messages.findLastIndex(message => message.role === 'user')
+  if (userIndex < 0)
+    return messages
+  return messages.map((message, index) => {
+    if (index !== userIndex || message.role !== 'user')
+      return message
+    return { ...message, content }
+  })
 }
 
 function toXsaiMessage(

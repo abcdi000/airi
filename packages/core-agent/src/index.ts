@@ -27,6 +27,7 @@ export type { ContextHistoryEntry, ContextIngestResult, ContextRegistry } from '
 export { createContextRegistry } from './runtime/context-registry'
 export { useLlmmarkerParser } from './runtime/llm-marker-parser'
 export {
+  generateProviderChatRound,
   isContentArrayRelatedError,
   isToolRelatedError,
   modelKey,
@@ -65,8 +66,13 @@ export type {
 
 export type {
   BuiltinToolsResolver,
+  ProviderChatRoundInput,
+  ProviderChatRoundResult,
+  ProviderChatTransport,
   StreamEvent,
   StreamFromOptions,
   StreamOptions,
   StreamUsage,
+  TransportChatProvider,
 } from './types/llm'
+export { getProviderChatTransport, providerChatTransport } from './types/llm'

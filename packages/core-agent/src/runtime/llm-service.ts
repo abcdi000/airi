@@ -1,11 +1,13 @@
 import type { ChatProvider } from '@xsai-ext/providers/utils'
-import type { Message, Tool } from '@xsai/shared-chat'
+import type { Message, Tool, ToolChoice } from '@xsai/shared-chat'
 
-import type { StreamFromOptions, StreamOptions } from '../types/llm'
+import type { ProviderChatRoundResult, ProviderChatTransport, StreamFromOptions, StreamOptions, StreamUsage } from '../types/llm'
 
 import { errorMessageFrom } from '@moeru/std'
-import { stepCountAtLeast } from '@xsai/shared-chat'
+import { executeTool, stepCountAtLeast } from '@xsai/shared-chat'
 import { streamText } from '@xsai/stream-text'
+
+import { getProviderChatTransport } from '../types/llm'
 
 const DEFAULT_MAX_STREAM_STEPS = 64
 const MIN_STREAM_STEPS = 1
@@ -261,6 +263,134 @@ function summarizeLumiStreamEventForDebug(event: unknown) {
   return previewStreamDebugValue(record, 1200)
 }
 
+function providerUsage(input: StreamUsage | undefined): StreamUsage | undefined {
+  if (!input)
+    return undefined
+  return {
+    prompt_tokens: input.prompt_tokens ?? 0,
+    completion_tokens: input.completion_tokens ?? 0,
+    total_tokens: input.total_tokens ?? ((input.prompt_tokens ?? 0) + (input.completion_tokens ?? 0)),
+    ...(input.prompt_cache_hit_tokens !== undefined
+      ? { prompt_cache_hit_tokens: input.prompt_cache_hit_tokens }
+      : {}),
+    ...(input.prompt_cache_miss_tokens !== undefined
+      ? { prompt_cache_miss_tokens: input.prompt_cache_miss_tokens }
+      : {}),
+  }
+}
+
+/**
+ * Runs one provider-native model step without executing returned tools.
+ *
+ * Use when:
+ * - A Planner owns its tool policy and needs a Responses-native step.
+ *
+ * Expects:
+ * - The provider may return `undefined` to delegate to its Chat Completions path.
+ *
+ * Returns:
+ * - A normalized round, or `undefined` when the caller should use `chat()`.
+ */
+export async function generateProviderChatRound(input: {
+  chatProvider: ChatProvider
+  model: string
+  messages: Message[]
+  tools?: Tool[]
+  toolChoice?: ToolChoice
+  maxOutputTokens?: number
+  abortSignal?: AbortSignal
+  onEvent?: StreamOptions['onStreamEvent']
+}): Promise<ProviderChatRoundResult | undefined> {
+  const transport = getProviderChatTransport(input.chatProvider)
+  if (!transport)
+    return undefined
+  return await transport.streamRound({
+    model: input.model,
+    messages: input.messages,
+    tools: input.tools,
+    toolChoice: input.toolChoice,
+    maxOutputTokens: input.maxOutputTokens,
+    abortSignal: input.abortSignal,
+    stepNumber: 0,
+    onEvent: event => void input.onEvent?.(event),
+  })
+}
+
+async function streamFromProviderTransport(input: {
+  transport: ProviderChatTransport
+  model: string
+  messages: Message[]
+  tools?: Tool[]
+  maxSteps: number
+  options?: StreamOptions
+  onEvent: (event: unknown) => Promise<void>
+}): Promise<boolean> {
+  const messages = [...input.messages]
+
+  for (let stepNumber = 0; stepNumber < input.maxSteps; stepNumber += 1) {
+    if (input.options?.abortSignal?.aborted)
+      throw input.options.abortSignal.reason ?? new DOMException('Request aborted', 'AbortError')
+
+    const round = await input.transport.streamRound({
+      model: input.model,
+      messages,
+      tools: input.tools,
+      toolChoice: input.tools?.length ? 'auto' : 'none',
+      maxOutputTokens: input.options?.maxOutputTokens,
+      abortSignal: input.options?.abortSignal,
+      stepNumber,
+      onEvent: event => void input.onEvent(event),
+    })
+    if (!round) {
+      if (stepNumber === 0)
+        return false
+      throw new Error('Provider transport cannot delegate after a completed custom-protocol step')
+    }
+
+    const usage = providerUsage(round.usage)
+    if (usage)
+      await input.options?.onUsage?.(usage)
+
+    const assistantToolCalls = round.toolCalls.map(call => ({
+      id: call.toolCallId,
+      type: 'function' as const,
+      function: {
+        name: call.toolName,
+        arguments: call.args,
+      },
+    }))
+    messages.push({
+      role: 'assistant',
+      content: round.text,
+      ...(assistantToolCalls.length ? { tool_calls: assistantToolCalls } : {}),
+    })
+
+    if (!assistantToolCalls.length) {
+      await input.onEvent({ type: 'finish', finishReason: round.finishReason || 'stop', usage })
+      return true
+    }
+
+    const toolResults = await Promise.all(assistantToolCalls.map(async (toolCall) => {
+      const executed = await executeTool({
+        abortSignal: input.options?.abortSignal,
+        captureToolErrors: false,
+        messages,
+        toolCall,
+        tools: input.tools,
+      })
+      await input.onEvent({ ...executed.completionToolCall, type: 'tool-call' })
+      await input.onEvent({
+        ...executed.completionToolResult,
+        type: executed.completionToolResult.isError ? 'tool-error' : 'tool-result',
+      })
+      return executed.message
+    }))
+    messages.push(...toolResults)
+  }
+
+  throw new Error(`Provider tool loop exceeded maxSteps=${input.maxSteps}`)
+}
+
 export async function streamFrom({
   model,
   chatProvider,
@@ -301,6 +431,8 @@ export async function streamFrom({
     captureToolErrors: options?.captureToolErrors,
     maxSteps,
   })
+
+  const transport = getProviderChatTransport(chatProvider)
 
   return new Promise<void>((resolve, reject) => {
     let settled = false
@@ -348,7 +480,7 @@ export async function streamFrom({
       }
     }
 
-    try {
+    const runDefaultTransport = () => {
       const streamResult = streamText({
         ...chatConfig,
         abortSignal: options?.abortSignal,
@@ -401,9 +533,30 @@ export async function streamFrom({
       void streamResult.usage.catch(error => console.error('Stream usage error:', error))
       void streamResult.totalUsage.catch(error => console.error('Stream totalUsage error:', error))
     }
-    catch (error) {
-      rejectOnce(error)
-    }
+
+    void (async () => {
+      try {
+        if (transport) {
+          const handled = await streamFromProviderTransport({
+            transport,
+            model,
+            messages: sanitized,
+            tools: streamTools,
+            maxSteps,
+            options,
+            onEvent,
+          })
+          if (handled) {
+            resolveOnce()
+            return
+          }
+        }
+        runDefaultTransport()
+      }
+      catch (error) {
+        rejectOnce(error)
+      }
+    })()
   })
 }
 

@@ -21,6 +21,7 @@ import type { ProviderOnboardingField } from '../libs/providers/types'
 import type { AliyunRealtimeSpeechExtraOptions } from './providers/aliyun/stream-transcription'
 import type { DashScopeRealtimeAsrExtraOptions } from './providers/dashscope/stream-transcription'
 
+import { errorMessageFrom } from '@moeru/std'
 import { isStageTamagotchi, isUrl } from '@proj-airi/stage-shared'
 import { getCachedWebGPUCapabilities, isWebGPUSupported } from '@proj-airi/stage-shared/webgpu'
 import { computedAsync, useIntervalFn, useLocalStorage } from '@vueuse/core'
@@ -511,7 +512,7 @@ export interface ProviderMetadata {
     | Promise<TranscriptionProvider>
     | Promise<TranscriptionProviderWithExtraOptions>
   capabilities: {
-    listModels?: (config: Record<string, unknown>) => Promise<ModelInfo[]>
+    listModels?: (config: Record<string, unknown>, options?: { signal?: AbortSignal }) => Promise<ModelInfo[]>
     listVoices?: (config: Record<string, unknown>, model?: string) => Promise<VoiceInfo[]>
     loadModel?: (config: Record<string, unknown>, hooks?: { onProgress?: (progress: ProgressInfo) => Promise<void> | void }) => Promise<void>
   }
@@ -2955,6 +2956,8 @@ export const useProvidersStore = defineStore('providers', () => {
   const providerRuntimeState = ref<Record<string, ProviderRuntimeState>>({})
   const visionProviderRuntimeState = ref<Record<string, Pick<ProviderRuntimeState, 'models' | 'isLoadingModels' | 'modelLoadError'>>>({})
   const providerValidationInFlight = new Map<string, Promise<boolean>>()
+  const modelListRequests = new Map<string, { controller: AbortController, sequence: number }>()
+  let modelListRequestSequence = 0
   const providerRevalidationLoops = new Map<string, { resume: () => void }>()
 
   const configuredProviders = computed(() => {
@@ -3161,6 +3164,8 @@ export const useProvidersStore = defineStore('providers', () => {
   })
 
   function deleteProvider(providerId: string) {
+    modelListRequests.get(providerId)?.controller.abort()
+    modelListRequests.delete(providerId)
     delete providerCredentials.value[providerId]
     delete providerRuntimeState.value[providerId]
     delete visionProviderRuntimeState.value[providerId]
@@ -3188,6 +3193,9 @@ export const useProvidersStore = defineStore('providers', () => {
   }
 
   async function resetProviderSettings() {
+    for (const request of modelListRequests.values())
+      request.controller.abort()
+    modelListRequests.clear()
     providerCredentials.value = {}
     addedProviders.value = {}
     providerRuntimeState.value = {}
@@ -3208,13 +3216,24 @@ export const useProvidersStore = defineStore('providers', () => {
       return []
 
     const runtimeState = providerRuntimeState.value[providerId]
+    modelListRequests.get(providerId)?.controller.abort()
+    const request = {
+      controller: new AbortController(),
+      sequence: ++modelListRequestSequence,
+    }
+    modelListRequests.set(providerId, request)
     if (runtimeState) {
       runtimeState.isLoadingModels = true
       runtimeState.modelLoadError = null
     }
 
     try {
-      const models = metadata.capabilities.listModels ? await metadata.capabilities.listModels(config || {}) : []
+      const models = metadata.capabilities.listModels
+        ? await metadata.capabilities.listModels(config || {}, { signal: request.controller.signal })
+        : []
+
+      if (modelListRequests.get(providerId)?.sequence !== request.sequence)
+        return runtimeState?.models ?? []
 
       // Transform and store the models
       if (runtimeState) {
@@ -3232,14 +3251,19 @@ export const useProvidersStore = defineStore('providers', () => {
       return []
     }
     catch (error) {
+      if (request.controller.signal.aborted)
+        return runtimeState?.models ?? []
       console.error(`Error fetching models for ${providerId}:`, error)
       if (runtimeState) {
-        runtimeState.modelLoadError = error instanceof Error ? error.message : 'Unknown error'
+        runtimeState.modelLoadError = errorMessageFrom(error) ?? 'Unknown error'
       }
       return []
     }
     finally {
-      if (runtimeState) {
+      if (modelListRequests.get(providerId)?.sequence === request.sequence) {
+        modelListRequests.delete(providerId)
+      }
+      if (runtimeState && modelListRequests.get(providerId) === undefined) {
         runtimeState.isLoadingModels = false
       }
     }
@@ -3291,7 +3315,7 @@ export const useProvidersStore = defineStore('providers', () => {
     }
     catch (error) {
       console.error(`Error fetching vision models for ${providerId}:`, error)
-      runtimeState.modelLoadError = error instanceof Error ? error.message : 'Unknown error'
+      runtimeState.modelLoadError = errorMessageFrom(error) ?? 'Unknown error'
       return []
     }
     finally {
@@ -3438,6 +3462,8 @@ export const useProvidersStore = defineStore('providers', () => {
   }
 
   async function disposeProviderInstance(providerId: string) {
+    modelListRequests.get(providerId)?.controller.abort()
+    modelListRequests.delete(providerId)
     const instance = providerInstanceCache.value[providerId] as { dispose?: () => Promise<void> | void } | undefined
     if (instance?.dispose)
       await instance.dispose()

@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import type { Sub2ApiClientAccountStatus, Sub2ApiClientConfig } from '@proj-airi/stage-ui/libs'
 import type { RemovableRef } from '@vueuse/core'
+import type { ChatProvider } from '@xsai-ext/providers/utils'
 
+import { errorMessageFrom } from '@moeru/std'
 import {
   Alert,
   ErrorContainer,
@@ -14,13 +17,19 @@ import {
   RadioCardManySelect,
 } from '@proj-airi/stage-ui/components'
 import { useProviderValidation } from '@proj-airi/stage-ui/composables/use-provider-validation'
-import { getDefinedProvider } from '@proj-airi/stage-ui/libs'
+import {
+  fetchSub2ApiClientAccountStatus,
+  getDefinedProvider,
+  getSub2ApiClientDiagnostics,
+} from '@proj-airi/stage-ui/libs'
 import { useLLM } from '@proj-airi/stage-ui/stores/llm'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
 import { storeToRefs } from 'pinia'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, shallowRef } from 'vue'
 import { useRoute } from 'vue-router'
+
+import Sub2ApiClientSettings from './components/Sub2ApiClientSettings.vue'
 
 const route = useRoute()
 const providerId = route.params.providerId as string
@@ -30,7 +39,24 @@ const llmStore = useLLM()
 const { providers } = storeToRefs(providersStore) as { providers: RemovableRef<Record<string, any>> }
 const { activeProvider, activeModel } = storeToRefs(consciousnessStore)
 
+providersStore.initializeProvider(providerId)
+
 type ConnectionStatus = 'idle' | 'saved' | 'loading-models' | 'testing' | 'success' | 'error'
+
+interface Sub2ApiTestResult {
+  success: boolean
+  error?: string
+  output: string
+  protocol: string
+  fallbackUsed: boolean
+  requestedModel: string
+  resolvedModel?: string
+  firstTokenLatencyMs?: number
+  durationMs: number
+  inputTokens?: number
+  outputTokens?: number
+  totalTokens?: number
+}
 
 const isSavingConfig = ref(false)
 const isFetchingModels = ref(false)
@@ -38,8 +64,11 @@ const isTestingApi = ref(false)
 const connectionStatus = ref<ConnectionStatus>('idle')
 const connectionMessage = ref('')
 const modelSearchQuery = ref('')
+const sub2ApiAccountLoading = ref(false)
+const sub2ApiAccountStatus = shallowRef<Sub2ApiClientAccountStatus>()
+const sub2ApiTestResult = shallowRef<Sub2ApiTestResult>()
 
-const providerConfig = computed(() => providers.value[providerId] ??= {})
+const providerConfig = computed(() => providers.value[providerId] ?? {})
 const providerRuntimeState = computed(() => providersStore.providerRuntimeState[providerId])
 const providerModels = computed(() => providersStore.getModelsForProvider(providerId))
 const isLoadingModels = computed(() => providersStore.isLoadingModels[providerId] || false)
@@ -62,8 +91,10 @@ function buildConfigHash(config: Record<string, unknown>) {
     apiKey: readString(config, 'apiKey'),
     baseUrl: normalizeBaseUrl(config.baseUrl),
     preferredModel: readString(config, 'preferredModel'),
+    protocol: readString(config, 'protocol', 'auto'),
     thinkingMode: readString(config, 'thinkingMode', 'auto'),
     reasoningEffort: readString(config, 'reasoningEffort', 'auto'),
+    multimodalEnabled: config.multimodalEnabled === true,
     maxOutputTokens: readNumber(config, 'maxOutputTokens', 0),
     maxContextMessages: readNumber(config, 'maxContextMessages', 0),
     maxToolSteps: readNumber(config, 'maxToolSteps', 64),
@@ -90,13 +121,14 @@ const selectedModel = computed({
   },
 })
 
+const isDeepSeekProvider = computed(() => providerId === 'deepseek')
+const isSub2ApiProvider = computed(() => providerId === 'sub2api')
+
 const canTestApi = computed(() => {
-  return !!readString(providerConfig.value, 'apiKey')
+  return (isSub2ApiProvider.value || !!readString(providerConfig.value, 'apiKey'))
     && !!normalizeBaseUrl(providerConfig.value.baseUrl)
     && !!selectedModel.value.trim()
 })
-
-const isDeepSeekProvider = computed(() => providerId === 'deepseek')
 
 const maxToolSteps = computed({
   get: () => readNumber(providerConfig.value, 'maxToolSteps', 64),
@@ -197,6 +229,13 @@ function ensureProviderConfig() {
   config.apiTestConfigHash ??= ''
   config.preferredModel ??= activeProvider.value === providerId ? activeModel.value : ''
   config.maxToolSteps ??= defaultOptions.maxToolSteps ?? 64
+  if (providerId === 'sub2api') {
+    config.protocol ??= defaultOptions.protocol ?? 'auto'
+    config.reasoningEffort ??= defaultOptions.reasoningEffort ?? 'auto'
+    config.multimodalEnabled ??= defaultOptions.multimodalEnabled ?? false
+    config.accountApiBaseUrl ??= defaultOptions.accountApiBaseUrl ?? ''
+    config.accountAccessToken ??= defaultOptions.accountAccessToken ?? ''
+  }
   if (providerId === 'deepseek') {
     config.thinkingMode ??= defaultOptions.thinkingMode ?? 'auto'
     config.reasoningEffort ??= defaultOptions.reasoningEffort ?? 'auto'
@@ -228,7 +267,7 @@ async function saveProviderConfig() {
   }
   catch (error) {
     connectionStatus.value = 'error'
-    connectionMessage.value = error instanceof Error ? error.message : '保存配置失败。'
+    connectionMessage.value = errorMessageFrom(error) ?? '保存配置失败。'
   }
   finally {
     isSavingConfig.value = false
@@ -248,7 +287,7 @@ async function fetchProviderModels() {
     if (!models.length)
       throw new Error(modelLoadError.value || '没有获取到模型。可手动输入模型名后再测试。')
 
-    if (!selectedModel.value)
+    if (!selectedModel.value && !isSub2ApiProvider.value)
       selectedModel.value = models[0].id
 
     connectionStatus.value = 'saved'
@@ -256,7 +295,7 @@ async function fetchProviderModels() {
   }
   catch (error) {
     connectionStatus.value = 'error'
-    connectionMessage.value = error instanceof Error ? error.message : '获取模型失败。'
+    connectionMessage.value = errorMessageFrom(error) ?? '获取模型失败。'
   }
   finally {
     isFetchingModels.value = false
@@ -267,6 +306,12 @@ async function testApiAndEnableProvider() {
   isTestingApi.value = true
   connectionStatus.value = 'testing'
   connectionMessage.value = '正在用当前选择的模型发送一条很短的测试消息...'
+  let testedProvider: ChatProvider | undefined
+  let output = ''
+  let firstTokenAt: number | undefined
+  let returnedModel: string | undefined
+  let usage: { prompt_tokens?: number, completion_tokens?: number, total_tokens?: number } | undefined
+  const startedAt = performance.now()
 
   try {
     const config = ensureProviderConfig()
@@ -274,7 +319,7 @@ async function testApiAndEnableProvider() {
     const normalizedBaseUrl = normalizeBaseUrl(config.baseUrl)
     const model = selectedModel.value.trim()
 
-    if (!apiKey)
+    if (!apiKey && !isSub2ApiProvider.value)
       throw new Error('API Key 不能为空。')
     if (!normalizedBaseUrl)
       throw new Error('Base URL 不能为空。')
@@ -287,13 +332,49 @@ async function testApiAndEnableProvider() {
     await providersStore.disposeProviderInstance(providerId)
 
     config.baseUrl = normalizedBaseUrl
-    const chatProvider = await providersStore.getProviderInstance<any>(providerId)
-    await llmStore.stream(model, chatProvider, [{
+    testedProvider = await providersStore.getProviderInstance<ChatProvider>(providerId)
+    await llmStore.stream(model, testedProvider, [{
       role: 'user',
-      content: '请只回复 OK',
+      content: isSub2ApiProvider.value ? '请只回复 LUMI_SUB2API_OK' : '请只回复 OK',
     }], {
-      onStreamEvent: () => {},
+      supportsTools: false,
+      waitForTools: false,
+      maxSteps: 1,
+      tools: [],
+      toolTransform: () => [],
+      onUsage(value) {
+        usage = value
+      },
+      onStreamEvent(event) {
+        if (event.type === 'text-delta') {
+          firstTokenAt ??= performance.now()
+          output += event.text
+        }
+        if (event.type === 'finish' && 'model' in event && typeof event.model === 'string')
+          returnedModel = event.model
+      },
     })
+    const completedAt = performance.now()
+
+    if (isSub2ApiProvider.value && !output.includes('LUMI_SUB2API_OK'))
+      throw new Error(`Sub2API 已返回响应，但测试文本不匹配：${output || '空响应'}`)
+
+    if (isSub2ApiProvider.value) {
+      const diagnostics = getSub2ApiClientDiagnostics(testedProvider)
+      sub2ApiTestResult.value = {
+        success: true,
+        output,
+        protocol: diagnostics?.protocol ?? readString(config, 'protocol', 'auto'),
+        fallbackUsed: diagnostics?.fallbackUsed ?? false,
+        requestedModel: diagnostics?.requestedModel ?? model,
+        resolvedModel: diagnostics?.resolvedModel ?? returnedModel,
+        firstTokenLatencyMs: firstTokenAt === undefined ? undefined : Math.round(firstTokenAt - startedAt),
+        durationMs: Math.round(completedAt - startedAt),
+        inputTokens: usage?.prompt_tokens,
+        outputTokens: usage?.completion_tokens,
+        totalTokens: usage?.total_tokens,
+      }
+    }
 
     config.preferredModel = model
     config.apiTestPassed = true
@@ -310,11 +391,51 @@ async function testApiAndEnableProvider() {
   }
   catch (error) {
     providersStore.setProviderUnconfigured(providerId)
+    const message = errorMessageFrom(error) ?? 'API 测试失败。'
+    if (isSub2ApiProvider.value) {
+      const diagnostics = getSub2ApiClientDiagnostics(testedProvider)
+      sub2ApiTestResult.value = {
+        success: false,
+        error: message,
+        output,
+        protocol: diagnostics?.protocol ?? readString(providerConfig.value, 'protocol', 'auto'),
+        fallbackUsed: diagnostics?.fallbackUsed ?? false,
+        requestedModel: diagnostics?.requestedModel ?? selectedModel.value.trim(),
+        resolvedModel: diagnostics?.resolvedModel ?? returnedModel,
+        firstTokenLatencyMs: firstTokenAt === undefined ? undefined : Math.round(firstTokenAt - startedAt),
+        durationMs: Math.round(performance.now() - startedAt),
+        inputTokens: usage?.prompt_tokens,
+        outputTokens: usage?.completion_tokens,
+        totalTokens: usage?.total_tokens,
+      }
+    }
     connectionStatus.value = 'error'
-    connectionMessage.value = error instanceof Error ? error.message : 'API 测试失败。'
+    connectionMessage.value = message
   }
   finally {
     isTestingApi.value = false
+  }
+}
+
+function updateSub2ApiConfig(patch: Partial<Sub2ApiClientConfig>) {
+  Object.assign(providerConfig.value, patch)
+  if ('accountApiBaseUrl' in patch || 'accountAccessToken' in patch)
+    sub2ApiAccountStatus.value = undefined
+}
+
+async function refreshSub2ApiAccount() {
+  sub2ApiAccountLoading.value = true
+  try {
+    sub2ApiAccountStatus.value = await fetchSub2ApiClientAccountStatus(
+      ensureProviderConfig() as Sub2ApiClientConfig,
+    )
+  }
+  catch (error) {
+    connectionStatus.value = 'error'
+    connectionMessage.value = errorMessageFrom(error) ?? '账户状态查询失败。'
+  }
+  finally {
+    sub2ApiAccountLoading.value = false
   }
 }
 
@@ -352,13 +473,27 @@ onMounted(async () => {
         />
       </ProviderBasicSettings>
 
-      <ProviderAdvancedSettings :title="t('settings.pages.providers.common.section.advanced.title')">
+      <ProviderAdvancedSettings
+        :title="t('settings.pages.providers.common.section.advanced.title')"
+        :initial-visible="isSub2ApiProvider"
+      >
         <ProviderBaseUrlInput
           v-model="baseUrl"
           :placeholder="providerMetadata?.defaultOptions?.().baseUrl as string || 'Base URL of your provider'"
         />
 
-        <label class="mt-4 grid gap-1">
+        <Sub2ApiClientSettings
+          v-if="isSub2ApiProvider"
+          :config="providerConfig"
+          :account-status="sub2ApiAccountStatus"
+          :account-loading="sub2ApiAccountLoading"
+          :test-result="sub2ApiTestResult"
+          :class="['mt-5']"
+          @change="updateSub2ApiConfig"
+          @refresh-account="refreshSub2ApiAccount"
+        />
+
+        <label v-else class="grid mt-4 gap-1">
           <span class="text-sm font-medium">最大工具步数</span>
           <input
             v-model.number="maxToolSteps"
@@ -366,13 +501,13 @@ onMounted(async () => {
             min="1"
             max="200"
             step="1"
-            class="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
+            class="border border-neutral-200 rounded-lg bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
           >
           <span class="text-xs opacity-60">一次回复中允许意识模型连续调用工具的最大步数。浏览器、MCP、批量操作任务可适当调高；默认 64，最高 200。</span>
         </label>
 
-        <div v-if="isDeepSeekProvider" class="mt-4 grid gap-4">
-          <div class="rounded-lg border border-cyan-500/30 bg-cyan-500/10 p-3 text-sm text-cyan-900 dark:text-cyan-100">
+        <div v-if="isDeepSeekProvider" class="grid mt-4 gap-4">
+          <div class="border border-cyan-500/30 rounded-lg bg-cyan-500/10 p-3 text-sm text-cyan-900 dark:text-cyan-100">
             <div class="font-semibold">
               DeepSeek 官方参数
             </div>
@@ -385,7 +520,7 @@ onMounted(async () => {
             <span class="text-sm font-medium">思考模式</span>
             <select
               v-model="deepSeekThinkingMode"
-              class="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
+              class="border border-neutral-200 rounded-lg bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
             >
               <option value="auto">自动（不显式传参）</option>
               <option value="enabled">开启</option>
@@ -398,7 +533,7 @@ onMounted(async () => {
             <span class="text-sm font-medium">思考强度</span>
             <select
               v-model="deepSeekReasoningEffort"
-              class="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
+              class="border border-neutral-200 rounded-lg bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
             >
               <option value="auto">自动</option>
               <option value="high">high</option>
@@ -415,7 +550,7 @@ onMounted(async () => {
               min="0"
               max="64000"
               step="1024"
-              class="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
+              class="border border-neutral-200 rounded-lg bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
             >
             <span class="text-xs opacity-60">0 表示不覆盖默认值；DeepSeek 思考模型文档上限为 64K，且包含思维链输出。</span>
           </label>
@@ -428,7 +563,7 @@ onMounted(async () => {
               min="0"
               max="500"
               step="10"
-              class="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
+              class="border border-neutral-200 rounded-lg bg-white px-3 py-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
             >
             <span class="text-xs opacity-60">0 表示不裁剪；默认 80。系统提示、画像、记忆与当前消息仍会正常加入。</span>
           </label>
@@ -437,7 +572,7 @@ onMounted(async () => {
 
       <div flex="~ col gap-3">
         <div
-          class="rounded-lg border px-4 py-3 text-sm"
+          class="border rounded-lg px-4 py-3 text-sm"
           :class="{
             'border-emerald-400/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200': providerRuntimeState?.isConfigured && isApiTestCurrent,
             'border-amber-400/50 bg-amber-500/10 text-amber-700 dark:text-amber-200': !(providerRuntimeState?.isConfigured && isApiTestCurrent) && connectionStatus !== 'error',
@@ -459,7 +594,7 @@ onMounted(async () => {
         <div class="flex flex-wrap gap-3">
           <button
             type="button"
-            class="inline-flex items-center gap-2 rounded-lg border border-neutral-300 px-4 py-2 text-sm transition-colors dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+            class="inline-flex items-center gap-2 border border-neutral-300 rounded-lg px-4 py-2 text-sm transition-colors disabled:cursor-not-allowed dark:border-neutral-700 hover:bg-neutral-100 disabled:opacity-50 dark:hover:bg-neutral-800"
             :disabled="isSavingConfig || isFetchingModels || isTestingApi"
             @click="saveProviderConfig"
           >
@@ -468,8 +603,8 @@ onMounted(async () => {
           </button>
           <button
             type="button"
-            class="inline-flex items-center gap-2 rounded-lg border border-neutral-300 px-4 py-2 text-sm transition-colors dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="isSavingConfig || isFetchingModels || isTestingApi || !apiKey || !baseUrl"
+            class="inline-flex items-center gap-2 border border-neutral-300 rounded-lg px-4 py-2 text-sm transition-colors disabled:cursor-not-allowed dark:border-neutral-700 hover:bg-neutral-100 disabled:opacity-50 dark:hover:bg-neutral-800"
+            :disabled="isSavingConfig || isFetchingModels || isTestingApi || (!isSub2ApiProvider && !apiKey) || !baseUrl"
             @click="fetchProviderModels"
           >
             <div :class="isFetchingModels || isLoadingModels ? 'i-solar:refresh-bold-duotone animate-spin' : 'i-solar:list-check-bold-duotone'" />
@@ -477,7 +612,7 @@ onMounted(async () => {
           </button>
           <button
             type="button"
-            class="inline-flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-sm text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
+            class="inline-flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-sm text-white transition-colors disabled:cursor-not-allowed hover:bg-primary-600 disabled:opacity-50"
             :disabled="isSavingConfig || isFetchingModels || isTestingApi || !canTestApi"
             @click="testApiAndEnableProvider"
           >
@@ -487,7 +622,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <ProviderAdvancedSettings title="模型选择">
+      <ProviderAdvancedSettings title="模型选择" :initial-visible="isSub2ApiProvider">
         <div flex="~ col gap-4">
           <div v-if="modelLoadError">
             <ErrorContainer title="模型获取失败" :error="modelLoadError" />

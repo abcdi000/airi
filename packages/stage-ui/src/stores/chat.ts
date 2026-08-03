@@ -1,7 +1,7 @@
 import type { ChatOrchestratorRuntimeState, ChatOrchestratorSendOptions, StreamEvent, StreamOptions } from '@proj-airi/core-agent'
 import type { CognitiveContextPort } from '@proj-airi/lumi-agent-runtime'
 import type { ChatProvider } from '@xsai-ext/providers/utils'
-import type { Message } from '@xsai/shared-chat'
+import type { CommonContentPart, Message } from '@xsai/shared-chat'
 
 import type {
   LumiConversationContextMessage,
@@ -481,6 +481,16 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       && !options.hiddenUserMessage
     if (sharedRuntimeEligible && interaction) {
       const runtimeUserText = options.agentUserText?.trim() || sendingMessage
+      const providerContent: CommonContentPart[] | undefined = options.sendAttachmentsToProvider !== false
+        && options.attachments?.length
+        ? [
+            { type: 'text', text: sendingMessage },
+            ...options.attachments.map(attachment => ({
+              type: 'image_url' as const,
+              image_url: { url: `data:${attachment.mimeType};base64,${attachment.data}` },
+            })),
+          ]
+        : undefined
       const mode = lumiAgentRuntimeSettingsStore.mode
       if (mode === 'maisaka') {
         sending.value = true
@@ -490,10 +500,12 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
             runtimeUserText,
             chatSession.getSessionMessages(sessionId),
             interaction,
+            providerContent,
           )
           const turnResult = await desktopLumiAgentHost.ingest({
             text: runtimeUserText,
             visibleText: sendingMessage,
+            providerContent,
             sessionId,
             interaction,
             runtimeConfig: lumiAgentRuntimeSettingsStore.runtimeConfig(),
@@ -928,7 +940,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   async function generateSocialLanguageTextWithProvider(input: {
     model: string
     chatProvider: ChatProvider
-    messages: LumiLanguageModelMessage[]
+    messages: Message[]
     headers?: Record<string, string>
     purpose: 'replyer' | 'replyer_retry' | 'expression_selector' | 'learning' | 'feedback' | 'sticker_classifier' | 'sticker_selector' | 'context_summary' | 'relationship_assessment' | 'current_state' | 'profile_curator' | 'profile_review' | 'memory_curator' | 'memory_topic'
     conversationId?: string
@@ -948,7 +960,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     }
     let buffer = ''
     try {
-      await llmStore.stream(input.model, input.chatProvider, input.messages as Message[], {
+      await llmStore.stream(input.model, input.chatProvider, input.messages, {
         headers: input.headers,
         supportsTools: false,
         waitForTools: false,
@@ -1389,6 +1401,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     userText: string,
     sessionMessages: ChatHistoryItem[],
     interaction?: ChatInteractionContext,
+    providerContent?: CommonContentPart[],
   ) {
     if (cardStore.activeCardId !== LUMI_AIRI_CARD_ID)
       return
@@ -1432,7 +1445,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
           },
           {
             role: 'user',
-            content: userText,
+            content: providerContent ?? userText,
           },
         ],
       })

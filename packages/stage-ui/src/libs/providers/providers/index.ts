@@ -4,6 +4,7 @@ import './aihubmix'
 import './lm-studio'
 import './azure-openai'
 import './openai-compatible'
+import './sub2api'
 import './volcengine-coding-plan'
 import './byteplus'
 import './byteplus-coding-plan'
@@ -39,3 +40,12 @@ export {
   getDefinedProvider,
   listProviders,
 } from './registry'
+export {
+  fetchSub2ApiClientAccountStatus,
+  getSub2ApiClientDiagnostics,
+} from './sub2api'
+export type {
+  Sub2ApiClientAccountStatus,
+  Sub2ApiClientConfig,
+  Sub2ApiClientDiagnostics,
+} from './sub2api'

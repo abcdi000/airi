@@ -8,6 +8,7 @@ import {
   deriveAccountApiRoot,
   normalizeAccountApiRoot,
   normalizeModelApiRoot,
+  parseSub2ApiModelList,
   parseSub2ApiProviderOptions,
   resolveProviderEndpoint,
   Sub2ApiProtocolRouter,
@@ -140,21 +141,7 @@ export async function listProviderModels(input: ProviderProbeInput): Promise<Pro
   if (!root)
     throw new Error('服务商返回了无法识别的模型列表')
 
-  const openAIModels = Array.isArray(root.data)
-    ? parseModelItems(root.data, 'openai-list')
-    : []
-  const codexModels = Array.isArray(root.models)
-    ? parseModelItems(root.models, 'codex-manifest')
-    : []
-  if (!Array.isArray(root.data) && !Array.isArray(root.models))
-    throw new Error('服务商返回了无法识别的模型列表')
-
-  const unique = new Map<string, ProviderModel>()
-  for (const model of [...openAIModels, ...codexModels]) {
-    if (!unique.has(model.id))
-      unique.set(model.id, model)
-  }
-  return [...unique.values()]
+  return parseSub2ApiModelList(root)
 }
 
 /** Performs a real low-cost text generation against the selected model. */
@@ -598,27 +585,6 @@ function parseStrictObject(value: string): Record<string, unknown> {
   }
 }
 
-function parseModelItems(
-  items: unknown[],
-  source: ProviderModel['source'],
-): ProviderModel[] {
-  return items.flatMap((item) => {
-    const model = record(item)
-    if (!model)
-      return []
-    const id = firstText(model.id, model.slug, model.model, model.name)
-    if (!id)
-      return []
-    const displayName = firstText(model.display_name, model.displayName, model.name, model.id, model.slug, model.model)
-    return [{
-      id,
-      ...(displayName && displayName !== id ? { displayName } : {}),
-      ...(typeof model.owned_by === 'string' ? { ownedBy: model.owned_by } : {}),
-      source,
-    }]
-  })
-}
-
 function parseProfile(payload: unknown): {
   wallet: NonNullable<ProviderAccountStatus['wallet']>
   limits?: ProviderAccountStatus['limits']
@@ -853,10 +819,6 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined
-}
-
-function firstText(...values: unknown[]): string {
-  return values.find(value => typeof value === 'string' && value.trim())?.toString() ?? ''
 }
 
 function text(value: unknown): string {

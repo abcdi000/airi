@@ -1308,6 +1308,9 @@ pages:
       deepseek:
         description: deepseek.com
         title: DeepSeek
+      sub2api:
+        description: Responses and Chat Completions for the offline client
+        title: Sub2API
       elevenlabs:
         description: elevenlabs.io
         fields:

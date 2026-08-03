@@ -1,11 +1,12 @@
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { Message, Tool } from '@xsai/shared-chat'
 
-import type { StreamUsage } from '../types/llm'
+import type { ProviderChatTransport, StreamUsage, TransportChatProvider } from '../types/llm'
 
 import { stepCountAtLeast } from '@xsai/shared-chat'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { providerChatTransport } from '../types/llm'
 import { dedupeToolsByName, isContentArrayRelatedError, sanitizeMessages, streamFrom } from './llm-service'
 
 const { streamTextMock } = vi.hoisted(() => ({
@@ -265,6 +266,156 @@ describe('streamFrom tool error capture', () => {
       toolName: 'play_chess',
       result: expect.stringContaining('Focus mode does not accept game-state mutation inputs.'),
     }))
+  })
+})
+
+describe('streamFrom provider-native transport', () => {
+  /** @example await streamFrom({ chatProvider: providerWithTransport, options: { tools } }) */
+  it('keeps tool execution in core-agent and continues with the same call ID', async () => {
+    const events: unknown[] = []
+    const execute = vi.fn(async (input: unknown) => JSON.stringify({ echoed: input }))
+    const tool = {
+      type: 'function',
+      function: {
+        name: 'echo_test',
+        description: 'Echo one value.',
+        parameters: {
+          type: 'object',
+          properties: { value: { type: 'string' } },
+          required: ['value'],
+        },
+      },
+      execute,
+    } satisfies Tool
+    const streamRound = vi.fn<ProviderChatTransport['streamRound']>(async (input) => {
+      if (input.stepNumber === 0) {
+        return {
+          text: '我先处理',
+          toolCalls: [{
+            args: '{"value":"LUMI_TOOL_OK"}',
+            toolCallId: 'call_1',
+            toolCallType: 'function',
+            toolName: 'echo_test',
+          }],
+          finishReason: 'tool_calls',
+        }
+      }
+
+      expect(input.messages.at(-1)).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call_1',
+      })
+      return {
+        text: '工具完成',
+        toolCalls: [],
+        finishReason: 'stop',
+      }
+    })
+    const providerWithTransport: TransportChatProvider = {
+      chat: model => ({ apiKey: '', baseURL: 'https://example.com/v1/', model }),
+      [providerChatTransport]: { streamRound },
+    }
+
+    await streamFrom({
+      model: 'model-a',
+      chatProvider: providerWithTransport,
+      messages: [{ role: 'user', content: 'use tool' }],
+      options: {
+        tools: [tool],
+        onStreamEvent: (event) => {
+          events.push(event)
+        },
+      },
+    })
+
+    expect(streamTextMock).not.toHaveBeenCalled()
+    expect(streamRound).toHaveBeenCalledTimes(2)
+    expect(execute).toHaveBeenCalledWith({ value: 'LUMI_TOOL_OK' }, expect.objectContaining({
+      toolCallId: 'call_1',
+    }))
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool-result',
+      toolCallId: 'call_1',
+      toolName: 'echo_test',
+    }))
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'finish',
+      finishReason: 'stop',
+    }))
+  })
+
+  /** @example await streamFrom({ options: { maxSteps: 1 } }) */
+  it('enforces the configured maximum provider-native tool steps', async () => {
+    const tool = {
+      type: 'function',
+      function: {
+        name: 'echo_test',
+        description: 'Echo one value.',
+        parameters: { type: 'object', properties: {} },
+      },
+      execute: vi.fn(async () => 'ok'),
+    } satisfies Tool
+    const providerWithTransport: TransportChatProvider = {
+      chat: model => ({ apiKey: '', baseURL: 'https://example.com/v1/', model }),
+      [providerChatTransport]: {
+        streamRound: async () => ({
+          text: '',
+          toolCalls: [{
+            args: '{}',
+            toolCallId: 'call_1',
+            toolCallType: 'function',
+            toolName: 'echo_test',
+          }],
+          finishReason: 'tool_calls',
+        }),
+      },
+    }
+
+    await expect(streamFrom({
+      model: 'model-a',
+      chatProvider: providerWithTransport,
+      messages: [{ role: 'user', content: 'continue forever' }],
+      options: { maxSteps: 1, tools: [tool] },
+    })).rejects.toThrow('exceeded maxSteps=1')
+    expect(tool.execute).toHaveBeenCalledTimes(1)
+  })
+
+  /** @example await streamFrom({ options: { abortSignal } }) */
+  it('stops before provider I/O when the request is already cancelled', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const streamRound = vi.fn<ProviderChatTransport['streamRound']>()
+    const providerWithTransport: TransportChatProvider = {
+      chat: model => ({ apiKey: '', baseURL: 'https://example.com/v1/', model }),
+      [providerChatTransport]: { streamRound },
+    }
+
+    await expect(streamFrom({
+      model: 'model-a',
+      chatProvider: providerWithTransport,
+      messages: [{ role: 'user', content: 'cancel' }],
+      options: { abortSignal: controller.signal },
+    })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(streamRound).not.toHaveBeenCalled()
+  })
+
+  /** @example await streamFrom({ chatProvider: autoProvider }) */
+  it('delegates the whole first round to Chat Completions when transport returns undefined', async () => {
+    streamTextMock.mockReturnValueOnce(createMockStreamResult())
+    const streamRound = vi.fn<ProviderChatTransport['streamRound']>(async () => undefined)
+    const providerWithTransport: TransportChatProvider = {
+      chat: model => ({ apiKey: '', baseURL: 'https://example.com/v1/', model }),
+      [providerChatTransport]: { streamRound },
+    }
+
+    await streamFrom({
+      model: 'model-a',
+      chatProvider: providerWithTransport,
+      messages: [{ role: 'user', content: 'fallback' }],
+    })
+
+    expect(streamRound).toHaveBeenCalledTimes(1)
+    expect(streamTextMock).toHaveBeenCalledTimes(1)
   })
 })
 

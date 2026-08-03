@@ -9,14 +9,17 @@ import type {
   McpServerDraft,
   PluginInfo,
   PluginStatus,
+  ProviderAccountStatus,
+  ProviderAdvancedTestResult,
   ProviderBalance,
   ProviderModel,
+  ProviderTestResult,
   ToolStatus,
   VectorStatus,
 } from './types'
 
 import { errorMessageFrom } from '@moeru/std'
-import { computed, inject, onMounted, onUnmounted, provide, reactive, shallowRef } from 'vue'
+import { computed, inject, onMounted, onUnmounted, provide, reactive, shallowRef, watch } from 'vue'
 
 import { cloneIpcValue } from '../../shared/ipc-serialization'
 import { SERVER_PROVIDER_PRESETS } from './provider-catalog'
@@ -106,10 +109,13 @@ function createContext() {
   const pluginDirectory = shallowRef('')
   const models = shallowRef<ProviderModel[]>([])
   const balance = shallowRef<ProviderBalance>()
+  const providerTestResult = shallowRef<ProviderTestResult>()
+  const providerAdvancedTestResult = shallowRef<ProviderAdvancedTestResult>()
+  const providerAccountStatus = shallowRef<ProviderAccountStatus>()
   const migration = shallowRef<{ migrationId?: string, report?: Record<string, unknown> }>()
   const invitation = shallowRef<{ code?: string, expiresAt?: number }>()
   const busy = shallowRef(false)
-  const providerBusy = shallowRef<'models' | 'test' | 'balance' | ''>('')
+  const providerBusy = shallowRef<'models' | 'test' | 'balance' | 'account' | 'advanced' | ''>('')
   const transcriptionBusy = shallowRef(false)
   const error = shallowRef('')
   const success = shallowRef('')
@@ -124,6 +130,7 @@ function createContext() {
     modelBaseURL: '',
     modelName: '',
     modelApiKey: '',
+    modelAccountAccessToken: '',
     modelTemperature: 0.7,
     modelMaxOutputTokens: 8192,
     modelMaxContextTokens: 1_000_000,
@@ -191,6 +198,9 @@ function createContext() {
   let initialized = false
   let pollTimer: ReturnType<typeof setInterval> | undefined
   let noticeTimer: ReturnType<typeof setTimeout> | undefined
+  let providerRequestSequence = 0
+  let providerCredentialFingerprint = ''
+  const activeProviderRequests = new Map<string, string>()
 
   const running = computed(() => state.value?.processState === 'running')
   const selectedMcp = computed(() => mcpDrafts.value.find(item => item.id === selectedMcpId.value))
@@ -279,6 +289,7 @@ function createContext() {
       mcpDrafts.value = Object.entries(next.config.mcp.mcpServers ?? {}).map(([name, config]) => createMcpDraft(name, config))
       selectedMcpId.value = mcpDrafts.value[0]?.id ?? ''
       initialized = true
+      providerCredentialFingerprint = credentialFingerprint()
     }
     if (!running.value)
       return
@@ -354,52 +365,186 @@ function createContext() {
     if (next.defaultModels[0])
       configDraft.modelName = next.defaultModels[0]
     balance.value = undefined
-    configDraft.modelProviderOptions = {}
+    providerTestResult.value = undefined
+    providerAdvancedTestResult.value = undefined
+    providerAccountStatus.value = undefined
+    configDraft.modelProviderOptions = next.id === 'sub2api'
+      ? { protocol: next.defaultProtocol ?? 'auto', reasoningEffort: 'auto' }
+      : {}
+    providerCredentialFingerprint = credentialFingerprint()
   }
 
-  function providerPayload() {
+  function providerPayload(requestId?: string) {
     return {
       providerId: configDraft.modelProviderId,
       baseURL: configDraft.modelBaseURL,
       apiKey: configDraft.modelApiKey,
+      accountAccessToken: configDraft.modelAccountAccessToken,
       model: configDraft.modelName,
+      providerOptions: configDraft.modelProviderOptions,
       modelList: provider.value.modelList,
       defaultModels: provider.value.defaultModels,
+      requestId,
     }
+  }
+
+  function credentialFingerprint() {
+    return `${configDraft.modelProviderId}\u0000${configDraft.modelBaseURL.trim()}\u0000${configDraft.modelApiKey.trim()}`
+  }
+
+  function currentProviderFingerprint() {
+    return `${credentialFingerprint()}\u0000${JSON.stringify(configDraft.modelProviderOptions)}`
+  }
+
+  function beginProviderRequest(kind: 'models' | 'test' | 'balance' | 'account' | 'advanced') {
+    const previous = activeProviderRequests.get(kind)
+    if (previous)
+      void invoke('lumi-server-manager:provider:cancel', previous)
+    const requestId = `${kind}-${Date.now().toString(36)}-${++providerRequestSequence}`
+    activeProviderRequests.set(kind, requestId)
+    return requestId
+  }
+
+  function isCurrentProviderRequest(kind: string, requestId: string, fingerprint: string) {
+    return activeProviderRequests.get(kind) === requestId && currentProviderFingerprint() === fingerprint
+  }
+
+  function finishProviderRequest(kind: string, requestId: string) {
+    if (activeProviderRequests.get(kind) !== requestId)
+      return false
+    activeProviderRequests.delete(kind)
+    return true
   }
 
   async function fetchModels() {
+    if (providerBusy.value)
+      return
     providerBusy.value = 'models'
     clearNotices()
+    const requestId = beginProviderRequest('models')
+    const fingerprint = currentProviderFingerprint()
     try {
-      models.value = await invoke('lumi-server-manager:provider:models', providerPayload())
-      if (!models.value.some(item => item.id === configDraft.modelName) && models.value[0])
-        configDraft.modelName = models.value[0].id
-      showNotice('success', `已获取 ${models.value.length} 个可用模型`)
+      const nextModels = await invoke<ProviderModel[]>('lumi-server-manager:provider:models', providerPayload(requestId))
+      if (!isCurrentProviderRequest('models', requestId, fingerprint))
+        return
+      models.value = nextModels
+      showNotice('success', `已获取 ${nextModels.length} 个可用模型`)
     }
-    catch (cause) { showNotice('error', errorMessageFrom(cause) ?? '获取模型失败') }
-    finally { providerBusy.value = '' }
+    catch (cause) {
+      if (isCurrentProviderRequest('models', requestId, fingerprint))
+        showNotice('error', errorMessageFrom(cause) ?? '获取模型失败')
+    }
+    finally {
+      if (finishProviderRequest('models', requestId))
+        providerBusy.value = ''
+    }
   }
 
   async function testProvider() {
+    if (providerBusy.value)
+      return
     providerBusy.value = 'test'
     clearNotices()
+    const requestId = beginProviderRequest('test')
+    const fingerprint = currentProviderFingerprint()
     try {
-      const result = await invoke<{ durationMs: number }>('lumi-server-manager:provider:test', providerPayload())
-      showNotice('success', `连接测试通过，响应耗时 ${result.durationMs} ms`)
+      const result = await invoke<ProviderTestResult>('lumi-server-manager:provider:test', providerPayload(requestId))
+      if (!isCurrentProviderRequest('test', requestId, fingerprint))
+        return
+      providerTestResult.value = result
+      showNotice('success', `连接测试通过，${result.protocol}，响应耗时 ${result.durationMs} ms`)
     }
-    catch (cause) { showNotice('error', errorMessageFrom(cause) ?? '连接测试失败') }
-    finally { providerBusy.value = '' }
+    catch (cause) {
+      if (isCurrentProviderRequest('test', requestId, fingerprint))
+        showNotice('error', errorMessageFrom(cause) ?? '连接测试失败')
+    }
+    finally {
+      if (finishProviderRequest('test', requestId))
+        providerBusy.value = ''
+    }
   }
 
   async function fetchBalance() {
+    if (providerBusy.value)
+      return
     providerBusy.value = 'balance'
     clearNotices()
+    const requestId = beginProviderRequest('balance')
+    const fingerprint = currentProviderFingerprint()
     try {
-      balance.value = await invoke('lumi-server-manager:provider:balance', providerPayload())
+      const nextBalance = await invoke<ProviderBalance>('lumi-server-manager:provider:balance', providerPayload(requestId))
+      if (isCurrentProviderRequest('balance', requestId, fingerprint))
+        balance.value = nextBalance
     }
-    catch (cause) { showNotice('error', errorMessageFrom(cause) ?? '获取余额失败') }
-    finally { providerBusy.value = '' }
+    catch (cause) {
+      if (isCurrentProviderRequest('balance', requestId, fingerprint))
+        showNotice('error', errorMessageFrom(cause) ?? '获取余额失败')
+    }
+    finally {
+      if (finishProviderRequest('balance', requestId))
+        providerBusy.value = ''
+    }
+  }
+
+  async function fetchProviderAccountStatus() {
+    if (providerBusy.value)
+      return
+    providerBusy.value = 'account'
+    clearNotices()
+    const requestId = beginProviderRequest('account')
+    const fingerprint = currentProviderFingerprint()
+    try {
+      const nextStatus = await invoke<ProviderAccountStatus>('lumi-server-manager:provider:account', providerPayload(requestId))
+      if (!isCurrentProviderRequest('account', requestId, fingerprint))
+        return
+      providerAccountStatus.value = nextStatus
+      showNotice('success', nextStatus.accountTokenConfigured
+        ? 'Sub2API 账户状态已更新'
+        : '模型 API 可正常查询计费倍率；未配置用户令牌，未查询账户余额和平台配额')
+    }
+    catch (cause) {
+      if (isCurrentProviderRequest('account', requestId, fingerprint))
+        showNotice('error', errorMessageFrom(cause) ?? '获取 Sub2API 账户状态失败')
+    }
+    finally {
+      if (finishProviderRequest('account', requestId))
+        providerBusy.value = ''
+    }
+  }
+
+  async function testProviderAdvanced(kind: ProviderAdvancedTestResult['kind']) {
+    if (providerBusy.value)
+      return
+    providerBusy.value = 'advanced'
+    clearNotices()
+    const requestId = beginProviderRequest('advanced')
+    const fingerprint = currentProviderFingerprint()
+    try {
+      const result = await invoke<ProviderAdvancedTestResult>(
+        'lumi-server-manager:provider:advanced',
+        { ...providerPayload(requestId), kind },
+      )
+      if (!isCurrentProviderRequest('advanced', requestId, fingerprint))
+        return
+      providerAdvancedTestResult.value = result
+      showNotice('success', `${kind === 'multi-turn' ? '多轮' : 'Planner 工具'}测试通过，耗时 ${result.durationMs} ms`)
+    }
+    catch (cause) {
+      if (isCurrentProviderRequest('advanced', requestId, fingerprint))
+        showNotice('error', errorMessageFrom(cause) ?? 'Sub2API 高级测试失败')
+    }
+    finally {
+      if (finishProviderRequest('advanced', requestId))
+        providerBusy.value = ''
+    }
+  }
+
+  async function clearProviderAccountToken() {
+    await applyConfig({ clearModelAccountAccessToken: true }, 'Sub2API 用户令牌已清除')
+    if (!error.value) {
+      configDraft.modelAccountAccessToken = ''
+      providerAccountStatus.value = undefined
+    }
   }
 
   function saveConsciousness() {
@@ -408,6 +553,7 @@ function createContext() {
       modelBaseURL: configDraft.modelBaseURL,
       modelName: configDraft.modelName,
       modelApiKey: configDraft.modelApiKey,
+      modelAccountAccessToken: configDraft.modelAccountAccessToken,
       modelTemperature: configDraft.modelTemperature,
       modelMaxOutputTokens: configDraft.modelMaxOutputTokens,
       modelMaxContextTokens: configDraft.modelMaxContextTokens,
@@ -684,6 +830,23 @@ function createContext() {
       clearInterval(pollTimer)
     window.electron.ipcRenderer.removeAllListeners('lumi-server-manager:changed')
     clearNotices()
+    for (const requestId of activeProviderRequests.values())
+      void invoke('lumi-server-manager:provider:cancel', requestId)
+    activeProviderRequests.clear()
+  })
+
+  watch(credentialFingerprint, (next) => {
+    if (!initialized || next === providerCredentialFingerprint)
+      return
+    providerCredentialFingerprint = next
+    models.value = []
+    providerTestResult.value = undefined
+    providerAdvancedTestResult.value = undefined
+    providerAccountStatus.value = undefined
+    for (const requestId of activeProviderRequests.values())
+      void invoke('lumi-server-manager:provider:cancel', requestId)
+    activeProviderRequests.clear()
+    providerBusy.value = ''
   })
 
   return {
@@ -698,6 +861,9 @@ function createContext() {
     pluginDirectory,
     models,
     balance,
+    providerTestResult,
+    providerAdvancedTestResult,
+    providerAccountStatus,
     migration,
     invitation,
     busy,
@@ -724,6 +890,9 @@ function createContext() {
     fetchModels,
     testProvider,
     fetchBalance,
+    fetchProviderAccountStatus,
+    testProviderAdvanced,
+    clearProviderAccountToken,
     saveConsciousness,
     saveTranscription,
     saveNetwork,

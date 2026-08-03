@@ -37,6 +37,12 @@ const McpServerSchema = v.object({
   maxTotalTimeoutMs: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(900_000))),
 })
 
+const Sub2ApiProviderOptionsSchema = v.object({
+  protocol: v.optional(v.picklist(['auto', 'responses', 'chat-completions']), 'auto'),
+  accountApiBaseURL: v.optional(v.pipe(v.string(), v.url())),
+  reasoningEffort: v.optional(v.picklist(['auto', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh']), 'auto'),
+})
+
 const ServerConfigSchema = v.object({
   dataDirectory: v.pipe(v.string(), v.nonEmpty()),
   authSecret: v.pipe(v.string(), v.minLength(32)),
@@ -54,6 +60,7 @@ const ServerConfigSchema = v.object({
     providerId: v.optional(v.string(), 'deepseek'),
     baseURL: v.pipe(v.string(), v.url()),
     apiKey: v.optional(v.string()),
+    accountAccessToken: v.optional(v.string()),
     model: v.pipe(v.string(), v.nonEmpty()),
     temperature: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(2))),
     maxOutputTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(384_000))),
@@ -274,6 +281,12 @@ export async function loadLumiServerConfig(path: string): Promise<LumiServerProc
   }
   return {
     ...config,
+    model: config.model.providerId === 'sub2api'
+      ? {
+          ...config.model,
+          providerOptions: v.parse(Sub2ApiProviderOptionsSchema, config.model.providerOptions),
+        }
+      : config.model,
     astrbot,
     dataDirectory: resolve(dirname(configPath), config.dataDirectory),
     agentRuntime: {
@@ -481,6 +494,7 @@ export async function initializeLumiServerConfig(path: string): Promise<string> 
       providerId: 'deepseek',
       baseURL: 'https://api.deepseek.com',
       apiKey: '',
+      accountAccessToken: '',
       model: 'deepseek-v4-flash',
       maxContextTokens: 1_000_000,
       outputReserveTokens: 64_000,

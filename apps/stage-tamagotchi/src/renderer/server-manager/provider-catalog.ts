@@ -11,6 +11,10 @@ export interface ServerProviderPreset {
   apiKeyOptional?: boolean
   fields?: ProviderFieldId[]
   modelList?: 'api' | 'static'
+  protocolOptions?: Array<'auto' | 'responses' | 'chat-completions'>
+  defaultProtocol?: 'auto' | 'responses' | 'chat-completions'
+  accountStatus?: 'deepseek' | 'sub2api'
+  modelManifest?: 'openai' | 'codex' | 'auto'
 }
 
 function compatible(
@@ -26,6 +30,12 @@ function compatible(
 
 /** Chat providers mirrored from the client provider registry. */
 export const SERVER_PROVIDER_PRESETS: ServerProviderPreset[] = [
+  compatible('sub2api', 'Sub2API', '通过 Sub2API 使用 Codex/OpenAI 等模型', 'i-solar:server-square-cloud-bold-duotone', 'http://127.0.0.1:8080/v1/', {
+    protocolOptions: ['auto', 'responses', 'chat-completions'],
+    defaultProtocol: 'auto',
+    accountStatus: 'sub2api',
+    modelManifest: 'auto',
+  }),
   compatible('openrouter-ai', 'OpenRouter', '聚合全球模型，模型目录实时获取', 'i-lobe-icons:openrouter', 'https://openrouter.ai/api/v1/'),
   compatible('aihubmix', 'AIHubMix', '多模型聚合服务', 'i-lobe-icons:aihubmix-color', 'https://aihubmix.com/v1/'),
   compatible('azure-openai', 'Azure OpenAI', 'Microsoft Azure OpenAI 部署', 'i-simple-icons:microsoftazure', 'https://YOUR_RESOURCE_NAME.cognitiveservices.azure.com/openai/v1/', { fields: ['apiVersion'], modelList: 'static' }),

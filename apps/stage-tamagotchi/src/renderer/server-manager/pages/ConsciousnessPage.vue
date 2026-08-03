@@ -4,6 +4,7 @@ import { computed, shallowRef } from 'vue'
 
 import AgentRuntimeSettings from '../components/AgentRuntimeSettings.vue'
 import ManagerPage from '../components/ManagerPage.vue'
+import Sub2ApiProviderSettings from '../components/Sub2ApiProviderSettings.vue'
 
 import { SERVER_PROVIDER_PRESETS } from '../provider-catalog'
 import { useServerManager } from '../useServerManager'
@@ -83,7 +84,8 @@ function selectProvider(id: string) {
             <FieldInput v-if="manager.provider.value.fields?.includes('region')" v-model="region" label="AWS Region" />
             <FieldInput v-if="manager.provider.value.fields?.includes('apiVersion')" v-model="apiVersion" label="Azure API Version" />
             <FieldInput v-if="manager.provider.value.fields?.includes('accountId')" v-model="accountId" label="Cloudflare Account ID" />
-            <div :class="['grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2']">
+            <Sub2ApiProviderSettings v-if="manager.configDraft.modelProviderId === 'sub2api'" />
+            <div v-else :class="['grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2']">
               <label :class="['flex flex-col gap-1.5 text-sm']"><span>意识模型</span><input v-model="manager.configDraft.modelName" list="server-provider-models" :class="['h-10 rounded-md border border-neutral-200 bg-transparent px-3 outline-none focus:border-cyan-500 dark:border-neutral-800']"><datalist id="server-provider-models"><option v-for="model in manager.models.value" :key="model.id" :value="model.id" /></datalist></label>
               <Button variant="secondary" label="获取模型" icon="i-solar:list-bold-duotone" :loading="manager.providerBusy.value === 'models'" @click="manager.fetchModels" />
             </div>

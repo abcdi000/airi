@@ -16,6 +16,7 @@ export interface ManagerState {
       baseURL: string
       model: string
       apiKeySet: boolean
+      accountAccessTokenSet: boolean
       temperature?: number
       maxOutputTokens?: number
       maxContextTokens: number
@@ -110,8 +111,75 @@ export interface ToolStatus {
   activeResourceLeases: Array<{ id: string, resource: string, toolName: string, actorPersonId: string, conversationId: string, startedAt: number, terminationRequestedAt?: number }>
 }
 export interface VectorStatus { enabled?: boolean, model?: string, device?: string, indexedCount?: number, totalCount?: number, missingCount?: number }
-export interface ProviderModel { id: string, ownedBy?: string }
+export interface ProviderModel {
+  id: string
+  displayName?: string
+  ownedBy?: string
+  source?: 'openai-list' | 'codex-manifest' | 'static'
+}
 export interface ProviderBalance { available: boolean, balances: Array<{ currency: string, total: string, granted: string, toppedUp: string }> }
+export interface ProviderTestResult {
+  ok: boolean
+  protocol: 'responses' | 'chat-completions'
+  endpoint: string
+  requestedModel: string
+  resolvedModel?: string
+  text: string
+  firstTokenMs?: number
+  durationMs: number
+  requestId?: string
+  responseId?: string
+  usage?: {
+    inputTokens?: number
+    cachedInputTokens?: number
+    outputTokens?: number
+    totalTokens?: number
+  }
+  fallbackUsed?: boolean
+}
+export interface ProviderAdvancedTestResult {
+  ok: boolean
+  kind: 'multi-turn' | 'planner-tool'
+  protocol: 'responses' | 'chat-completions'
+  durationMs: number
+  rounds: number
+  text: string
+  callId?: string
+  fallbackUsed: boolean
+}
+export interface ProviderAccountStatus {
+  providerId: 'sub2api'
+  fetchedAt: string
+  accountTokenConfigured: boolean
+  wallet?: { balance: number, frozenBalance?: number, status?: string }
+  limits?: { concurrency?: number, rpmLimit?: number }
+  platformQuotas?: Array<{
+    platform: string
+    dailyLimitUsd?: number | null
+    weeklyLimitUsd?: number | null
+    monthlyLimitUsd?: number | null
+    dailyUsageUsd: number
+    weeklyUsageUsd: number
+    monthlyUsageUsd: number
+    dailyWindowResetsAt?: string | null
+    weeklyWindowResetsAt?: string | null
+    monthlyWindowResetsAt?: string | null
+  }>
+  billingRate?: {
+    groupRateMultiplier?: number
+    userRateMultiplier?: number
+    resolvedRateMultiplier?: number
+    peakRateEnabled?: boolean
+    peakStart?: string
+    peakEnd?: string
+    peakRateMultiplier?: number
+    appliedPeakMultiplier?: number
+    effectiveRateMultiplier?: number
+    observedAt?: string
+    timezone?: string
+  }
+  partialErrors: Array<{ source: 'profile' | 'platform-quotas' | 'billing-rate', status?: number, message: string }>
+}
 export interface PluginInfo { name: string, path: string, enabled: boolean, serverCompatible: boolean, permissions: string[], error?: string }
 export interface PluginStatus { name: string, state: 'disabled' | 'loaded' | 'error' | 'incompatible', toolCount: number, path: string, lastError?: string }
 

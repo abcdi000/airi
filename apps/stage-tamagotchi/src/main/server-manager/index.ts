@@ -16,7 +16,14 @@ import icon from '../../../resources/icon.png?asset'
 
 import { cloneIpcRecord, cloneIpcValue } from '../../shared/ipc-serialization'
 import { baseUrl, getElectronMainDirname, load } from '../libs/electron/location'
-import { getDeepSeekBalance, listProviderModels, testProviderAccess, testProviderConnection } from './provider-control'
+import {
+  getDeepSeekBalance,
+  getSub2ApiAccountStatus,
+  listProviderModels,
+  testProviderAccess,
+  testProviderConnection,
+  testSub2ApiAdvanced,
+} from './provider-control'
 
 export interface LumiServerManagerState {
   processState: 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
@@ -34,6 +41,7 @@ export interface LumiServerManagerState {
       baseURL: string
       model: string
       apiKeySet: boolean
+      accountAccessTokenSet: boolean
       temperature?: number
       maxOutputTokens?: number
       maxContextTokens: number
@@ -153,6 +161,7 @@ export async function setupLumiServerManager() {
           baseURL: config.model.baseURL,
           model: config.model.model,
           apiKeySet: Boolean(config.model.apiKey),
+          accountAccessTokenSet: Boolean(config.model.accountAccessToken),
           temperature: config.model.temperature,
           maxOutputTokens: config.model.maxOutputTokens,
           maxContextTokens: config.model.maxContextTokens,
@@ -371,17 +380,52 @@ export async function setupLumiServerManager() {
     app.setLoginItemSettings({ openAtLogin: enabled, args: ['--lumi-server-manager', '--start-server'] })
     return await state()
   })
+  const providerRequests = new Map<string, AbortController>()
+  const runProviderRequest = async <T>(
+    input: Record<string, unknown>,
+    operation: (provider: Awaited<ReturnType<typeof providerInput>>) => Promise<T>,
+  ): Promise<T> => {
+    const requestId = typeof input.requestId === 'string' && input.requestId.trim()
+      ? input.requestId
+      : undefined
+    const controller = new AbortController()
+    if (requestId) {
+      providerRequests.get(requestId)?.abort()
+      providerRequests.set(requestId, controller)
+    }
+    try {
+      return await operation(await providerInput(configPath, input, controller.signal))
+    }
+    finally {
+      if (requestId && providerRequests.get(requestId) === controller)
+        providerRequests.delete(requestId)
+    }
+  }
+  ipcMain.handle('lumi-server-manager:provider:cancel', (event, requestId: string) => {
+    assertSender(event.sender.id)
+    providerRequests.get(requestId)?.abort()
+    providerRequests.delete(requestId)
+  })
   ipcMain.handle('lumi-server-manager:provider:models', async (event, input: Record<string, unknown>) => {
     assertSender(event.sender.id)
-    return cloneIpcValue(await listProviderModels(await providerInput(configPath, input)))
+    return cloneIpcValue(await runProviderRequest(input, listProviderModels))
   })
   ipcMain.handle('lumi-server-manager:provider:test', async (event, input: Record<string, unknown>) => {
     assertSender(event.sender.id)
-    return cloneIpcValue(await testProviderConnection(await providerInput(configPath, input)))
+    return cloneIpcValue(await runProviderRequest(input, testProviderConnection))
   })
   ipcMain.handle('lumi-server-manager:provider:balance', async (event, input: Record<string, unknown>) => {
     assertSender(event.sender.id)
-    return cloneIpcValue(await getDeepSeekBalance(await providerInput(configPath, input)))
+    return cloneIpcValue(await runProviderRequest(input, getDeepSeekBalance))
+  })
+  ipcMain.handle('lumi-server-manager:provider:account', async (event, input: Record<string, unknown>) => {
+    assertSender(event.sender.id)
+    return cloneIpcValue(await runProviderRequest(input, getSub2ApiAccountStatus))
+  })
+  ipcMain.handle('lumi-server-manager:provider:advanced', async (event, input: Record<string, unknown>) => {
+    assertSender(event.sender.id)
+    const kind = input.kind === 'planner-tool' ? 'planner-tool' : 'multi-turn'
+    return cloneIpcValue(await runProviderRequest(input, provider => testSub2ApiAdvanced(provider, kind)))
   })
   ipcMain.handle('lumi-server-manager:transcription:test', async (event, input: Record<string, unknown>) => {
     assertSender(event.sender.id)
@@ -463,6 +507,10 @@ export async function setupLumiServerManager() {
         ...(typeof patch.modelBaseURL === 'string' ? { baseURL: patch.modelBaseURL } : {}),
         ...(typeof patch.modelName === 'string' ? { model: patch.modelName } : {}),
         ...(typeof patch.modelApiKey === 'string' && patch.modelApiKey ? { apiKey: patch.modelApiKey } : {}),
+        ...(typeof patch.modelAccountAccessToken === 'string' && patch.modelAccountAccessToken.trim()
+          ? { accountAccessToken: patch.modelAccountAccessToken }
+          : {}),
+        ...(patch.clearModelAccountAccessToken === true ? { accountAccessToken: undefined } : {}),
         ...(typeof patch.modelTemperature === 'number' ? { temperature: patch.modelTemperature } : {}),
         ...(typeof patch.modelMaxOutputTokens === 'number' ? { maxOutputTokens: patch.modelMaxOutputTokens } : {}),
         ...(typeof patch.modelMaxContextTokens === 'number' ? { maxContextTokens: patch.modelMaxContextTokens } : {}),
@@ -603,15 +651,22 @@ export async function setupLumiServerManager() {
   return { window, start, stop }
 }
 
-async function providerInput(configPath: string, input: Record<string, unknown>) {
+async function providerInput(configPath: string, input: Record<string, unknown>, signal?: AbortSignal) {
   const config = await loadLumiServerConfig(configPath)
   return {
     providerId: typeof input.providerId === 'string' ? input.providerId : config.model.providerId,
     baseURL: typeof input.baseURL === 'string' ? input.baseURL : config.model.baseURL,
     apiKey: typeof input.apiKey === 'string' && input.apiKey.trim() ? input.apiKey : config.model.apiKey,
+    accountAccessToken: typeof input.accountAccessToken === 'string' && input.accountAccessToken.trim()
+      ? input.accountAccessToken
+      : config.model.accountAccessToken,
     model: typeof input.model === 'string' ? input.model : config.model.model,
+    providerOptions: input.providerOptions && typeof input.providerOptions === 'object' && !Array.isArray(input.providerOptions)
+      ? input.providerOptions as Record<string, unknown>
+      : config.model.providerOptions,
     modelList: input.modelList === 'static' ? 'static' as const : 'api' as const,
     defaultModels: Array.isArray(input.defaultModels) ? input.defaultModels.filter((value): value is string => typeof value === 'string') : [],
+    signal,
   }
 }
 

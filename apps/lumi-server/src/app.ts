@@ -20,8 +20,7 @@ import {
   createLumiNodeConsciousness,
   createLumiServerAgentReplyGenerator,
   createLumiServerGroupObservationRuntime,
-  createOpenAICompatibleAgentModels,
-  createOpenAICompatibleConsciousnessModel,
+  createLumiServerModelBundle,
   createOpenAICompatibleTranscriber,
   createOpenAICompatibleVisionAnalyzer,
   createServerAgentToolsPort,
@@ -158,16 +157,18 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
       createReplyGenerator(database) {
         databaseRef = database
         migrationService = new LumiServerMigrationService(database, join(config.dataDirectory, 'migration-staging'))
-        const model = createOpenAICompatibleConsciousnessModel({
+        const toolProvider = {
+          toolsFor: async (request: Parameters<LumiServerMcpRegistry['toolsFor']>[0]) => [
+            ...await mcp.toolsFor(request),
+            ...await plugins.toolsFor(request),
+          ],
+        }
+        const modelBundle = createLumiServerModelBundle({
           ...config.model,
           directLanguageCandidateLearningEnabled: config.languageLearning.directLanguageCandidateLearningEnabled,
-          toolProvider: {
-            toolsFor: async request => [
-              ...await mcp.toolsFor(request),
-              ...await plugins.toolsFor(request),
-            ],
-          },
+          toolProvider,
         })
+        const model = modelBundle.consciousnessModel
         stickerIntelligenceModel = model
         if (config.astrbot?.enabled) {
           groupObservationRuntime = createLumiServerGroupObservationRuntime({
@@ -230,7 +231,7 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
         if (config.agentRuntime.mode === 'legacy')
           return legacyReplyGenerator
 
-        const agentModels = createOpenAICompatibleAgentModels(config.model)
+        const agentModels = modelBundle.agentModels
         const agentReplyGenerator = createLumiServerAgentReplyGenerator({
           database,
           ...agentModels,
@@ -252,10 +253,7 @@ export async function startLumiServerProcess(config: LumiServerProcessConfig) {
             contextRecentTokens: config.agentRuntime.contextRecentTokens,
           },
           tools: createServerAgentToolsPort({
-            toolsFor: async request => [
-              ...await mcp.toolsFor(request),
-              ...await plugins.toolsFor(request),
-            ],
+            toolsFor: toolProvider.toolsFor,
           }),
           languageLearning: config.languageLearning,
           promptTemplates,

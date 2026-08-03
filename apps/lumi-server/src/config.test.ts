@@ -54,6 +54,37 @@ describe('lumi Server process configuration', () => {
     }
   })
 
+  it('defaults old Sub2API configuration to auto protocol without changing other providers', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lumi-server-sub2api-config-'))
+    const path = join(directory, 'server.json')
+    try {
+      await initializeLumiServerConfig(path)
+      const raw = JSON.parse(await readFile(path, 'utf8'))
+      raw.model.providerId = 'sub2api'
+      raw.model.baseURL = 'http://127.0.0.1:8080/v1/'
+      raw.model.model = 'model-from-server'
+      raw.model.providerOptions = {}
+      await writeFile(path, `${JSON.stringify(raw, null, 2)}\n`, 'utf8')
+
+      await expect(loadLumiServerConfig(path)).resolves.toMatchObject({
+        model: {
+          providerId: 'sub2api',
+          providerOptions: {
+            protocol: 'auto',
+            reasoningEffort: 'auto',
+          },
+        },
+      })
+
+      raw.model.providerOptions = { protocol: 'invalid' }
+      await writeFile(path, `${JSON.stringify(raw, null, 2)}\n`, 'utf8')
+      await expect(loadLumiServerConfig(path)).rejects.toThrow()
+    }
+    finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it('adds an AstrBot token to a config created before the integration existed', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'lumi-server-config-upgrade-'))
     const path = join(directory, 'server.json')

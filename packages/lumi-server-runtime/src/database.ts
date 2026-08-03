@@ -200,6 +200,58 @@ export interface LumiMemoryVectorStatus {
   missingCount: number
 }
 
+/** One authoritative SQLite vector projected into the disposable ANN index. */
+export interface LumiMemoryAnnRecord extends LumiMemoryVectorRecord {
+  /** Collision-safe positive JavaScript integer used as the USearch key. */
+  annKey: number
+}
+
+/** Complete ANN rebuild source and its authoritative SQLite change sequence. */
+export interface LumiMemoryAnnSnapshot {
+  /** Embedding model shared by every record in this snapshot. */
+  model: string
+  /** Vector dimensions, or zero when no vectors exist yet. */
+  dimensions: number
+  /** Latest SQLite vector mutation sequence included in the snapshot. */
+  sequence: number
+  /** Every authoritative vector for this model. */
+  records: LumiMemoryAnnRecord[]
+}
+
+/** Constant-size SQLite metadata used to decide whether an ANN file is current. */
+export interface LumiMemoryAnnHead {
+  /** Embedding model represented by the index. */
+  model: string
+  /** Consistent vector dimensions, or zero when no vectors exist. */
+  dimensions: number
+  /** Latest authoritative mutation sequence. */
+  sequence: number
+  /** Number of authoritative vectors for this model. */
+  count: number
+}
+
+/** Bounded incremental mutations following one persisted ANN sequence. */
+export interface LumiMemoryAnnChangeBatch {
+  /** Last mutation sequence represented by this batch. */
+  sequence: number
+  /** Whether another bounded batch remains after this one. */
+  hasMore: boolean
+  /** Current authoritative vectors to insert or replace. */
+  upserts: LumiMemoryAnnRecord[]
+  /** ANN keys whose vectors no longer exist for this model. */
+  removeKeys: number[]
+}
+
+/** ACL-validated memory returned after an ANN numeric-key lookup. */
+export interface LumiAuthorizedAnnMemory {
+  /** Numeric key returned by USearch. */
+  annKey: number
+  /** Current digest used to reject stale ANN entries. */
+  contentDigest: string
+  /** Current host-authorized memory projection. */
+  memory: LumiMemoryFragment
+}
+
 /** Atomic payload persisted by the deterministic cognitive fast loop. */
 export interface LumiCognitiveFastLoopCommit {
   identity: LumiCognitiveIdentity
@@ -1127,10 +1179,12 @@ export class LumiServerDatabase {
   }
 
   /** Returns non-rejected memories whose current content has no matching vector. */
-  listMemoryVectorCandidates(model: string, limit = 2_000): LumiMemoryFragment[] {
+  listMemoryVectorCandidates(model: string, limit = 2_000, offset = 0): LumiMemoryFragment[] {
     const normalizedModel = requiredText(model, 'model', 500)
     if (!Number.isInteger(limit) || limit < 1 || limit > 10_000)
       throw new Error('Vector candidate limit must be between 1 and 10000')
+    if (!Number.isInteger(offset) || offset < 0)
+      throw new Error('Vector candidate offset must be a non-negative integer')
     return this.rows(`
       SELECT m.*
       FROM lumi_memories m
@@ -1138,8 +1192,8 @@ export class LumiServerDatabase {
         ON v.memory_id = m.id AND v.model = ?
       WHERE m.status != 'rejected'
       ORDER BY m.updated_at ASC
-      LIMIT ?
-    `, normalizedModel, limit)
+      LIMIT ? OFFSET ?
+    `, normalizedModel, limit, offset)
       .map(memoryFromRow)
   }
 
@@ -1149,26 +1203,179 @@ export class LumiServerDatabase {
     if (record.dimensions !== vector.length)
       throw new Error('Vector dimensions do not match vector length')
     this.assertMemory(requiredText(record.memoryId, 'memoryId', 160))
+    const model = requiredText(record.model, 'model', 500)
+    const annKey = this.ensureMemoryAnnKey(record.memoryId, model)
     this.database.prepare(`
       INSERT INTO lumi_memory_vectors (
-        memory_id, model, dimensions, vector_json, content_digest, device, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        memory_id, model, dimensions, vector_json, content_digest, device, updated_at, ann_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(memory_id) DO UPDATE SET
         model = excluded.model,
         dimensions = excluded.dimensions,
         vector_json = excluded.vector_json,
         content_digest = excluded.content_digest,
         device = excluded.device,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        ann_key = CASE
+          WHEN lumi_memory_vectors.model = excluded.model
+            THEN COALESCE(lumi_memory_vectors.ann_key, excluded.ann_key)
+          ELSE excluded.ann_key
+        END
     `).run(
       record.memoryId,
-      requiredText(record.model, 'model', 500),
+      model,
       record.dimensions,
       JSON.stringify(vector),
       requiredText(record.contentDigest, 'contentDigest', 128),
       optionalText(record.device, 160) ?? null,
       finiteTimestamp(record.updatedAt),
+      annKey,
     )
+  }
+
+  /** Deletes an authoritative vector so the ANN change stream removes its key. */
+  deleteMemoryVector(memoryId: string, model?: string): boolean {
+    const normalizedMemoryId = requiredText(memoryId, 'memoryId', 160)
+    const result = model
+      ? this.database.prepare('DELETE FROM lumi_memory_vectors WHERE memory_id = ? AND model = ?')
+          .run(normalizedMemoryId, requiredText(model, 'model', 500))
+      : this.database.prepare('DELETE FROM lumi_memory_vectors WHERE memory_id = ?')
+          .run(normalizedMemoryId)
+    return Number(result.changes) > 0
+  }
+
+  /** Returns every vector needed for a background, atomic ANN rebuild. */
+  memoryAnnSnapshot(model: string): LumiMemoryAnnSnapshot {
+    const normalizedModel = requiredText(model, 'model', 500)
+    this.ensureMemoryAnnKeys(normalizedModel)
+    const records = this.rows(`
+      SELECT * FROM lumi_memory_vectors
+      WHERE model = ?
+      ORDER BY memory_id
+    `, normalizedModel).map(memoryAnnRecordFromRow)
+    const dimensions = consistentAnnDimensions(records)
+    return {
+      model: normalizedModel,
+      dimensions,
+      sequence: this.memoryAnnSequence(normalizedModel),
+      records,
+    }
+  }
+
+  /** Reads one keyset-paginated vector page for a bounded ANN rebuild. */
+  memoryAnnRecords(model: string, afterMemoryId = '', limit = 512): LumiMemoryAnnRecord[] {
+    const normalizedModel = requiredText(model, 'model', 500)
+    if (!Number.isInteger(limit) || limit < 1 || limit > 2_000)
+      throw new Error('ANN rebuild page limit must be between 1 and 2000')
+    this.ensureMemoryAnnKeys(normalizedModel)
+    return this.rows(`
+      SELECT * FROM lumi_memory_vectors
+      WHERE model = ? AND memory_id > ?
+      ORDER BY memory_id ASC
+      LIMIT ?
+    `, normalizedModel, optionalText(afterMemoryId, 160) ?? '', limit).map(memoryAnnRecordFromRow)
+  }
+
+  /** Reads ANN revision/count/dimensions without loading vector JSON into Node. */
+  memoryAnnHead(model: string): LumiMemoryAnnHead {
+    const normalizedModel = requiredText(model, 'model', 500)
+    this.ensureMemoryAnnKeys(normalizedModel)
+    const row = this.row(`
+      SELECT COUNT(*) AS count, MIN(dimensions) AS min_dimensions, MAX(dimensions) AS max_dimensions
+      FROM lumi_memory_vectors WHERE model = ?
+    `, normalizedModel)
+    const count = Number(row?.count ?? 0)
+    const minimum = count > 0 ? Number(row?.min_dimensions) : 0
+    const maximum = count > 0 ? Number(row?.max_dimensions) : 0
+    if (minimum !== maximum)
+      throw new Error('ANN index requires one consistent vector dimension')
+    return {
+      model: normalizedModel,
+      dimensions: minimum,
+      sequence: this.memoryAnnSequence(normalizedModel),
+      count,
+    }
+  }
+
+  /** Returns a bounded, coalesced ANN mutation batch without scanning vectors. */
+  memoryAnnChanges(model: string, afterSequence: number, limit = 512): LumiMemoryAnnChangeBatch {
+    const normalizedModel = requiredText(model, 'model', 500)
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0)
+      throw new Error('ANN sequence must be a non-negative safe integer')
+    if (!Number.isInteger(limit) || limit < 1 || limit > 2_000)
+      throw new Error('ANN change limit must be between 1 and 2000')
+    this.ensureMemoryAnnKeys(normalizedModel)
+    const rows = this.rows(`
+      SELECT sequence, ann_key
+      FROM lumi_memory_vector_changes
+      WHERE model = ? AND sequence > ?
+      ORDER BY sequence ASC
+      LIMIT ?
+    `, normalizedModel, afterSequence, limit + 1)
+    const visibleRows = rows.slice(0, limit)
+    const sequence = visibleRows.length > 0
+      ? safeAnnInteger(visibleRows.at(-1)?.sequence, 'ANN change sequence')
+      : afterSequence
+    const latestByKey = new Map<number, number>()
+    for (const row of visibleRows)
+      latestByKey.set(safeAnnInteger(row.ann_key, 'ANN key'), safeAnnInteger(row.sequence, 'ANN change sequence'))
+    const keys = [...latestByKey.keys()]
+    if (keys.length === 0) {
+      return {
+        sequence,
+        hasMore: rows.length > limit,
+        upserts: [],
+        removeKeys: [],
+      }
+    }
+
+    const placeholders = keys.map(() => '?').join(', ')
+    const records = this.rows(`
+      SELECT * FROM lumi_memory_vectors
+      WHERE model = ? AND ann_key IN (${placeholders})
+    `, normalizedModel, ...keys).map(memoryAnnRecordFromRow)
+    const currentKeys = new Set(records.map(record => record.annKey))
+    return {
+      sequence,
+      hasMore: rows.length > limit,
+      upserts: records,
+      removeKeys: keys.filter(key => !currentKeys.has(key)),
+    }
+  }
+
+  /** Resolves ANN keys back through current SQLite ACL and lifecycle policy. */
+  authorizedMemoriesForAnn(
+    request: LumiMemorySearchRequest,
+    model: string,
+    annKeys: number[],
+  ): LumiAuthorizedAnnMemory[] {
+    const keys = [...new Set(annKeys.map(value => safeAnnInteger(value, 'ANN key')))]
+    if (keys.length === 0)
+      return []
+    if (keys.length > 2_000)
+      throw new Error('At most 2000 ANN keys may be authorized at once')
+    const viewerPersonId = requiredText(request.viewerUserId || request.userId, 'viewerUserId', 160)
+    this.assertPerson(viewerPersonId)
+    const access = memoryAccessSql(request, viewerPersonId)
+    const placeholders = keys.map(() => '?').join(', ')
+    const rows = this.rows(`
+      SELECT memory.*, vector.ann_key, vector.content_digest
+      FROM lumi_memory_vectors vector
+      INNER JOIN lumi_memories memory ON memory.id = vector.memory_id
+      WHERE vector.model = ?
+        AND vector.ann_key IN (${placeholders})
+        AND memory.status = 'active'
+        AND memory.superseded_by_id IS NULL
+        AND (memory.valid_until IS NULL OR memory.valid_until > ?)
+        AND (${access.sql})
+    `, requiredText(model, 'model', 500), ...keys, new Date().toISOString(), ...access.values)
+    return rows
+      .map(row => ({
+        annKey: safeAnnInteger(row.ann_key, 'ANN key'),
+        contentDigest: String(row.content_digest),
+        memory: memoryFromRow(row),
+      }))
+      .filter(item => canAccessLumiMemory(item.memory, request))
   }
 
   /** Returns persisted vectors for an already authorized memory projection. */
@@ -1186,15 +1393,66 @@ export class LumiServerDatabase {
   }
 
   memoryVectorStatus(model: string, contentDigestFor: (memory: LumiMemoryFragment) => string): LumiMemoryVectorStatus {
-    const memories = this.rows('SELECT * FROM lumi_memories WHERE status != \'rejected\'').map(memoryFromRow)
-    const vectors = new Map(this.memoryVectors(memories.map(memory => memory.id), model).map(vector => [vector.memoryId, vector]))
-    const indexedCount = memories.filter(memory => vectors.get(memory.id)?.contentDigest === contentDigestFor(memory)).length
+    const rows = this.rows(`
+      SELECT memory.*, vector.content_digest AS vector_content_digest
+      FROM lumi_memories memory
+      LEFT JOIN lumi_memory_vectors vector
+        ON vector.memory_id = memory.id AND vector.model = ?
+      WHERE memory.status != 'rejected'
+    `, requiredText(model, 'model', 500))
+    const indexedCount = rows.filter((row) => {
+      const digest = optionalText(row.vector_content_digest, 128)
+      return digest === contentDigestFor(memoryFromRow(row))
+    }).length
     return {
       model,
       indexedCount,
-      totalCount: memories.length,
-      missingCount: memories.length - indexedCount,
+      totalCount: rows.length,
+      missingCount: rows.length - indexedCount,
     }
+  }
+
+  private memoryAnnSequence(model: string): number {
+    return safeAnnInteger(this.row(`
+      SELECT sequence FROM lumi_memory_vector_revisions WHERE model = ?
+    `, model)?.sequence ?? 0, 'ANN revision')
+  }
+
+  private ensureMemoryAnnKeys(model?: string): void {
+    const rows = model
+      ? this.rows('SELECT memory_id, model FROM lumi_memory_vectors WHERE model = ? AND ann_key IS NULL', model)
+      : this.rows('SELECT memory_id, model FROM lumi_memory_vectors WHERE ann_key IS NULL')
+    for (const row of rows) {
+      const memoryId = String(row.memory_id)
+      const rowModel = String(row.model)
+      const annKey = this.nextMemoryAnnKey(memoryId, rowModel)
+      this.database.prepare(`
+        UPDATE lumi_memory_vectors SET ann_key = ?
+        WHERE memory_id = ? AND model = ? AND ann_key IS NULL
+      `).run(annKey, memoryId, rowModel)
+    }
+  }
+
+  private ensureMemoryAnnKey(memoryId: string, model: string): number {
+    const existing = this.row(`
+      SELECT ann_key FROM lumi_memory_vectors WHERE memory_id = ? AND model = ?
+    `, memoryId, model)?.ann_key
+    if (existing !== undefined && existing !== null)
+      return safeAnnInteger(existing, 'ANN key')
+    return this.nextMemoryAnnKey(memoryId, model)
+  }
+
+  private nextMemoryAnnKey(memoryId: string, model: string): number {
+    for (let attempt = 0; attempt < 4096; attempt += 1) {
+      const digest = createHash('sha256').update(`${model}\u001F${memoryId}\u001F${attempt}`).digest('hex')
+      const annKey = Number.parseInt(digest.slice(0, 13), 16) || 1
+      const collision = this.row(`
+        SELECT memory_id FROM lumi_memory_vectors WHERE model = ? AND ann_key = ?
+      `, model, annKey)
+      if (!collision || String(collision.memory_id) === memoryId)
+        return annKey
+    }
+    throw new Error('Unable to allocate a collision-safe ANN key')
   }
 
   /** Atomically replaces one per-person state projection using optimistic versioning. */
@@ -1836,7 +2094,25 @@ export class LumiServerDatabase {
         content_digest TEXT NOT NULL,
         device TEXT,
         updated_at INTEGER NOT NULL,
+        ann_key INTEGER,
         FOREIGN KEY(memory_id) REFERENCES lumi_memories(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS lumi_memory_vector_changes (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        model TEXT NOT NULL,
+        memory_id TEXT NOT NULL,
+        ann_key INTEGER NOT NULL,
+        operation TEXT NOT NULL CHECK(operation IN ('upsert', 'remove')),
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_lumi_memory_vector_changes_model_sequence
+        ON lumi_memory_vector_changes(model, sequence);
+
+      CREATE TABLE IF NOT EXISTS lumi_memory_vector_revisions (
+        model TEXT PRIMARY KEY,
+        sequence INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS lumi_cognitive_evidence (
@@ -2152,6 +2428,74 @@ export class LumiServerDatabase {
       CREATE INDEX IF NOT EXISTS idx_lumi_jobs_schedule
         ON lumi_jobs(status, scheduled_at);
     `)
+
+    this.addColumnIfMissing('lumi_memory_vectors', 'ann_key', 'INTEGER')
+    this.database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_lumi_memory_vectors_model_ann_key
+        ON lumi_memory_vectors(model, ann_key) WHERE ann_key IS NOT NULL;
+
+      DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_insert;
+      DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_update_same_model;
+      DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_update_model_remove;
+      DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_update_model_upsert;
+      DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_delete;
+
+      CREATE TRIGGER lumi_memory_vectors_ann_insert
+      AFTER INSERT ON lumi_memory_vectors
+      WHEN NEW.ann_key IS NOT NULL
+      BEGIN
+        INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+        VALUES (NEW.model, NEW.memory_id, NEW.ann_key, 'upsert', unixepoch('subsec') * 1000);
+        INSERT INTO lumi_memory_vector_revisions(model, sequence)
+        VALUES (NEW.model, last_insert_rowid())
+        ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+      END;
+
+      CREATE TRIGGER lumi_memory_vectors_ann_update_same_model
+      AFTER UPDATE ON lumi_memory_vectors
+      WHEN NEW.ann_key IS NOT NULL AND OLD.model = NEW.model
+      BEGIN
+        INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+        VALUES (NEW.model, NEW.memory_id, NEW.ann_key, 'upsert', unixepoch('subsec') * 1000);
+        INSERT INTO lumi_memory_vector_revisions(model, sequence)
+        VALUES (NEW.model, last_insert_rowid())
+        ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+      END;
+
+      CREATE TRIGGER lumi_memory_vectors_ann_update_model_remove
+      AFTER UPDATE ON lumi_memory_vectors
+      WHEN OLD.ann_key IS NOT NULL AND OLD.model != NEW.model
+      BEGIN
+        INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+        VALUES (OLD.model, OLD.memory_id, OLD.ann_key, 'remove', unixepoch('subsec') * 1000);
+        INSERT INTO lumi_memory_vector_revisions(model, sequence)
+        VALUES (OLD.model, last_insert_rowid())
+        ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+      END;
+
+      CREATE TRIGGER lumi_memory_vectors_ann_update_model_upsert
+      AFTER UPDATE ON lumi_memory_vectors
+      WHEN NEW.ann_key IS NOT NULL AND OLD.model != NEW.model
+      BEGIN
+        INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+        VALUES (NEW.model, NEW.memory_id, NEW.ann_key, 'upsert', unixepoch('subsec') * 1000);
+        INSERT INTO lumi_memory_vector_revisions(model, sequence)
+        VALUES (NEW.model, last_insert_rowid())
+        ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+      END;
+
+      CREATE TRIGGER lumi_memory_vectors_ann_delete
+      AFTER DELETE ON lumi_memory_vectors
+      WHEN OLD.ann_key IS NOT NULL
+      BEGIN
+        INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+        VALUES (OLD.model, OLD.memory_id, OLD.ann_key, 'remove', unixepoch('subsec') * 1000);
+        INSERT INTO lumi_memory_vector_revisions(model, sequence)
+        VALUES (OLD.model, last_insert_rowid())
+        ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+      END;
+    `)
+    this.ensureMemoryAnnKeys()
     this.addColumnIfMissing('lumi_memories', 'derived_from_evidence_ids_json', 'TEXT NOT NULL DEFAULT \'[]\'')
     this.addColumnIfMissing('lumi_memories', 'valid_from', 'TEXT')
     this.addColumnIfMissing('lumi_memories', 'valid_until', 'TEXT')
@@ -3417,6 +3761,29 @@ function parsePersistedAgentSession(
     waitState: parsed.waitState as PersistedSessionState['waitState'],
     completedEvents: parsed.completedEvents as PersistedSessionState['completedEvents'],
   }
+}
+
+function memoryAnnRecordFromRow(row: SqliteRow): LumiMemoryAnnRecord {
+  return {
+    ...memoryVectorFromRow(row),
+    annKey: safeAnnInteger(row.ann_key, 'ANN key'),
+  }
+}
+
+function consistentAnnDimensions(records: LumiMemoryAnnRecord[]): number {
+  if (records.length === 0)
+    return 0
+  const dimensions = records[0]!.dimensions
+  if (records.some(record => record.dimensions !== dimensions || record.vector.length !== dimensions))
+    throw new Error('ANN rebuild requires one consistent vector dimension')
+  return dimensions
+}
+
+function safeAnnInteger(value: unknown, field: string): number {
+  const number = Number(value)
+  if (!Number.isSafeInteger(number) || number < 0)
+    throw new Error(`${field} must be a non-negative safe integer`)
+  return number
 }
 
 function cognitiveWorkingMemoryFromJson(value: SqliteValue): LumiWorkingMemory {

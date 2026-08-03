@@ -2,8 +2,8 @@
 
 import type { Ref } from 'vue'
 
-import { createPinia, setActivePinia } from 'pinia'
 import { useLlmToolsStore } from '@proj-airi/stage-ui/stores/llm-tools'
+import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, ref } from 'vue'
 
@@ -311,12 +311,13 @@ describe('useChatSyncStore authority ingest failures', async () => {
         },
       ],
       providerUserContext: expect.stringContaining('[Current-turn image context]\nImage 1: description=a UI screenshot'),
+      agentUserText: expect.stringContaining('[Current-turn image context]\nImage 1: description=a UI screenshot'),
       sendAttachmentsToProvider: false,
     }), 'session-1')
 
     const sendOptions = mockState.ingest.mock.calls[0]?.[1]
     expect(sendOptions?.providerUserContext).toContain('[Lumi response autonomy]')
-    expect(sendOptions?.suppressAssistantTexts).toContain('lumi\u62d2\u7edd\u56de\u590d')
+    expect(sendOptions?.suppressAssistantTexts).toContain('lumi\u62D2\u7EDD\u56DE\u590D')
 
     store.dispose()
   })
@@ -324,25 +325,25 @@ describe('useChatSyncStore authority ingest failures', async () => {
   it('turns Lumi intentional silence into a system notice without another model request', async () => {
     mockState.ingest.mockReset()
     mockState.ingest.mockImplementation(async (_text, options) => {
-      options.onAssistantSuppressed?.('lumi\u62d2\u7edd\u56de\u590d')
+      options.onAssistantSuppressed?.('lumi\u62D2\u7EDD\u56DE\u590D')
     })
 
     const store = useChatSyncStore()
     store.initialize('authority')
 
     await store.requestIngest({
-      text: '\u91cd\u590d\u8bd5\u63a2',
+      text: '\u91CD\u590D\u8BD5\u63A2',
       sessionId: 'session-1',
     })
 
     expect(mockState.ingest).toHaveBeenCalledOnce()
     const sendOptions = mockState.ingest.mock.calls[0]?.[1]
     expect(sendOptions?.providerUserContext).toContain('[Lumi response autonomy]')
-    expect(sendOptions?.suppressAssistantTexts).toContain('lumi\u62d2\u7edd\u56de\u590d')
+    expect(sendOptions?.suppressAssistantTexts).toContain('lumi\u62D2\u7EDD\u56DE\u590D')
     expect(mockState.sessionMessages.value['session-1']).toEqual(expect.arrayContaining([
       expect.objectContaining({
         role: 'assistant',
-        content: expect.stringContaining('[system_notice]\ntitle: Lumi \u62d2\u7edd\u56de\u590d'),
+        content: expect.stringContaining('[system_notice]\ntitle: Lumi \u62D2\u7EDD\u56DE\u590D'),
       }),
     ]))
 

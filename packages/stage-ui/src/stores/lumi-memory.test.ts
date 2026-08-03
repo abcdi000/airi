@@ -139,6 +139,75 @@ describe('lumi-memory store', () => {
     expect(exported.vectors).toEqual(vectors)
   })
 
+  it('projects the authoritative ANN status for the settings interface', async () => {
+    const store = useLumiMemoryStore()
+    const status = {
+      available: true,
+      running: true,
+      model: 'BAAI/bge-small-zh-v1.5',
+      device: 'cuda',
+      indexedCount: 12,
+      totalCount: 12,
+      missingCount: 0,
+      annReady: true,
+      annCount: 12,
+      annDimensions: 512,
+      annSequence: 19,
+      progress: '索引已同步',
+    }
+    const vectorStatus = vi.fn(async () => status)
+    store.setPersistenceBridge({
+      getSnapshot: vi.fn(),
+      replaceSnapshot: vi.fn(),
+      upsertMemory: vi.fn(),
+      deleteMemory: vi.fn(),
+      vectorStatus,
+      saveEvent: vi.fn(),
+      setSeedId: vi.fn(),
+      clear: vi.fn(),
+    })
+
+    await expect(store.refreshSemanticIndexStatus()).resolves.toEqual(status)
+    expect(vectorStatus).toHaveBeenCalledWith({ userId: LUMI_DOGGY_USER_ID })
+    expect(store.semanticBackendStatus).toEqual(status)
+    expect(store.semanticIndexReady).toBe(true)
+    expect(store.semanticIndexStatus).toBe('ready')
+    expect(store.semanticIndexedCount).toBe(12)
+  })
+
+  it('keeps the settings interface in lexical fallback while the vector service is unavailable', async () => {
+    const store = useLumiMemoryStore()
+    const status = {
+      available: false,
+      running: false,
+      model: 'BAAI/bge-small-zh-v1.5',
+      device: 'unknown',
+      indexedCount: 12,
+      totalCount: 12,
+      missingCount: 0,
+      annReady: true,
+      annCount: 12,
+      annDimensions: 512,
+      annSequence: 19,
+      progress: '向量服务未运行，使用词法检索',
+    }
+    store.setPersistenceBridge({
+      getSnapshot: vi.fn(),
+      replaceSnapshot: vi.fn(),
+      upsertMemory: vi.fn(),
+      deleteMemory: vi.fn(),
+      vectorStatus: vi.fn(async () => status),
+      saveEvent: vi.fn(),
+      setSeedId: vi.fn(),
+      clear: vi.fn(),
+    })
+
+    await expect(store.refreshSemanticIndexStatus()).resolves.toEqual(status)
+    expect(store.semanticBackendStatus).toEqual(status)
+    expect(store.semanticIndexReady).toBe(false)
+    expect(store.semanticIndexStatus).toBe('fallback')
+  })
+
   it('keeps Lumi global facts loaded after switching to Moussy', () => {
     const identityStore = useLumiIdentityStore()
     const store = useLumiMemoryStore()

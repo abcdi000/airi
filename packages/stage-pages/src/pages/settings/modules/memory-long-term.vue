@@ -83,6 +83,7 @@ const {
   semanticIndexReady,
   semanticIndexStatus,
   semanticSearchPoolSize,
+  semanticBackendStatus,
 } = storeToRefs(memoryStore)
 const { activeUserId } = storeToRefs(identityStore)
 
@@ -158,8 +159,8 @@ const stats = computed(() => [
   { label: '当前显示', value: filteredMemories.value.length },
 ])
 
-const semanticIndexTarget = computed(() => allMemories.value.filter(memory => memory.status !== 'rejected').length)
-const semanticIndexMissing = computed(() => Math.max(0, semanticIndexTarget.value - semanticIndexedCount.value))
+const semanticIndexTarget = computed(() => semanticBackendStatus.value?.totalCount ?? allMemories.value.filter(memory => memory.status !== 'rejected').length)
+const semanticIndexMissing = computed(() => semanticBackendStatus.value?.missingCount ?? Math.max(0, semanticIndexTarget.value - semanticIndexedCount.value))
 const semanticIndexPercent = computed(() => {
   if (semanticIndexTarget.value <= 0)
     return 0
@@ -271,6 +272,11 @@ function continueSemanticIndexing() {
     .catch(error => console.warn('[memory-long-term] failed to continue semantic indexing', error))
 }
 
+function refreshSemanticIndexStatus() {
+  void memoryStore.refreshSemanticIndexStatus()
+    .catch(error => console.warn('[memory-long-term] failed to refresh semantic index status', error))
+}
+
 function parseTags(value: string) {
   return value
     .split(',')
@@ -374,28 +380,88 @@ function eventTone(kind: string) {
 
     <div :class="['rounded-lg border border-cyan-200 bg-cyan-50/80 p-3 text-sm text-cyan-950 dark:border-cyan-900/60 dark:bg-cyan-950/30 dark:text-cyan-100']">
       <div :class="['flex flex-wrap items-center justify-between gap-3']">
-        <div :class="['flex flex-col gap-1']">
+        <div :class="['min-w-0 flex flex-col gap-1']">
           <div :class="['flex flex-wrap items-center gap-2']">
-            <span :class="['font-semibold']">语义向量索引</span>
+            <span :class="['font-semibold']">语义记忆索引</span>
             <span :class="['rounded-full px-2 py-0.5 text-xs', semanticIndexReady ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : semanticIndexLoading ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-200' : 'bg-neutral-500/15 text-neutral-700 dark:text-neutral-200']">
               {{ semanticStatusLabel(semanticIndexStatus) }}
             </span>
           </div>
           <div :class="['text-xs opacity-80']">
-            已索引 {{ semanticIndexedCount }} / {{ semanticIndexTarget }}，缺失 {{ semanticIndexMissing }}，最近搜索池 {{ semanticSearchPoolSize }}
+            已索引 {{ semanticIndexedCount }} / {{ semanticIndexTarget }}，缺失 {{ semanticIndexMissing }}，可检索 {{ semanticSearchPoolSize }}
           </div>
           <div :class="['text-xs opacity-80']">
-            设备 {{ semanticIndexDevice }}<span v-if="semanticIndexProgress"> · {{ semanticIndexProgress }}</span>
+            {{ semanticIndexProgress || '等待后端状态' }}
           </div>
         </div>
-        <Button
-          size="sm"
-          variant="secondary"
-          icon="i-solar:refresh-line-duotone"
-          label="继续补向量"
-          :disabled="semanticIndexLoading"
-          @click="continueSemanticIndexing"
-        />
+        <div :class="['flex items-center gap-2']">
+          <Button
+            size="sm"
+            variant="secondary"
+            icon="i-solar:refresh-line-duotone"
+            title="刷新索引状态"
+            :disabled="semanticIndexLoading"
+            @click="refreshSemanticIndexStatus"
+          />
+          <Button
+            size="sm"
+            variant="secondary"
+            icon="i-solar:database-line-duotone"
+            label="补全并重建"
+            :disabled="semanticIndexLoading"
+            @click="continueSemanticIndexing"
+          />
+        </div>
+      </div>
+      <div :class="['mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-y border-cyan-900/10 py-3 text-xs md:grid-cols-3 dark:border-cyan-100/10']">
+        <div>
+          <div :class="['opacity-60']">
+            索引引擎
+          </div>
+          <div :class="['font-medium']">
+            USearch 2.26.0
+          </div>
+        </div>
+        <div>
+          <div :class="['opacity-60']">
+            全局 HNSW
+          </div>
+          <div :class="['font-medium']">
+            {{ semanticBackendStatus?.annReady ? '已同步' : '未就绪' }} · {{ semanticBackendStatus?.annCount ?? 0 }} 条
+          </div>
+        </div>
+        <div>
+          <div :class="['opacity-60']">
+            维度 / 修订
+          </div>
+          <div :class="['font-medium tabular-nums']">
+            {{ semanticBackendStatus?.annDimensions ?? 0 }} / {{ semanticBackendStatus?.annSequence ?? 0 }}
+          </div>
+        </div>
+        <div :class="['min-w-0']">
+          <div :class="['opacity-60']">
+            Embedding 模型
+          </div>
+          <div :class="['truncate font-mono font-medium']" :title="semanticBackendStatus?.model">
+            {{ semanticBackendStatus?.model || '等待加载' }}
+          </div>
+        </div>
+        <div>
+          <div :class="['opacity-60']">
+            Worker
+          </div>
+          <div :class="['font-medium']">
+            {{ semanticBackendStatus?.running ? '运行中' : '未运行' }} · {{ semanticBackendStatus?.device || semanticIndexDevice }}
+          </div>
+        </div>
+        <div>
+          <div :class="['opacity-60']">
+            服务状态
+          </div>
+          <div :class="['font-medium']">
+            {{ semanticBackendStatus?.available ? '可用' : '词法回退' }}
+          </div>
+        </div>
       </div>
       <div :class="['mt-3 h-2 overflow-hidden rounded-full bg-cyan-950/10 dark:bg-cyan-100/10']">
         <div

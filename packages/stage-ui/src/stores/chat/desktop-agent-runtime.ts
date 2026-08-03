@@ -103,7 +103,10 @@ interface PlannerResponseDocument {
 type DeepSeekThinkingMode = 'auto' | 'enabled' | 'disabled'
 
 export interface DesktopAgentIngestInput {
+  /** Semantic text consumed by cognition, Planner, Replyer, and policy. */
   text: string
+  /** User-visible text kept separate from hidden multimodal understanding. */
+  visibleText?: string
   sessionId: string
   interaction: ChatInteractionContext
   runtimeConfig: LumiAgentRuntimeConfig
@@ -179,7 +182,7 @@ export class DesktopLumiAgentHost {
     }
     this.#seedExclusions.set(this.#persistenceKey(input.mode, input.sessionId), sourceMessageId)
     if (input.visible)
-      appendVisibleUserMessage(envelope, input.interaction)
+      appendVisibleUserMessage(envelope, input.interaction, input.visibleText)
 
     const runtime = this.#runtime(input)
     if (input.onToolProgress)
@@ -853,11 +856,15 @@ function createDesktopOutboundAdapter(visible: boolean): DirectOutboundAdapter {
   }
 }
 
-function appendVisibleUserMessage(envelope: DirectPerceptionEnvelope, interaction: ChatInteractionContext): void {
+function appendVisibleUserMessage(
+  envelope: DirectPerceptionEnvelope,
+  interaction: ChatInteractionContext,
+  visibleText?: string,
+): void {
   useChatSessionStore().appendSessionMessage(envelope.conversationId, {
     id: envelope.sourceMessageId,
     role: 'user',
-    content: envelope.text ?? '',
+    content: visibleText ?? envelope.text ?? '',
     actorId: interaction.actorId,
     actorDisplayName: interaction.actorDisplayName,
     createdAt: envelope.timestamp,

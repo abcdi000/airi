@@ -221,6 +221,94 @@ describe('lumiServerDatabase', () => {
     }
   })
 
+  /** @example A legacy SQLite backup rebuilds ANN metadata without storing a USearch file. */
+  it('restores legacy vectors without ANN keys and rebuilds deterministic index metadata', () => {
+    const source = LumiServerDatabase.open(':memory:')
+    const restored = LumiServerDatabase.open(':memory:')
+    try {
+      const memory = source.storeMemoryCandidate({
+        actorPersonId: DOGGY_PERSON_ID,
+        conversationId: doggyDirectId,
+        candidate: memoryCandidate({ content: 'Lumi remembers a stable birthday fact.' }),
+      })
+      source.setMemoryStatus(memory.id, 'active')
+      source.upsertMemoryVector({
+        memoryId: memory.id,
+        model: 'BAAI/bge-small-zh-v1.5',
+        dimensions: 3,
+        vector: [1, 0, 0],
+        contentDigest: 'legacy-digest',
+        device: 'test-local',
+        updatedAt: 1,
+      })
+      const backup = source.exportBackup()
+      expect(backup.sections.memoryVectors).toHaveLength(1)
+      expect(backup.sections).not.toHaveProperty('annIndex')
+
+      // ROOT CAUSE:
+      //
+      // Backups created before persistent ANN support have no ann_key column.
+      // Restoring those rows must keep SQLite authoritative and derive fresh keys
+      // instead of requiring a stale or machine-specific USearch file.
+      const legacyBackup = structuredClone(backup)
+      delete legacyBackup.sections.memoryVectors[0]?.ann_key
+      restored.restoreBackup(legacyBackup)
+
+      const head = restored.memoryAnnHead('BAAI/bge-small-zh-v1.5')
+      const snapshot = restored.memoryAnnSnapshot('BAAI/bge-small-zh-v1.5')
+      expect(head.count).toBe(1)
+      expect(head.dimensions).toBe(3)
+      expect(head.sequence).toBeGreaterThan(0)
+      expect(snapshot.records).toHaveLength(1)
+      expect(snapshot.records[0]?.memoryId).toBe(memory.id)
+      expect(snapshot.records[0]?.annKey).toBeGreaterThan(0)
+      expect(snapshot.records[0]?.vector).toEqual([1, 0, 0])
+    }
+    finally {
+      source.close()
+      restored.close()
+    }
+  })
+
+  /** @example Re-embedding one memory with another model moves it to a new ANN namespace. */
+  it('allocates a model-specific ANN key when a memory vector changes model', () => {
+    const database = LumiServerDatabase.open(':memory:')
+    try {
+      const memory = database.storeMemoryCandidate({
+        actorPersonId: DOGGY_PERSON_ID,
+        conversationId: doggyDirectId,
+        candidate: memoryCandidate({ content: 'A vector model migration fixture.' }),
+      })
+      database.upsertMemoryVector({
+        memoryId: memory.id,
+        model: 'embedding-model-a',
+        dimensions: 2,
+        vector: [1, 0],
+        contentDigest: 'digest-a',
+        updatedAt: 1,
+      })
+      const firstKey = database.memoryAnnSnapshot('embedding-model-a').records[0]?.annKey
+
+      database.upsertMemoryVector({
+        memoryId: memory.id,
+        model: 'embedding-model-b',
+        dimensions: 2,
+        vector: [0, 1],
+        contentDigest: 'digest-b',
+        updatedAt: 2,
+      })
+      const second = database.memoryAnnSnapshot('embedding-model-b')
+
+      expect(database.memoryAnnHead('embedding-model-a').count).toBe(0)
+      expect(second.records).toHaveLength(1)
+      expect(second.records[0]?.annKey).not.toBe(firstKey)
+      expect(second.records[0]?.vector).toEqual([0, 1])
+    }
+    finally {
+      database.close()
+    }
+  })
+
   it('persists and restores the host-managed Agent Runtime ledger', () => {
     const source = LumiServerDatabase.open(':memory:')
     const restored = LumiServerDatabase.open(':memory:')

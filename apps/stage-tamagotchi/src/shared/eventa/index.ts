@@ -641,6 +641,11 @@ export interface ElectronLumiMemoryVectorStatus {
   indexedCount: number
   totalCount: number
   missingCount: number
+  annReady: boolean
+  annCount: number
+  annDimensions: number
+  annSequence: number
+  annReason?: string
   downloadPercent?: number
   downloadedBytes?: number
   downloadTotalBytes?: number
@@ -662,7 +667,7 @@ export const electronLumiMemoryGetVectors = defineInvokeEventa<ElectronLumiMemor
 export const electronLumiMemoryUpsertVector = defineInvokeEventa<void, ElectronLumiMemoryVectorRecord>('eventa:invoke:electron:lumi-memory:upsert-vector')
 export const electronLumiMemoryDeleteVector = defineInvokeEventa<void, { memoryId: string, model?: string }>('eventa:invoke:electron:lumi-memory:delete-vector')
 export const electronLumiMemoryVectorStatus = defineInvokeEventa<ElectronLumiMemoryVectorStatus, { userId: string }>('eventa:invoke:electron:lumi-memory:vector-status')
-export const electronLumiMemoryBackfillVectors = defineInvokeEventa<ElectronLumiMemoryVectorStatus, { userId: string, limit?: number }>('eventa:invoke:electron:lumi-memory:backfill-vectors')
+export const electronLumiMemoryBackfillVectors = defineInvokeEventa<ElectronLumiMemoryVectorStatus, { userId: string, pageSize?: number }>('eventa:invoke:electron:lumi-memory:backfill-vectors')
 export const electronLumiMemorySearchVectors = defineInvokeEventa<ElectronLumiMemoryVectorSearchResult, { userId: string, query: string, limit?: number }>('eventa:invoke:electron:lumi-memory:search-vectors')
 export const electronLumiMemorySyncVector = defineInvokeEventa<ElectronLumiMemoryVectorStatus, Record<string, any>>('eventa:invoke:electron:lumi-memory:sync-vector')
 export const electronLumiMemorySaveEvent = defineInvokeEventa<void, { userId: string, event: Record<string, any> }>('eventa:invoke:electron:lumi-memory:save-event')

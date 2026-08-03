@@ -200,6 +200,14 @@ export interface ChatOrchestratorSendOptions {
   attachments?: { type: 'image', data: string, mimeType: string }[]
   /** Extra text appended to the provider-facing user message without changing chat history. */
   providerUserContext?: string
+  /**
+   * Complete semantic text for a host-managed Agent Runtime turn.
+   *
+   * Use after a trusted vision or hearing module has resolved non-text input.
+   * This text is available to cognition, planning, and reply generation but is
+   * never persisted as the user-visible chat message.
+   */
+  agentUserText?: string
   /** Whether image attachments should be sent to the chat provider. Defaults to true. */
   sendAttachmentsToProvider?: boolean
   /** Optional final provider-message projection hook. Does not mutate persisted chat history. */

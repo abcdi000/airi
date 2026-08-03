@@ -314,6 +314,7 @@ function createVectorService(config: LumiServerProcessConfig, database: Paramete
     pythonCommand: runtime.pythonCommand,
     pythonArguments: config.vector.pythonArguments,
     modelCacheRoot: config.vector.modelCacheRoot ?? join(config.dataDirectory, 'lumi-vector-model-cache'),
+    annIndexRoot: join(config.dataDirectory, 'lumi-memory-ann'),
     bundledModelCacheRoot: config.vector.bundledModelCacheRoot ?? runtime.bundledModelCacheRoot,
     model: config.vector.model,
     device: config.vector.device,

@@ -30,12 +30,14 @@ const GET_PIP_PATH = join(CACHE_DIR, 'get-pip.py')
 const REQUIREMENTS_PATH = resolve(REPO_DIR, 'services', 'lumi-memory-vector', 'requirements.txt')
 const READY_MARKER_PATH = join(RUNTIME_DIR, '.lumi-vector-runtime.json')
 const MODEL_ID = process.env.LUMI_MEMORY_EMBEDDING_MODEL ?? 'BAAI/bge-small-zh-v1.5'
+const ANN_ENGINE_VERSION = '2.26.0'
 const TORCH_SPEC = process.env.LUMI_VECTOR_TORCH_SPEC ?? 'torch>=2.2,<3'
 const TORCH_VARIANT = process.env.LUMI_VECTOR_TORCH_VARIANT ?? 'cuda'
 const TORCH_CUDA_FLAVOR = process.env.LUMI_VECTOR_TORCH_CUDA_FLAVOR ?? 'cu130'
 const TORCH_INDEX_URL = process.env.LUMI_VECTOR_TORCH_INDEX_URL ?? defaultTorchIndexUrl()
 
 interface RuntimeMarker {
+  annEngineVersion: string
   model: string
   pythonArch: string
   pythonVersion: string
@@ -111,6 +113,7 @@ async function prepareRuntime() {
 
   await writeFile(READY_MARKER_PATH, `${JSON.stringify({
     pythonVersion: PYTHON_VERSION,
+    annEngineVersion: ANN_ENGINE_VERSION,
     pythonArch: PYTHON_ARCH,
     model: MODEL_ID,
     torchIndexUrl: TORCH_INDEX_URL,
@@ -126,6 +129,8 @@ function isRuntimeReady() {
   return existsSync(READY_MARKER_PATH)
     && existsSync(join(RUNTIME_DIR, 'python.exe'))
     && existsSync(join(RUNTIME_DIR, 'Lib', 'site-packages', 'sentence_transformers'))
+    && existsSync(join(RUNTIME_DIR, 'Lib', 'site-packages', 'usearch'))
+    && marker?.annEngineVersion === ANN_ENGINE_VERSION
     && marker?.pythonVersion === PYTHON_VERSION
     && marker.pythonArch === PYTHON_ARCH
     && marker.model === MODEL_ID

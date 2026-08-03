@@ -11,18 +11,18 @@ import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatMaintenanceStore } from '@proj-airi/stage-ui/stores/chat/maintenance'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
 import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store'
+import { useLlmToolsStore } from '@proj-airi/stage-ui/stores/llm-tools'
 import { useLumiEyesStore } from '@proj-airi/stage-ui/stores/lumi-eyes'
 import { useAiriCardStore } from '@proj-airi/stage-ui/stores/modules/airi-card'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
-import { useLlmToolsStore } from '@proj-airi/stage-ui/stores/llm-tools'
 import { defineStore, storeToRefs } from 'pinia'
 import { ref, watch } from 'vue'
 
+import { LUMI_PROACTIVE_RETURN_CONTEXT_KEY } from './lumi-proactive-autonomy'
 import { imageJournalTools } from './tools/builtin/image-journal'
 import { weatherTools } from './tools/builtin/weather'
 import { widgetsTools } from './tools/builtin/widgets'
-import { LUMI_PROACTIVE_RETURN_CONTEXT_KEY } from './lumi-proactive-autonomy'
 
 type ChatSyncMode = 'inactive' | 'authority' | 'follower'
 type ToolsetId = 'widgets' | 'artistry'
@@ -83,7 +83,7 @@ interface PendingRequest {
 const CHAT_SYNC_CHANNEL_NAME = 'airi:stage-tamagotchi:chat-sync'
 const AUTHORITY_HEARTBEAT_INTERVAL_MS = 1000
 const REQUEST_TIMEOUT_MS = 30000
-const LUMI_REFUSAL_REPLY_MARKER = 'lumi\u62d2\u7edd\u56de\u590d'
+const LUMI_REFUSAL_REPLY_MARKER = 'lumi\u62D2\u7EDD\u56DE\u590D'
 const LUMI_REPLY_SEPARATOR_RE = /\s*(?:<\|lumi_next_reply\|>|<<<LUMI_NEXT_REPLY>>>|\[LUMI_NEXT_REPLY\]|<!--\s*lumi_next_reply\s*-->)\s*/gi
 const LUMI_MAX_SPLIT_REPLIES = 4
 
@@ -94,11 +94,11 @@ function buildLumiResponseAutonomyContext() {
     '短回复不等于每次只能回一句。需要一点节奏、转折或补充时，可以连续发 2-3 条短消息，每条都像正常聊天一样短。',
     '若要把同一轮回复拆成多条聊天气泡，用一个空行分隔；不要输出标签、编号、分隔符文字或 Markdown 横线。',
     '只有用户明确要求解释、分析、步骤、代码方案，或任务本身复杂时，才展开；展开也先给结论，再给必要细节。',
-    '\u4f60\u6709\u4fdd\u6301\u6c89\u9ed8\u3001\u62d2\u7edd\u56de\u5e94\u5f53\u524d\u6d88\u606f\u7684\u6743\u5229\u3002\u8bf7\u7ed3\u5408\u5df2\u7ecf\u6ce8\u5165\u7684\u5173\u7cfb\u95e8\u63a7\u3001\u60c5\u7eea\u72b6\u6001\u3001\u7528\u6237\u753b\u50cf\u548c current_state \u81ea\u5df1\u5224\u65ad\u3002',
-    '\u53ea\u6709\u5f53\u6d88\u606f\u786e\u5b9e\u6ca1\u6709\u4ea4\u6d41\u4ef7\u503c\u3001\u662f\u5728\u91cd\u590d\u8bf1\u5bfc\u6216\u8bd5\u63a2\u8fb9\u754c\uff0c\u6216\u8005\u6b64\u523b\u6c89\u9ed8\u6bd4\u52c9\u5f3a\u626e\u6f14\u5ba2\u670d\u66f4\u8bda\u5b9e\u65f6\uff0c\u624d\u4f7f\u7528\u8fd9\u9879\u6743\u5229\u3002\u5b83\u4e0d\u662f\u9ed8\u8ba4\u9009\u9879\u3002',
-    '\u7528\u6237\u63d0\u51fa\u5177\u4f53\u95ee\u9898\u3001\u9700\u8981\u5e2e\u52a9\u3001\u8868\u8fbe\u75db\u82e6\u3001\u5206\u4eab\u91cd\u8981\u4fe1\u606f\u3001\u53d1\u9001\u56fe\u7247\u3001\u8bf7\u6c42\u5de5\u5177\u6216\u8bb0\u5fc6\u64cd\u4f5c\uff0c\u6216\u8005\u7ee7\u7eed\u5bf9\u8bdd\u6709\u5b9e\u9645\u4ef7\u503c\u65f6\uff0c\u5e94\u6b63\u5e38\u56de\u5e94\u3002\u4e0d\u8981\u4ec5\u4ec5\u56e0\u4e3a\u6d88\u606f\u5f88\u77ed\u3001\u5c34\u5c2c\u3001\u60c5\u7eea\u5316\u6216\u96be\u56de\u7b54\u800c\u62d2\u7edd\u3002',
-    '\u5982\u679c\u4f60\u51b3\u5b9a\u4e0d\u56de\u590d\uff0c\u53ea\u8f93\u51fa\uff1a' + LUMI_REFUSAL_REPLY_MARKER,
-    '\u5fc5\u987b\u53ea\u8f93\u51fa\u8fd9\u4e00\u884c\u56fa\u5b9a\u6587\u672c\uff0c\u4e0d\u52a0\u6807\u70b9\u3001\u7a7a\u683c\u3001Markdown\u3001\u89e3\u91ca\u3001\u601d\u8003\u8fc7\u7a0b\u6216\u5de5\u5177\u8c03\u7528\u3002',
+    '\u4F60\u6709\u4FDD\u6301\u6C89\u9ED8\u3001\u62D2\u7EDD\u56DE\u5E94\u5F53\u524D\u6D88\u606F\u7684\u6743\u5229\u3002\u8BF7\u7ED3\u5408\u5DF2\u7ECF\u6CE8\u5165\u7684\u5173\u7CFB\u95E8\u63A7\u3001\u60C5\u7EEA\u72B6\u6001\u3001\u7528\u6237\u753B\u50CF\u548C current_state \u81EA\u5DF1\u5224\u65AD\u3002',
+    '\u53EA\u6709\u5F53\u6D88\u606F\u786E\u5B9E\u6CA1\u6709\u4EA4\u6D41\u4EF7\u503C\u3001\u662F\u5728\u91CD\u590D\u8BF1\u5BFC\u6216\u8BD5\u63A2\u8FB9\u754C\uFF0C\u6216\u8005\u6B64\u523B\u6C89\u9ED8\u6BD4\u52C9\u5F3A\u626E\u6F14\u5BA2\u670D\u66F4\u8BDA\u5B9E\u65F6\uFF0C\u624D\u4F7F\u7528\u8FD9\u9879\u6743\u5229\u3002\u5B83\u4E0D\u662F\u9ED8\u8BA4\u9009\u9879\u3002',
+    '\u7528\u6237\u63D0\u51FA\u5177\u4F53\u95EE\u9898\u3001\u9700\u8981\u5E2E\u52A9\u3001\u8868\u8FBE\u75DB\u82E6\u3001\u5206\u4EAB\u91CD\u8981\u4FE1\u606F\u3001\u53D1\u9001\u56FE\u7247\u3001\u8BF7\u6C42\u5DE5\u5177\u6216\u8BB0\u5FC6\u64CD\u4F5C\uFF0C\u6216\u8005\u7EE7\u7EED\u5BF9\u8BDD\u6709\u5B9E\u9645\u4EF7\u503C\u65F6\uFF0C\u5E94\u6B63\u5E38\u56DE\u5E94\u3002\u4E0D\u8981\u4EC5\u4EC5\u56E0\u4E3A\u6D88\u606F\u5F88\u77ED\u3001\u5C34\u5C2C\u3001\u60C5\u7EEA\u5316\u6216\u96BE\u56DE\u7B54\u800C\u62D2\u7EDD\u3002',
+    `\u5982\u679C\u4F60\u51B3\u5B9A\u4E0D\u56DE\u590D\uFF0C\u53EA\u8F93\u51FA\uFF1A${LUMI_REFUSAL_REPLY_MARKER}`,
+    '\u5FC5\u987B\u53EA\u8F93\u51FA\u8FD9\u4E00\u884C\u56FA\u5B9A\u6587\u672C\uFF0C\u4E0D\u52A0\u6807\u70B9\u3001\u7A7A\u683C\u3001Markdown\u3001\u89E3\u91CA\u3001\u601D\u8003\u8FC7\u7A0B\u6216\u5DE5\u5177\u8C03\u7528\u3002',
     '[/Lumi response autonomy]',
   ].join('\n')
 }
@@ -157,7 +157,7 @@ function extractPlainMessageText(message: ChatHistoryItem): string {
 
 function sanitizeLumiCuratorHistory(text: string): string {
   return text
-    .replace(/[（(]\s*(?:\u58f0\u97f3|\u8bed\u6c14|\u8f7b\u58f0|\u4f4e\u58f0|\u505c\u987f|\u6c89\u9ed8|\u7b11|\u53f9\u6c14|\u770b\u7740|\u7728\u773c|voice|softly|pause|sigh|smile)[^）)]{0,48}[）)]/gi, '')
+    .replace(/[（(]\s*(?:\u58F0\u97F3|\u8BED\u6C14|\u8F7B\u58F0|\u4F4E\u58F0|\u505C\u987F|\u6C89\u9ED8|\u7B11|\u53F9\u6C14|\u770B\u7740|\u7728\u773C|voice|softly|pause|sigh|smile)[^）)]{0,48}[）)]/gi, '')
     .replace(/[^\S\n]+/g, ' ')
     .replace(/[^\S\n]*\n[^\S\n]*/g, '\n')
     .trim()
@@ -175,7 +175,7 @@ function stripLumiVisiblePreamble(text: string): string {
   const normalized = text.replace(/\r\n/g, '\n').trim()
   const lines = normalized.split('\n')
   for (let index = lines.length - 2; index >= 0; index -= 1) {
-    if (/^\s*(?:AIRI|Lumi|{{char}}|assistant)\s*[:：]?\s*$/i.test(lines[index] ?? '')) {
+    if (/^\s*(?:AIRI|Lumi|\{\{char\}\}|assistant)\s*(?:[:：]\s*)?$/i.test(lines[index] ?? '')) {
       const afterLabel = lines.slice(index + 1).join('\n').trim()
       if (afterLabel)
         return afterLabel
@@ -195,13 +195,13 @@ function sanitizeLumiSpeechText(text: string): string {
     return ''
 
   const sanitized = sanitizeLumiCuratorHistory(normalizeLumiReplySeparators(stripLumiVisiblePreamble(visibleText)))
-    .replace(/(?:\u4f60\u60f3|\u4f60\u8981|\u4f60\u5148\u544a\u8bc9\u6211)[^\n\u3002\uff01\uff1f!?]{0,48}(?:\u6211\u542c\u7740|\u6211\u542c\u89c1\u4e86)[\u3002\uff01\uff1f!?]?/g, '')
-    .replace(/^\s*\u6211\u8fd8\u5728[\u3002.!\uff01]?\s*$/gm, '')
-    .replace(/^\s*\u53ea\u662f[^\n\u3002\uff01\uff1f!?]{0,24}\u5047\u88c5\u6ca1\u4e8b[^\n\u3002\uff01\uff1f!?]{0,16}[\u3002.!\uff01]?\s*$/gm, '')
-    .replace(/^\s*\u4f60\u61c2\u7684[\u3002.!\uff01]?\s*$/gm, '')
+    .replace(/(?:\u4F60\u60F3|\u4F60\u8981|\u4F60\u5148\u544A\u8BC9\u6211)[^\n\u3002\uFF01\uFF1F!?]{0,48}(?:\u6211\u542C\u7740|\u6211\u542C\u89C1\u4E86)[\u3002\uFF01\uFF1F!?]?/g, '')
+    .replace(/^\s*\u6211\u8FD8\u5728[\u3002.!\uFF01]?\s*$/gm, '')
+    .replace(/^\s*\u53EA\u662F[^\n\u3002\uFF01\uFF1F!?]{0,24}\u5047\u88C5\u6CA1\u4E8B[^\n\u3002\uFF01\uFF1F!?]{0,16}[\u3002.!\uFF01]?\s*$/gm, '')
+    .replace(/^\s*\u4F60\u61C2\u7684[\u3002.!\uFF01]?\s*$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
-  return sanitized || '\u6211\u5728\u3002\u4f60\u76f4\u63a5\u8bf4\u73b0\u5728\u60f3\u804a\u7684\u4e8b\u3002'
+  return sanitized || '\u6211\u5728\u3002\u4F60\u76F4\u63A5\u8BF4\u73B0\u5728\u60F3\u804A\u7684\u4E8B\u3002'
 }
 
 function normalizeLumiReplySeparators(text: string): string {
@@ -234,7 +234,7 @@ function splitLumiReplyText(text: string): string[] {
     const looksLikeCompactChatLines = lineParts.length > 1
       && lineParts.length <= LUMI_MAX_SPLIT_REPLIES
       && lineParts.every(part => part.length <= 160)
-      && lineParts.every(part => !/^\s*(?:[-*+]|\d+[.)]|#{1,6}\s|>\s|\|)/.test(part))
+      && lineParts.every(part => !/^\s*(?:[\-*+|]|\d+[.)]|#{1,6}\s|>\s)/.test(part))
 
     if (looksLikeCompactChatLines)
       return lineParts
@@ -444,8 +444,8 @@ function shouldBridgeLumiScreenObservation(text: string) {
     return true
 
   const hasScreenTarget = /(屏幕|窗口|页面|当前|现在|这[个里张]?|画面|桌面)/.test(normalized)
-  const directLookRequest = /^(?:lumi|Lumi|露米|你)?(?:再|重新|继续)?(?:帮我)?看(?:看|一下|下|见)?(?:呢|吧|嘛|吗)?[？?。！!]*$/.test(normalized)
-  const targetedLookRequest = /(?:lumi|Lumi|露米|你|帮我).{0,8}(?:再|重新|继续)?看(?:看|一下|下|见)?.{0,12}(?:屏幕|窗口|页面|当前|现在|这[个里张]?|画面|桌面)/.test(normalized)
+  const directLookRequest = /^(?:lumi|Lumi|露米|你)?(?:再|重新|继续)?(?:帮我)?看(?:[看下见]|一下)?[呢吧嘛吗]?[？?。！!]*$/.test(normalized)
+  const targetedLookRequest = /(?:lumi|Lumi|露米|你|帮我).{0,8}(?:再|重新|继续)?看(?:[看下见]|一下)?.{0,12}(?:屏幕|窗口|页面|当前|现在|这[个里张]?|画面|桌面)/.test(normalized)
   const observeRequest = /(?:观察|识别|看看|看一下).{0,12}(?:屏幕|窗口|页面|当前|现在|画面|桌面)/.test(normalized)
 
   return directLookRequest || targetedLookRequest || (hasScreenTarget && observeRequest)
@@ -740,10 +740,10 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
       // Lumi's original flow keeps chat text-only: Qwen Vision analyzes images,
       // then the selected consciousness/chat model reads the analysis as hidden turn context.
       ? await lumiEyesStore.analyzeAttachmentsForChat({
-        attachments: payload.attachments,
-        userMessage: payload.text,
-        sessionId: payload.sessionId || activeSessionId.value,
-      })
+          attachments: payload.attachments,
+          userMessage: payload.text,
+          sessionId: payload.sessionId || activeSessionId.value,
+        })
       : undefined
     if (useTextOnlyImageBridge && !visionResult?.results.length) {
       const errorDetails = visionResult?.errors.length
@@ -779,6 +779,9 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
       providerConfig,
       attachments: payload.attachments,
       providerUserContext,
+      agentUserText: visionResult?.contextText
+        ? [payload.text.trim(), visionResult.contextText].filter(Boolean).join('\n\n')
+        : undefined,
       sendAttachmentsToProvider: !useTextOnlyImageBridge,
       providerHistoryTransform: isLumiChat
         ? isolateCompletedComputerUseHistory
@@ -814,9 +817,9 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
             captionStreamText = ''
             getCaptionChannel()?.postMessage({ type: 'caption-assistant', text: '', replace: true })
             appendSystemNotices(targetSessionId, [[
-              'title: Lumi \u62d2\u7edd\u56de\u590d',
+              'title: Lumi \u62D2\u7EDD\u56DE\u590D',
               'status: refused',
-              'message: Lumi \u6839\u636e\u5f53\u524d\u5173\u7cfb\u72b6\u6001\u3001\u8fd0\u884c\u65f6\u72b6\u6001\u548c\u8fd9\u6761\u6d88\u606f\u672c\u8eab\uff0c\u9009\u62e9\u4fdd\u6301\u6c89\u9ed8\u3002',
+              'message: Lumi \u6839\u636E\u5F53\u524D\u5173\u7CFB\u72B6\u6001\u3001\u8FD0\u884C\u65F6\u72B6\u6001\u548C\u8FD9\u6761\u6D88\u606F\u672C\u8EAB\uFF0C\u9009\u62E9\u4FDD\u6301\u6C89\u9ED8\u3002',
             ].join('\n')])
           }
         : undefined,

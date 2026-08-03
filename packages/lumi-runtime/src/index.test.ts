@@ -20,6 +20,7 @@ import {
   isLumiMemoryCandidateGroundedInUserText,
   isLumiQuestionLikeMemorySource,
   isRecallableMemory,
+  LumiQueryEmbeddingCache,
   migratedLumiAllMemories,
   migratedLumiContextManifest,
   migratedLumiMemories,
@@ -35,6 +36,61 @@ import {
 } from './index'
 
 describe('lumi runtime migration contracts', () => {
+  /** @example Concurrent equivalent recall queries share one embedding request. */
+  it('deduplicates, expires, and bounds query embeddings', async () => {
+    let now = 1_000
+    let calls = 0
+    const cache = new LumiQueryEmbeddingCache({
+      maxEntries: 2,
+      ttlMs: 100,
+      now: () => now,
+    })
+    const load = async () => {
+      calls += 1
+      return [calls, 0.5]
+    }
+
+    const [first, concurrent] = await Promise.all([
+      cache.resolve('model-a', '  same   query ', load),
+      cache.resolve('model-a', 'same query', load),
+    ])
+    first[0] = 999
+    const cached = await cache.resolve('model-a', 'same query', load)
+
+    expect(calls).toBe(1)
+    expect(concurrent).toEqual([1, 0.5])
+    expect(cached).toEqual([1, 0.5])
+
+    await cache.resolve('model-a', 'second', load)
+    await cache.resolve('model-a', 'third', load)
+    await cache.resolve('model-a', 'same query', load)
+
+    expect(calls).toBe(4)
+
+    now += 101
+    await cache.resolve('model-a', 'same query', load)
+
+    expect(calls).toBe(5)
+  })
+
+  /** @example A failed model request is retried instead of poisoning the cache. */
+  it('removes rejected query embeddings from the cache', async () => {
+    const cache = new LumiQueryEmbeddingCache()
+    let calls = 0
+
+    await expect(cache.resolve('model-a', 'retry me', async () => {
+      calls += 1
+      throw new Error('worker unavailable')
+    })).rejects.toThrow('worker unavailable')
+
+    await expect(cache.resolve('model-a', 'retry me', async () => {
+      calls += 1
+      return [0.25, 0.75]
+    })).resolves.toEqual([0.25, 0.75])
+
+    expect(calls).toBe(2)
+  })
+
   /** @example A Chinese decision query becomes bounded FTS trigrams without exposing syntax. */
   it('builds safe CJK trigram terms and preserves short lexical fallbacks', () => {
     const chinese = buildLumiMemoryLexicalQuery('以前想考西电，现在主要考虑西工大')

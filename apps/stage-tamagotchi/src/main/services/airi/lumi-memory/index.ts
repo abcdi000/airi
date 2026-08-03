@@ -15,6 +15,7 @@ import type { ElectronLumiMemorySnapshot, ElectronLumiMemoryVectorRecord, Electr
 import process from 'node:process'
 
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -25,6 +26,7 @@ import { errorMessageFrom } from '@moeru/std'
 import {
   buildLumiMemoryLexicalQuery,
   canAccessLumiMemory,
+  LumiQueryEmbeddingCache,
   migrateSocialLanguageSnapshot,
   retrieveLumiMemories,
 } from '@proj-airi/lumi-runtime'
@@ -66,7 +68,7 @@ type SqliteValue = string | number | null
 const LUMI_MEMORY_EMBEDDING_MODEL = 'BAAI/bge-small-zh-v1.5'
 const LUMI_MEMORY_EMBEDDING_BATCH_SIZE = 32
 const LUMI_MEMORY_VECTOR_SEARCH_LIMIT = 800
-const LUMI_MEMORY_VECTOR_BACKFILL_LIMIT = 2000
+const LUMI_MEMORY_VECTOR_BACKFILL_PAGE_SIZE = 256
 const LUMI_MEMORY_VECTOR_REQUEST_TIMEOUT_MS = 1_800_000
 const LUMI_COGNITIVE_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000
 const MAIN_MODULE_DIR = dirname(fileURLToPath(import.meta.url))
@@ -124,6 +126,35 @@ interface LumiVectorWorkerEmbedResult {
   vectors: number[][]
 }
 
+interface LumiAnnIndexStatus {
+  ready: boolean
+  needsRebuild: boolean
+  model: string
+  dimensions: number
+  sequence: number
+  count: number
+  reason?: string
+}
+
+interface LumiAnnSearchResult extends LumiAnnIndexStatus {
+  keys: number[]
+  scores: number[]
+}
+
+interface DesktopMemoryAnnRecord {
+  annKey: number
+  memoryId: string
+  model: string
+  vector: number[]
+}
+
+interface DesktopMemoryAnnChangeBatch {
+  sequence: number
+  hasMore: boolean
+  upserts: DesktopMemoryAnnRecord[]
+  removeKeys: number[]
+}
+
 let dbInstance: SqliteDatabase | null = null
 let dbPathInstance = ''
 let vectorWorker: ChildProcessWithoutNullStreams | null = null
@@ -137,22 +168,28 @@ let vectorWorkerDownloadPercent: number | undefined
 let vectorWorkerDownloadedBytes: number | undefined
 let vectorWorkerDownloadTotalBytes: number | undefined
 let vectorWorkerDownloadSpeedBytesPerSecond: number | undefined
+let vectorAnnReady = false
+let vectorAnnCount = 0
+let vectorAnnDimensions = 0
+let vectorAnnSequence = 0
+let vectorAnnReason = ''
+let vectorAnnSynchronization: Promise<boolean> | undefined
 const vectorWorkerPending = new Map<string, {
   resolve: (value: any) => void
   reject: (error: Error) => void
   timer: NodeJS.Timeout
 }>()
+const queryEmbeddingCache = new LumiQueryEmbeddingCache()
 
 async function loadSqlite(): Promise<SqliteModule> {
   // NOTICE:
-  // The Function constructor keeps `node:sqlite` opaque to electron-vite so the
-  // runtime builtin is not rewritten into an application dependency.
-  // Static or directly analyzable imports were bundled incorrectly in packaged builds.
+  // Runtime builtin lookup keeps `node:sqlite` opaque to electron-vite so it is
+  // not rewritten into an application dependency, while remaining testable.
+  // Static imports were bundled incorrectly and Function-based dynamic imports
+  // cannot run in Vitest's VM without a dynamic-import callback.
   // Source/context: the desktop main-process SQLite loader in this file.
   // Removal condition: electron-vite can preserve `node:sqlite` as a runtime builtin.
-  // eslint-disable-next-line no-new-func
-  const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<SqliteModule>
-  return await dynamicImport('node:sqlite')
+  return process.getBuiltinModule('node:sqlite') as SqliteModule
 }
 
 async function getDatabase(): Promise<{ db: SqliteDatabase, path: string }> {
@@ -303,7 +340,8 @@ function migrate(db: SqliteDatabase) {
       source_actor_id TEXT,
       source_conversation_type TEXT NOT NULL DEFAULT 'import',
       classification_reason TEXT NOT NULL DEFAULT '',
-      disclosure_reason TEXT NOT NULL DEFAULT ''
+      disclosure_reason TEXT NOT NULL DEFAULT '',
+      vector_signature TEXT NOT NULL DEFAULT ''
     );
 
     CREATE INDEX IF NOT EXISTS idx_lumi_memories_status ON lumi_memories(status);
@@ -317,12 +355,30 @@ function migrate(db: SqliteDatabase) {
       vector_json TEXT NOT NULL,
       device TEXT,
       updated_at TEXT NOT NULL,
+      ann_key INTEGER,
       PRIMARY KEY(memory_id, model),
       FOREIGN KEY(memory_id) REFERENCES lumi_memories(id) ON DELETE CASCADE
     );
 
     CREATE INDEX IF NOT EXISTS idx_lumi_memory_vectors_model ON lumi_memory_vectors(model);
     CREATE INDEX IF NOT EXISTS idx_lumi_memory_vectors_updated_at ON lumi_memory_vectors(updated_at);
+
+    CREATE TABLE IF NOT EXISTS lumi_memory_vector_changes (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      model TEXT NOT NULL,
+      memory_id TEXT NOT NULL,
+      ann_key INTEGER NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('upsert', 'remove')),
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lumi_memory_vector_changes_model_sequence
+      ON lumi_memory_vector_changes(model, sequence);
+
+    CREATE TABLE IF NOT EXISTS lumi_memory_vector_revisions (
+      model TEXT PRIMARY KEY,
+      sequence INTEGER NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS lumi_memory_events (
       id TEXT PRIMARY KEY,
@@ -348,6 +404,76 @@ function migrate(db: SqliteDatabase) {
     );
   `)
 
+  const vectorColumns = db.prepare('PRAGMA table_info(lumi_memory_vectors)').all()
+  if (!vectorColumns.some(column => column.name === 'ann_key'))
+    db.exec('ALTER TABLE lumi_memory_vectors ADD COLUMN ann_key INTEGER')
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_lumi_memory_vectors_model_ann_key
+      ON lumi_memory_vectors(model, ann_key) WHERE ann_key IS NOT NULL;
+
+    DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_insert;
+    DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_update_same_model;
+    DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_update_model_remove;
+    DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_update_model_upsert;
+    DROP TRIGGER IF EXISTS lumi_memory_vectors_ann_delete;
+
+    CREATE TRIGGER lumi_memory_vectors_ann_insert
+    AFTER INSERT ON lumi_memory_vectors
+    WHEN NEW.ann_key IS NOT NULL
+    BEGIN
+      INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+      VALUES (NEW.model, NEW.memory_id, NEW.ann_key, 'upsert', unixepoch() * 1000);
+      INSERT INTO lumi_memory_vector_revisions(model, sequence)
+      VALUES (NEW.model, last_insert_rowid())
+      ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+    END;
+
+    CREATE TRIGGER lumi_memory_vectors_ann_update_same_model
+    AFTER UPDATE ON lumi_memory_vectors
+    WHEN NEW.ann_key IS NOT NULL AND OLD.model = NEW.model
+    BEGIN
+      INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+      VALUES (NEW.model, NEW.memory_id, NEW.ann_key, 'upsert', unixepoch() * 1000);
+      INSERT INTO lumi_memory_vector_revisions(model, sequence)
+      VALUES (NEW.model, last_insert_rowid())
+      ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+    END;
+
+    CREATE TRIGGER lumi_memory_vectors_ann_update_model_remove
+    AFTER UPDATE ON lumi_memory_vectors
+    WHEN OLD.ann_key IS NOT NULL AND OLD.model != NEW.model
+    BEGIN
+      INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+      VALUES (OLD.model, OLD.memory_id, OLD.ann_key, 'remove', unixepoch() * 1000);
+      INSERT INTO lumi_memory_vector_revisions(model, sequence)
+      VALUES (OLD.model, last_insert_rowid())
+      ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+    END;
+
+    CREATE TRIGGER lumi_memory_vectors_ann_update_model_upsert
+    AFTER UPDATE ON lumi_memory_vectors
+    WHEN NEW.ann_key IS NOT NULL AND OLD.model != NEW.model
+    BEGIN
+      INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+      VALUES (NEW.model, NEW.memory_id, NEW.ann_key, 'upsert', unixepoch() * 1000);
+      INSERT INTO lumi_memory_vector_revisions(model, sequence)
+      VALUES (NEW.model, last_insert_rowid())
+      ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+    END;
+
+    CREATE TRIGGER lumi_memory_vectors_ann_delete
+    AFTER DELETE ON lumi_memory_vectors
+    WHEN OLD.ann_key IS NOT NULL
+    BEGIN
+      INSERT INTO lumi_memory_vector_changes(model, memory_id, ann_key, operation, created_at)
+      VALUES (OLD.model, OLD.memory_id, OLD.ann_key, 'remove', unixepoch() * 1000);
+      INSERT INTO lumi_memory_vector_revisions(model, sequence)
+      VALUES (OLD.model, last_insert_rowid())
+      ON CONFLICT(model) DO UPDATE SET sequence = excluded.sequence;
+    END;
+  `)
+  ensureDesktopAnnKeys(db)
+
   ensureMemoryFtsIndex(db)
 
   const eventColumns = db.prepare('PRAGMA table_info(lumi_memory_events)').all()
@@ -365,6 +491,7 @@ function migrate(db: SqliteDatabase) {
   }
 
   migrateMemoryScopes(db)
+  migrateMemoryVectorSignatures(db)
 }
 
 function migrateMemoryScopes(db: SqliteDatabase) {
@@ -392,6 +519,7 @@ function migrateMemoryScopes(db: SqliteDatabase) {
     ['source_episode_end_message_id', 'TEXT'],
     ['use_count', 'INTEGER NOT NULL DEFAULT 0'],
     ['evidence_origin', `TEXT NOT NULL DEFAULT 'legacy_import'`],
+    ['vector_signature', `TEXT NOT NULL DEFAULT ''`],
   ] as const
   for (const [name, definition] of additions) {
     if (!columns.some(column => column.name === name))
@@ -437,6 +565,29 @@ function migrateMemoryScopes(db: SqliteDatabase) {
   }
 
   migrateLumiGlobalSelfFacts(db)
+}
+
+function migrateMemoryVectorSignatures(db: SqliteDatabase) {
+  const rows = db.prepare(`
+    SELECT m.*, v.signature AS persisted_vector_signature
+    FROM lumi_memories m
+    LEFT JOIN lumi_memory_vectors v
+      ON v.memory_id = m.id AND v.model = ?
+    WHERE m.vector_signature = ''
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL)
+  const updateMemory = db.prepare('UPDATE lumi_memories SET vector_signature = ? WHERE id = ?')
+  const updateVector = db.prepare(`
+    UPDATE lumi_memory_vectors SET signature = ?
+    WHERE memory_id = ? AND model = ? AND signature = ?
+  `)
+  for (const row of rows) {
+    const source = memoryVectorSignatureSource(row)
+    const signature = memoryVectorSignature(row)
+    const memoryId = stringField(row.id)
+    updateMemory.run(signature, memoryId)
+    if (row.persisted_vector_signature === source)
+      updateVector.run(signature, memoryId, LUMI_MEMORY_EMBEDDING_MODEL, source)
+  }
 }
 
 function migrateLumiGlobalSelfFacts(db: SqliteDatabase) {
@@ -512,7 +663,7 @@ export function createLumiMemoryService(params: {
   defineInvokeHandler(params.context, electronLumiMemoryUpsertVector, async record => upsertVector(record))
   defineInvokeHandler(params.context, electronLumiMemoryDeleteVector, async payload => deleteVector(payload.memoryId, payload.model))
   defineInvokeHandler(params.context, electronLumiMemoryVectorStatus, async ({ userId }) => getVectorStatus(userId))
-  defineInvokeHandler(params.context, electronLumiMemoryBackfillVectors, async payload => backfillVectors(payload.userId, payload.limit))
+  defineInvokeHandler(params.context, electronLumiMemoryBackfillVectors, async payload => backfillVectors(payload.userId, payload.pageSize))
   defineInvokeHandler(params.context, electronLumiMemorySearchVectors, async payload => searchVectors(payload.userId, payload.query, payload.limit))
   defineInvokeHandler(params.context, electronLumiMemorySyncVector, async memory => syncVectorForMemory(memory))
   defineInvokeHandler(params.context, electronLumiMemorySaveEvent, async ({ userId, event }) => saveEvent(userId, event))
@@ -950,9 +1101,10 @@ function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
       source_episode_start_message_id,
       source_episode_end_message_id,
       use_count,
-      evidence_origin
+      evidence_origin,
+      vector_signature
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       user_id = excluded.user_id,
       persona_id = excluded.persona_id,
@@ -991,7 +1143,8 @@ function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
       source_episode_start_message_id = excluded.source_episode_start_message_id,
       source_episode_end_message_id = excluded.source_episode_end_message_id,
       use_count = excluded.use_count,
-      evidence_origin = excluded.evidence_origin
+      evidence_origin = excluded.evidence_origin,
+      vector_signature = excluded.vector_signature
   `).run(
     stringField(memory.id),
     stringField(memory.userId, 'local'),
@@ -1032,6 +1185,7 @@ function upsertMemoryWithDb(db: SqliteDatabase, memory: Record<string, any>) {
     nullableString(memory.sourceEpisodeEndMessageId ?? memory.source_episode_end_message_id),
     numberField(memory.useCount ?? memory.use_count),
     evidenceOriginField(memory.evidenceOrigin ?? memory.evidence_origin),
+    memoryVectorSignature(memory),
   )
 }
 
@@ -1057,35 +1211,7 @@ async function getVectors(model: string, userId: string): Promise<ElectronLumiMe
 
 async function upsertVector(record: ElectronLumiMemoryVectorRecord) {
   const { db } = await getDatabase()
-  const vector = Array.isArray(record.vector)
-    ? record.vector.filter(value => typeof value === 'number' && Number.isFinite(value))
-    : []
-  if (!record.memoryId || !record.model || !record.signature || vector.length === 0)
-    return
-
-  db.prepare(`
-    INSERT INTO lumi_memory_vectors (
-      memory_id,
-      model,
-      signature,
-      vector_json,
-      device,
-      updated_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(memory_id, model) DO UPDATE SET
-      signature = excluded.signature,
-      vector_json = excluded.vector_json,
-      device = excluded.device,
-      updated_at = excluded.updated_at
-  `).run(
-    stringField(record.memoryId),
-    stringField(record.model),
-    stringField(record.signature),
-    JSON.stringify(vector),
-    nullableString(record.device),
-    stringField(record.updatedAt, new Date().toISOString()),
-  )
+  upsertVectorWithDb(db, record)
 }
 
 async function deleteVector(memoryId: string, model?: string) {
@@ -1131,46 +1257,63 @@ async function syncVectorForMemory(memory: Record<string, any>): Promise<Electro
   return vectorStatusWithDb(db, normalized.userId)
 }
 
-async function backfillVectors(userId: string, limit = LUMI_MEMORY_VECTOR_BACKFILL_LIMIT): Promise<ElectronLumiMemoryVectorStatus> {
+async function backfillVectors(userId: string, requestedPageSize = LUMI_MEMORY_VECTOR_BACKFILL_PAGE_SIZE): Promise<ElectronLumiMemoryVectorStatus> {
   const { db } = await getDatabase()
-  const memories = vectorBackfillCandidates(db, userId, limit)
-  if (memories.length === 0) {
-    vectorWorkerProgress = '向量已经补齐'
-    return vectorStatusWithDb(db, userId)
-  }
-
+  const normalizedPageSize = Number.isFinite(requestedPageSize)
+    ? Math.floor(requestedPageSize)
+    : LUMI_MEMORY_VECTOR_BACKFILL_PAGE_SIZE
+  const pageSize = Math.max(
+    LUMI_MEMORY_EMBEDDING_BATCH_SIZE,
+    Math.min(2_000, normalizedPageSize),
+  )
+  let scanned = 0
   let completed = 0
-  for (let index = 0; index < memories.length; index += LUMI_MEMORY_EMBEDDING_BATCH_SIZE) {
-    const batch = memories.slice(index, index + LUMI_MEMORY_EMBEDDING_BATCH_SIZE)
-    vectorWorkerProgress = `正在补向量 ${Math.min(index + batch.length, memories.length)}/${memories.length}: ${previewText(batch[0]?.content ?? '', 36)}`
-    try {
-      const vectors = await embedTexts(batch.map(memoryVectorText))
-      const now = new Date().toISOString()
-      for (let batchIndex = 0; batchIndex < batch.length; batchIndex += 1) {
-        const memory = batch[batchIndex]
-        const vector = vectors[batchIndex]
-        if (!isFiniteVector(vector))
-          continue
-        upsertVectorWithDb(db, {
-          memoryId: memory.id,
-          model: LUMI_MEMORY_EMBEDDING_MODEL,
-          signature: memoryVectorSignature(memory),
-          vector,
-          device: vectorWorkerDevice,
-          updatedAt: now,
-        })
-        completed += 1
+  let offset = 0
+  while (true) {
+    const page = vectorBackfillCandidates(db, userId, pageSize, offset)
+    if (page.scanned === 0)
+      break
+    scanned += page.scanned
+    offset += page.scanned
+
+    for (let index = 0; index < page.memories.length; index += LUMI_MEMORY_EMBEDDING_BATCH_SIZE) {
+      const batch = page.memories.slice(index, index + LUMI_MEMORY_EMBEDDING_BATCH_SIZE)
+      vectorWorkerProgress = `正在扫描向量 ${scanned} 条，已补 ${completed}: ${previewText(batch[0]?.content ?? '', 36)}`
+      try {
+        const vectors = await embedTexts(batch.map(memoryVectorText))
+        const now = new Date().toISOString()
+        for (let batchIndex = 0; batchIndex < batch.length; batchIndex += 1) {
+          const memory = batch[batchIndex]
+          const vector = vectors[batchIndex]
+          if (!isFiniteVector(vector))
+            continue
+          upsertVectorWithDb(db, {
+            memoryId: memory.id,
+            model: LUMI_MEMORY_EMBEDDING_MODEL,
+            signature: memoryVectorSignature(memory),
+            vector,
+            device: vectorWorkerDevice,
+            updatedAt: now,
+          })
+          completed += 1
+        }
+      }
+      catch (error) {
+        vectorWorkerLastError = errorMessageFrom(error) ?? String(error)
+        vectorWorkerProgress = `补向量失败: ${vectorWorkerLastError}`
+        console.warn('[lumi-memory] vector backfill failed', error)
+        return vectorStatusWithDb(db, userId)
       }
     }
-    catch (error) {
-      vectorWorkerLastError = errorMessageFrom(error) ?? String(error)
-      vectorWorkerProgress = `补向量失败: ${vectorWorkerLastError}`
-      console.warn('[lumi-memory] vector backfill failed', error)
-      return vectorStatusWithDb(db, userId)
-    }
+
+    if (page.scanned < pageSize)
+      break
   }
 
-  vectorWorkerProgress = `补向量完成 ${completed}/${memories.length}`
+  vectorWorkerProgress = completed > 0
+    ? `向量补全完成：扫描 ${scanned} 条，更新 ${completed} 条`
+    : `向量已经补齐：扫描 ${scanned} 条`
+  await synchronizeDesktopAnn(db, true)
   return vectorStatusWithDb(db, userId)
 }
 
@@ -1196,22 +1339,47 @@ async function searchVectors(userId: string, query: string, limit = LUMI_MEMORY_
 
   try {
     vectorWorkerProgress = `正在检索向量: ${previewText(safeQuery, 40)}`
-    const [queryVector] = await embedTexts([safeQuery])
+    const head = desktopAnnHead(db)
+    const ready = await withTimeout(synchronizeDesktopAnn(db, false), 4_000, 'ANN synchronization')
+    if (!ready)
+      return { scores: {}, status: vectorStatusWithDb(db, userId) }
+    const queryVector = await withTimeout(queryEmbeddingCache.resolve(
+      LUMI_MEMORY_EMBEDDING_MODEL,
+      safeQuery,
+      async () => {
+        const [vector] = await embedTexts([safeQuery])
+        if (!isFiniteVector(vector))
+          throw new Error('Lumi memory vector worker returned no query embedding')
+        return vector
+      },
+    ), 4_000, 'query embedding')
+    const matches = await withTimeout(searchDesktopAnn(
+      head.dimensions,
+      queryVector,
+      Math.min(2_000, Math.max(1_024, limit * 32)),
+    ), 4_000, 'ANN search')
+    if (matches.keys.length === 0)
+      return { scores: {}, status: vectorStatusWithDb(db, userId) }
+    const placeholders = matches.keys.map(() => '?').join(', ')
     const rows = db.prepare(`
-      SELECT v.memory_id, v.vector_json
+      SELECT v.ann_key, v.signature, m.*
       FROM lumi_memory_vectors v
       INNER JOIN lumi_memories m ON m.id = v.memory_id
-      WHERE v.model = ? AND ${MEMORY_ACCESS_SQL}
-      ORDER BY v.updated_at DESC
-      LIMIT ?
-    `).all(LUMI_MEMORY_EMBEDDING_MODEL, userId, userId, Math.max(1, limit))
+      WHERE v.model = ? AND v.ann_key IN (${placeholders}) AND ${MEMORY_ACCESS_SQL}
+        AND m.status = 'active'
+        AND m.superseded_by_id IS NULL
+        AND (m.valid_until IS NULL OR m.valid_until > ?)
+    `).all(LUMI_MEMORY_EMBEDDING_MODEL, ...matches.keys, userId, userId, new Date().toISOString())
+    const byKey = new Map(rows.map(row => [safeAnnInteger(row.ann_key, 'ANN key'), row]))
 
     const scores: Record<string, number> = {}
-    for (const row of rows) {
-      const vector = parseJsonNumberArray(row.vector_json)
-      if (!isFiniteVector(vector))
+    for (let index = 0; index < matches.keys.length; index += 1) {
+      const row = byKey.get(matches.keys[index]!)
+      if (!row || row.signature !== row.vector_signature)
         continue
-      scores[stringField(row.memory_id)] = cosineSimilarity(queryVector, vector)
+      scores[stringField(row.id)] = matches.scores[index] ?? 0
+      if (Object.keys(scores).length >= limit)
+        break
     }
     vectorWorkerProgress = `检索完成: ${Object.keys(scores).length} 条向量`
     return { scores, status: vectorStatusWithDb(db, userId) }
@@ -1224,24 +1392,25 @@ async function searchVectors(userId: string, query: string, limit = LUMI_MEMORY_
   }
 }
 function vectorStatusWithDb(db: SqliteDatabase, userId?: string): ElectronLumiMemoryVectorStatus {
-  const rows = userId
+  const row = userId
     ? db.prepare(`
-    SELECT m.id, m.updated_at, m.type, m.status, m.tags_json, m.content, v.signature
-    FROM lumi_memories m
-    LEFT JOIN lumi_memory_vectors v ON v.memory_id = m.id AND v.model = ?
-    WHERE m.status != 'rejected' AND ${MEMORY_ACCESS_SQL}
-  `).all(LUMI_MEMORY_EMBEDDING_MODEL, userId, userId)
+      SELECT
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN v.signature = m.vector_signature THEN 1 ELSE 0 END) AS indexed_count
+      FROM lumi_memories m
+      LEFT JOIN lumi_memory_vectors v ON v.memory_id = m.id AND v.model = ?
+      WHERE m.status != 'rejected' AND ${MEMORY_ACCESS_SQL}
+    `).get(LUMI_MEMORY_EMBEDDING_MODEL, userId, userId)
     : db.prepare(`
-      SELECT m.id, m.updated_at, m.type, m.status, m.tags_json, m.content, v.signature
+      SELECT
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN v.signature = m.vector_signature THEN 1 ELSE 0 END) AS indexed_count
       FROM lumi_memories m
       LEFT JOIN lumi_memory_vectors v ON v.memory_id = m.id AND v.model = ?
       WHERE m.status != 'rejected'
-    `).all(LUMI_MEMORY_EMBEDDING_MODEL)
-  let indexedCount = 0
-  for (const row of rows) {
-    if (row.signature === memoryVectorSignature(rowToMemory(row)))
-      indexedCount += 1
-  }
+    `).get(LUMI_MEMORY_EMBEDDING_MODEL)
+  const totalCount = numberField(row?.total_count)
+  const indexedCount = numberField(row?.indexed_count)
   const running = Boolean(vectorWorker && !vectorWorker.killed)
   return {
     available: running && !vectorWorkerLastError,
@@ -1250,8 +1419,13 @@ function vectorStatusWithDb(db: SqliteDatabase, userId?: string): ElectronLumiMe
     device: vectorWorkerDevice,
     phase: vectorWorkerPhase || undefined,
     indexedCount,
-    totalCount: rows.length,
-    missingCount: Math.max(0, rows.length - indexedCount),
+    totalCount,
+    missingCount: Math.max(0, totalCount - indexedCount),
+    annReady: vectorAnnReady,
+    annCount: vectorAnnCount,
+    annDimensions: vectorAnnDimensions,
+    annSequence: vectorAnnSequence,
+    annReason: vectorAnnReason || undefined,
     downloadPercent: vectorWorkerDownloadPercent,
     downloadedBytes: vectorWorkerDownloadedBytes,
     downloadTotalBytes: vectorWorkerDownloadTotalBytes,
@@ -1261,22 +1435,22 @@ function vectorStatusWithDb(db: SqliteDatabase, userId?: string): ElectronLumiMe
   }
 }
 
-function vectorBackfillCandidates(db: SqliteDatabase, userId: string, limit: number) {
-  return db.prepare(`
-    SELECT m.*
+function vectorBackfillCandidates(db: SqliteDatabase, userId: string, pageSize: number, offset: number) {
+  const rows = db.prepare(`
+    SELECT m.*, v.signature AS persisted_vector_signature
     FROM lumi_memories m
     LEFT JOIN lumi_memory_vectors v ON v.memory_id = m.id AND v.model = ?
     WHERE m.status != 'rejected' AND ${MEMORY_ACCESS_SQL}
-    ORDER BY m.updated_at DESC, m.created_at DESC
-    LIMIT ?
-  `).all(LUMI_MEMORY_EMBEDDING_MODEL, userId, userId, Math.max(1, limit)).map(rowToMemory).filter((memory) => {
-    const row = db.prepare(`
-        SELECT signature
-        FROM lumi_memory_vectors
-        WHERE memory_id = ? AND model = ?
-      `).get(memory.id, LUMI_MEMORY_EMBEDDING_MODEL)
-    return row?.signature !== memoryVectorSignature(memory)
-  })
+    ORDER BY m.updated_at DESC, m.created_at DESC, m.id DESC
+    LIMIT ? OFFSET ?
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL, userId, userId, pageSize, offset)
+  return {
+    scanned: rows.length,
+    memories: rows.flatMap((row) => {
+      const memory = rowToMemory(row)
+      return row.persisted_vector_signature === row.vector_signature ? [] : [memory]
+    }),
+  }
 }
 
 function upsertVectorWithDb(db: SqliteDatabase, record: ElectronLumiMemoryVectorRecord) {
@@ -1286,6 +1460,10 @@ function upsertVectorWithDb(db: SqliteDatabase, record: ElectronLumiMemoryVector
   if (!record.memoryId || !record.model || !record.signature || vector.length === 0)
     return
 
+  const memoryId = stringField(record.memoryId)
+  const model = stringField(record.model)
+  const annKey = ensureDesktopAnnKey(db, memoryId, model)
+
   db.prepare(`
     INSERT INTO lumi_memory_vectors (
       memory_id,
@@ -1293,22 +1471,270 @@ function upsertVectorWithDb(db: SqliteDatabase, record: ElectronLumiMemoryVector
       signature,
       vector_json,
       device,
-      updated_at
+      updated_at,
+      ann_key
     )
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(memory_id, model) DO UPDATE SET
       signature = excluded.signature,
       vector_json = excluded.vector_json,
       device = excluded.device,
-      updated_at = excluded.updated_at
+      updated_at = excluded.updated_at,
+      ann_key = COALESCE(lumi_memory_vectors.ann_key, excluded.ann_key)
   `).run(
-    stringField(record.memoryId),
-    stringField(record.model),
+    memoryId,
+    model,
     stringField(record.signature),
     JSON.stringify(vector),
     nullableString(record.device),
     stringField(record.updatedAt, new Date().toISOString()),
+    annKey,
   )
+}
+
+function ensureDesktopAnnKeys(db: SqliteDatabase, model?: string) {
+  const rows = model
+    ? db.prepare('SELECT memory_id, model FROM lumi_memory_vectors WHERE model = ? AND ann_key IS NULL').all(model)
+    : db.prepare('SELECT memory_id, model FROM lumi_memory_vectors WHERE ann_key IS NULL').all()
+  for (const row of rows) {
+    const memoryId = stringField(row.memory_id)
+    const rowModel = stringField(row.model)
+    const annKey = nextDesktopAnnKey(db, memoryId, rowModel)
+    db.prepare(`
+      UPDATE lumi_memory_vectors SET ann_key = ?
+      WHERE memory_id = ? AND model = ? AND ann_key IS NULL
+    `).run(annKey, memoryId, rowModel)
+  }
+}
+
+function ensureDesktopAnnKey(db: SqliteDatabase, memoryId: string, model: string) {
+  const existing = db.prepare(`
+    SELECT ann_key FROM lumi_memory_vectors WHERE memory_id = ? AND model = ?
+  `).get(memoryId, model)?.ann_key
+  if (existing !== undefined && existing !== null)
+    return safeAnnInteger(existing, 'ANN key')
+  return nextDesktopAnnKey(db, memoryId, model)
+}
+
+function nextDesktopAnnKey(db: SqliteDatabase, memoryId: string, model: string) {
+  for (let attempt = 0; attempt < 4096; attempt += 1) {
+    const digest = createHash('sha256').update(`${model}\u001F${memoryId}\u001F${attempt}`).digest('hex')
+    const annKey = Number.parseInt(digest.slice(0, 13), 16) || 1
+    const collision = db.prepare(`
+      SELECT memory_id FROM lumi_memory_vectors WHERE model = ? AND ann_key = ?
+    `).get(model, annKey)
+    if (!collision || stringField(collision.memory_id) === memoryId)
+      return annKey
+  }
+  throw new Error('Unable to allocate a collision-safe ANN key')
+}
+
+function desktopAnnHead(db: SqliteDatabase) {
+  ensureDesktopAnnKeys(db, LUMI_MEMORY_EMBEDDING_MODEL)
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count, MIN(json_array_length(vector_json)) AS min_dimensions,
+      MAX(json_array_length(vector_json)) AS max_dimensions
+    FROM lumi_memory_vectors WHERE model = ?
+  `).get(LUMI_MEMORY_EMBEDDING_MODEL)
+  const count = numberField(row?.count)
+  const minimum = count > 0 ? numberField(row?.min_dimensions) : 0
+  const maximum = count > 0 ? numberField(row?.max_dimensions) : 0
+  if (minimum !== maximum)
+    throw new Error('ANN index requires one consistent vector dimension')
+  const revision = db.prepare(`
+    SELECT sequence FROM lumi_memory_vector_revisions WHERE model = ?
+  `).get(LUMI_MEMORY_EMBEDDING_MODEL)
+  return {
+    count,
+    dimensions: minimum,
+    sequence: safeAnnInteger(revision?.sequence ?? 0, 'ANN revision'),
+  }
+}
+
+function desktopAnnRecords(db: SqliteDatabase, afterMemoryId: string, limit = 512) {
+  ensureDesktopAnnKeys(db, LUMI_MEMORY_EMBEDDING_MODEL)
+  return db.prepare(`
+    SELECT memory_id, model, ann_key, vector_json
+    FROM lumi_memory_vectors
+    WHERE model = ? AND memory_id > ?
+    ORDER BY memory_id ASC
+    LIMIT ?
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL, afterMemoryId, limit).map(desktopAnnRecordFromRow)
+}
+
+function desktopAnnChanges(db: SqliteDatabase, afterSequence: number, limit = 512): DesktopMemoryAnnChangeBatch {
+  const rows = db.prepare(`
+    SELECT sequence, ann_key FROM lumi_memory_vector_changes
+    WHERE model = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL, afterSequence, limit + 1)
+  const visibleRows = rows.slice(0, limit)
+  const sequence = visibleRows.length > 0
+    ? safeAnnInteger(visibleRows.at(-1)?.sequence, 'ANN change sequence')
+    : afterSequence
+  const keys = [...new Set(visibleRows.map(row => safeAnnInteger(row.ann_key, 'ANN key')))]
+  if (keys.length === 0)
+    return { sequence, hasMore: rows.length > limit, upserts: [], removeKeys: [] }
+  const placeholders = keys.map(() => '?').join(', ')
+  const records = db.prepare(`
+    SELECT memory_id, model, ann_key, vector_json FROM lumi_memory_vectors
+    WHERE model = ? AND ann_key IN (${placeholders})
+  `).all(LUMI_MEMORY_EMBEDDING_MODEL, ...keys).map(desktopAnnRecordFromRow)
+  const currentKeys = new Set(records.map(record => record.annKey))
+  return {
+    sequence,
+    hasMore: rows.length > limit,
+    upserts: records,
+    removeKeys: keys.filter(key => !currentKeys.has(key)),
+  }
+}
+
+function desktopAnnRecordFromRow(row: Record<string, any>): DesktopMemoryAnnRecord {
+  const vector = parseJsonNumberArray(row.vector_json)
+  if (!isFiniteVector(vector))
+    throw new Error('SQLite contains an invalid ANN vector')
+  return {
+    annKey: safeAnnInteger(row.ann_key, 'ANN key'),
+    memoryId: stringField(row.memory_id),
+    model: stringField(row.model),
+    vector,
+  }
+}
+
+function annWorkerParams(dimensions: number) {
+  if (!Number.isInteger(dimensions) || dimensions <= 0)
+    throw new Error('ANN dimensions must be a positive integer')
+  const indexRoot = join(app.getPath('userData'), 'lumi-memory-ann')
+  mkdirSync(indexRoot, { recursive: true })
+  const modelDigest = createHash('sha256').update(LUMI_MEMORY_EMBEDDING_MODEL).digest('hex').slice(0, 16)
+  return {
+    path: join(indexRoot, `${modelDigest}-${dimensions}.usearch`),
+    model: LUMI_MEMORY_EMBEDDING_MODEL,
+    dimensions,
+  }
+}
+
+async function openDesktopAnn(dimensions: number) {
+  return updateDesktopAnnStatus(parseAnnIndexStatus(await requestVectorWorker('ann_open', annWorkerParams(dimensions))))
+}
+
+async function rebuildDesktopAnn(db: SqliteDatabase) {
+  const head = desktopAnnHead(db)
+  if (head.dimensions <= 0)
+    throw new Error('Cannot rebuild an ANN index without vectors')
+  const params = annWorkerParams(head.dimensions)
+  await requestVectorWorker('ann_rebuild_begin', params)
+  try {
+    let afterMemoryId = ''
+    let added = 0
+    while (true) {
+      const batch = desktopAnnRecords(db, afterMemoryId)
+      if (batch.length === 0)
+        break
+      await requestVectorWorker('ann_rebuild_add', {
+        ...params,
+        keys: batch.map(record => record.annKey),
+        vectors: batch.map(record => record.vector),
+      })
+      added += batch.length
+      afterMemoryId = batch.at(-1)!.memoryId
+      if (batch.length < 512)
+        break
+    }
+    if (added !== head.count)
+      throw new Error('Authoritative vectors changed during ANN rebuild')
+    return updateDesktopAnnStatus(parseAnnIndexStatus(await requestVectorWorker('ann_rebuild_commit', {
+      ...params,
+      sequence: head.sequence,
+    })))
+  }
+  catch (error) {
+    await requestVectorWorker('ann_rebuild_abort', params).catch(() => undefined)
+    throw error
+  }
+}
+
+async function applyDesktopAnnChanges(dimensions: number, changes: DesktopMemoryAnnChangeBatch) {
+  return updateDesktopAnnStatus(parseAnnIndexStatus(await requestVectorWorker('ann_apply', {
+    ...annWorkerParams(dimensions),
+    keys: changes.upserts.map(record => record.annKey),
+    vectors: changes.upserts.map(record => record.vector),
+    removeKeys: changes.removeKeys,
+    sequence: changes.sequence,
+  })))
+}
+
+async function searchDesktopAnn(dimensions: number, vector: number[], count: number) {
+  const result = parseAnnSearchResult(await requestVectorWorker('ann_search', {
+    ...annWorkerParams(dimensions),
+    vector,
+    count,
+  }))
+  updateDesktopAnnStatus(result)
+  return result
+}
+
+async function synchronizeDesktopAnn(db: SqliteDatabase, allowRebuild: boolean): Promise<boolean> {
+  if (vectorAnnSynchronization) {
+    const ready = await vectorAnnSynchronization
+    if (ready || !allowRebuild)
+      return ready
+  }
+  vectorAnnSynchronization = synchronizeDesktopAnnInternal(db, allowRebuild).finally(() => {
+    vectorAnnSynchronization = undefined
+  })
+  return await vectorAnnSynchronization
+}
+
+async function synchronizeDesktopAnnInternal(db: SqliteDatabase, allowRebuild: boolean) {
+  let head = desktopAnnHead(db)
+  if (head.count === 0 || head.dimensions === 0)
+    return false
+  let status = await openDesktopAnn(head.dimensions)
+  if (!status.ready) {
+    if (!allowRebuild)
+      return false
+    status = await rebuildDesktopAnn(db)
+    head = desktopAnnHead(db)
+  }
+  if (status.sequence > head.sequence || status.dimensions !== head.dimensions) {
+    if (!allowRebuild)
+      return false
+    status = await rebuildDesktopAnn(db)
+    head = desktopAnnHead(db)
+  }
+  let processed = 0
+  while (true) {
+    head = desktopAnnHead(db)
+    if (status.sequence >= head.sequence)
+      break
+    const changes = desktopAnnChanges(db, status.sequence)
+    if (changes.sequence === status.sequence || (processed >= 2_000 && changes.hasMore)) {
+      if (!allowRebuild)
+        return false
+      status = await rebuildDesktopAnn(db)
+      head = desktopAnnHead(db)
+      break
+    }
+    status = await applyDesktopAnnChanges(head.dimensions, changes)
+    processed += changes.upserts.length + changes.removeKeys.length
+  }
+  head = desktopAnnHead(db)
+  if (status.count !== head.count) {
+    if (!allowRebuild)
+      return false
+    status = await rebuildDesktopAnn(db)
+    head = desktopAnnHead(db)
+  }
+  return status.ready && status.sequence === head.sequence && status.count === head.count
+}
+
+function updateDesktopAnnStatus(status: LumiAnnIndexStatus) {
+  vectorAnnReady = status.ready
+  vectorAnnCount = status.count
+  vectorAnnDimensions = status.dimensions
+  vectorAnnSequence = status.sequence
+  vectorAnnReason = status.reason ?? ''
+  return status
 }
 
 async function embedTexts(texts: string[]): Promise<number[][]> {
@@ -1610,6 +2036,60 @@ function numberOrUndefined(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+function parseAnnIndexStatus(value: unknown): LumiAnnIndexStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Vector worker returned an invalid ANN status')
+  const record = value as Record<string, unknown>
+  return {
+    ready: record.ready === true,
+    needsRebuild: record.needsRebuild === true,
+    model: typeof record.model === 'string' ? record.model : '',
+    dimensions: safeAnnInteger(record.dimensions, 'ANN dimensions'),
+    sequence: safeAnnInteger(record.sequence, 'ANN sequence'),
+    count: safeAnnInteger(record.count, 'ANN count'),
+    reason: typeof record.reason === 'string' ? record.reason : undefined,
+  }
+}
+
+function parseAnnSearchResult(value: unknown): LumiAnnSearchResult {
+  const status = parseAnnIndexStatus(value)
+  const record = value as Record<string, unknown>
+  if (!Array.isArray(record.keys) || !Array.isArray(record.scores) || record.keys.length !== record.scores.length)
+    throw new Error('Vector worker returned invalid ANN matches')
+  return {
+    ...status,
+    keys: record.keys.map(value => safeAnnInteger(value, 'ANN key')),
+    scores: record.scores.map((value) => {
+      if (typeof value !== 'number' || !Number.isFinite(value))
+        throw new Error('Vector worker returned a non-finite ANN score')
+      return value
+    }),
+  }
+}
+
+function safeAnnInteger(value: unknown, field: string) {
+  const number = Number(value)
+  if (!Number.isSafeInteger(number) || number < 0)
+    throw new Error(`${field} must be a non-negative safe integer`)
+  return number
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
+  }
+  finally {
+    if (timer)
+      clearTimeout(timer)
+  }
+}
+
 async function saveEvent(userId: string, event: Record<string, any>) {
   const { db } = await getDatabase()
   saveEventWithDb(db, userId, event)
@@ -1892,6 +2372,10 @@ function parseJsonNumberArray(value: unknown) {
 }
 
 function memoryVectorSignature(memory: Record<string, any>) {
+  return createHash('sha256').update(memoryVectorSignatureSource(memory)).digest('hex')
+}
+
+function memoryVectorSignatureSource(memory: Record<string, any>) {
   const normalized = rowLikeMemory(memory)
   return [
     normalized.updatedAt,
@@ -1915,23 +2399,8 @@ function normalizeEmbeddingText(text: string) {
   return text.replace(/\s+/g, ' ').trim()
 }
 
-function normalizeVector(vector: number[]) {
-  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1
-  return vector.map(value => value / norm)
-}
-
 function isFiniteVector(vector: unknown): vector is number[] {
   return Array.isArray(vector) && vector.length > 0 && vector.every(value => typeof value === 'number' && Number.isFinite(value))
-}
-
-function cosineSimilarity(leftInput: number[], rightInput: number[]) {
-  const left = normalizeVector(leftInput)
-  const right = normalizeVector(rightInput)
-  let dot = 0
-  const length = Math.min(left.length, right.length)
-  for (let index = 0; index < length; index += 1)
-    dot += left[index] * right[index]
-  return Math.max(0, Math.min(1, dot))
 }
 
 function previewText(text: string, maxLength: number) {

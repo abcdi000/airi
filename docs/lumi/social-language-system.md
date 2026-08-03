@@ -162,7 +162,7 @@ pnpm run lumi:language-replay
 
 ## 已知限制
 
-- 桌面和服务器都可复用常驻 Python embedding Worker；桌面认知召回会合并 FTS/词法和语义候选，社会语言选择也可接收同一宿主 embedding。当前持久向量检索仍在有限 SQLite 向量候选上执行 JSON 余弦扫描，尚未替换为可扩展 ANN 索引。
+- 桌面和服务器都复用常驻 Python embedding Worker；认知召回会合并 FTS/词法和 USearch 2.26.0 HNSW 语义候选，社会语言选择也可接收同一宿主 embedding。SQLite 继续保存向量正文和权限，USearch 只保存数值键与向量；ANN 候选回到 SQLite 重新校验 ACL、有效期、supersession 和内容摘要。索引缺失、损坏或不可用时自动重建或降级为词法召回。
 - 多消息在共享核心中以空行持久化，桌面与 AstrBot 已按现有拆分逻辑发送多气泡；`delayMs` 和 `quoteMessageId` 尚未在所有远端平台完整保真。
 - Validator 是确定性保护层，不是形式化语义证明。高风险隐私仍以数据库授权投影和 Planner 的 immutable constraints 为第一防线。
 

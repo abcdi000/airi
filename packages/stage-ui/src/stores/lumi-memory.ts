@@ -34,8 +34,8 @@ const LUMI_SEMANTIC_COLD_SEARCH_TIMEOUT_MS = 8_000
 const LUMI_SEMANTIC_PREWARM_TIMEOUT_MS = 1_800_000
 const LUMI_SEMANTIC_MEMORY_LIMIT = 800
 const LUMI_SEMANTIC_INTERACTIVE_MEMORY_LIMIT = 160
-const LUMI_MEMORY_VECTOR_CACHE_LIMIT = 5000
-const LUMI_SEMANTIC_INDEX_LIMIT = LUMI_MEMORY_VECTOR_CACHE_LIMIT
+const LUMI_SEMANTIC_BACKFILL_PAGE_SIZE = 256
+const LUMI_RENDERER_VECTOR_FALLBACK_CACHE_LIMIT = 5000
 
 type LumiSemanticDevice = 'backend' | 'unknown'
 
@@ -140,6 +140,11 @@ export interface LumiMemoryBackendVectorStatus {
   indexedCount: number
   totalCount: number
   missingCount: number
+  annReady: boolean
+  annCount: number
+  annDimensions: number
+  annSequence: number
+  annReason?: string
   downloadPercent?: number
   downloadedBytes?: number
   downloadTotalBytes?: number
@@ -157,7 +162,7 @@ export interface LumiMemoryPersistenceBridge {
   upsertVector?: (record: LumiMemoryVectorRecord) => Promise<void>
   deleteVector?: (payload: { memoryId: string, model?: string }) => Promise<void>
   vectorStatus?: (payload: { userId: string }) => Promise<LumiMemoryBackendVectorStatus>
-  backfillVectors?: (payload: { userId: string, limit?: number }) => Promise<LumiMemoryBackendVectorStatus>
+  backfillVectors?: (payload: { userId: string, pageSize?: number }) => Promise<LumiMemoryBackendVectorStatus>
   searchVectors?: (payload: { userId: string, query: string, limit?: number }) => Promise<{ scores: Record<string, number>, status: LumiMemoryBackendVectorStatus }>
   syncVector?: (memory: LumiMemoryFragment) => Promise<LumiMemoryBackendVectorStatus>
   saveEvent: (payload: { userId: string, event: LumiMemoryEvent }) => Promise<void>
@@ -194,6 +199,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
   const semanticDownloadPercent = ref<number | null>(null)
   const semanticIndexedCount = ref(0)
   const semanticSearchPoolSize = ref(0)
+  const semanticBackendStatus = shallowRef<LumiMemoryBackendVectorStatus | null>(null)
   const detachedSnapshots = new Map<string, LumiMemoryPersistenceSnapshot>()
   const detachedLoadPromises = new Map<string, Promise<LumiMemoryPersistenceSnapshot>>()
   const detachedWriteQueues = new Map<string, Promise<void>>()
@@ -365,6 +371,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     semanticIndexStatus.value = 'idle'
     semanticIndexedCount.value = 0
     semanticSearchPoolSize.value = 0
+    semanticBackendStatus.value = null
     semanticPrewarmPromise = null
     persistenceInitPromise = null
     persistenceReady.value = false
@@ -438,7 +445,6 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
           resultCount: result.rankedMemories.length,
           preview: result.rankedMemories[0]?.memory.content,
         })
-        semanticIndexError.value = backendResult.status.lastError ?? ''
         return result
       }
 
@@ -470,7 +476,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     }
   }
 
-  async function prewarmSemanticIndex(limit = LUMI_SEMANTIC_INDEX_LIMIT) {
+  async function prewarmSemanticIndex(pageSize = LUMI_SEMANTIC_BACKFILL_PAGE_SIZE) {
     initialize()
     if (semanticPrewarmPromise)
       return semanticPrewarmPromise
@@ -484,7 +490,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
           semanticIndexDevice.value = 'backend'
           semanticIndexProgress.value = '正在请求后端补向量'
           const status = await pollBackendVectorProgress(
-            bridge.backfillVectors({ userId: currentUserId(), limit }),
+            bridge.backfillVectors({ userId: currentUserId(), pageSize }),
             'Lumi backend semantic memory index prewarm',
           )
           applyBackendVectorStatus(status)
@@ -495,11 +501,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
           semanticIndexDevice.value = 'unknown'
           semanticIndexError.value = '后端向量桥未连接，桌面端不再使用前端 WASM 向量模型。'
           semanticIndexProgress.value = semanticIndexError.value
-          return
         }
-        semanticIndexReady.value = true
-        semanticIndexStatus.value = 'ready'
-        semanticIndexError.value = ''
       }
       catch (error) {
         semanticIndexReady.value = false
@@ -953,6 +955,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     semanticDownloadPercent.value = null
     semanticIndexedCount.value = 0
     semanticSearchPoolSize.value = 0
+    semanticBackendStatus.value = null
     persistenceReady.value = false
     persistenceInitPromise = null
     void persistenceBridge.value?.clear({ userId: currentUserId() }).catch(error => console.warn('[lumi-memory] failed to clear SQLite persistence', error))
@@ -1025,6 +1028,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     semanticMemoryVectors.clear()
     semanticIndexReady.value = false
     semanticIndexedCount.value = 0
+    semanticBackendStatus.value = null
     await loadPersistedSemanticVectors()
   }
 
@@ -1071,7 +1075,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
         })
         loaded += 1
       }
-      pruneMap(semanticMemoryVectors, LUMI_MEMORY_VECTOR_CACHE_LIMIT)
+      pruneMap(semanticMemoryVectors, LUMI_RENDERER_VECTOR_FALLBACK_CACHE_LIMIT)
       semanticIndexedCount.value = semanticMemoryVectors.size
       semanticIndexDevice.value = 'backend'
       semanticIndexProgress.value = loaded
@@ -1119,20 +1123,49 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
   }
 
   function applyBackendVectorStatus(status: LumiMemoryBackendVectorStatus) {
-    semanticIndexDevice.value = status.device === 'unknown' ? 'backend' : 'backend'
+    semanticBackendStatus.value = { ...status }
+    semanticIndexDevice.value = 'backend'
     semanticIndexedCount.value = status.indexedCount
     semanticSearchPoolSize.value = status.totalCount
     semanticIndexProgress.value = status.progress || `后端向量 ${status.indexedCount}/${status.totalCount} · ${status.device}`
-    semanticIndexError.value = status.lastError ?? ''
+    semanticIndexError.value = status.lastError ?? status.annReason ?? ''
     semanticDownloadPercent.value = status.downloadPercent == null
       ? (status.phase === 'downloading' || status.phase === 'checking_cache' || status.phase === 'loading_model' ? 35 : null)
       : Math.max(0, Math.min(100, status.downloadPercent))
-    semanticIndexReady.value = status.totalCount > 0 && status.missingCount === 0
-    semanticIndexStatus.value = status.lastError
+    semanticIndexReady.value = status.available && status.totalCount > 0 && status.missingCount === 0 && status.annReady
+    semanticIndexStatus.value = status.lastError || !status.available
       ? 'fallback'
       : status.missingCount > 0
         ? 'loading'
-        : 'ready'
+        : status.totalCount === 0
+          ? 'idle'
+          : status.annReady
+            ? 'ready'
+            : 'fallback'
+  }
+
+  async function refreshSemanticIndexStatus(): Promise<LumiMemoryBackendVectorStatus | null> {
+    const bridge = persistenceBridge.value
+    if (!bridge?.vectorStatus) {
+      semanticBackendStatus.value = null
+      semanticIndexReady.value = false
+      semanticIndexStatus.value = 'fallback'
+      semanticIndexError.value = '后端向量状态接口未连接。'
+      semanticIndexProgress.value = semanticIndexError.value
+      return null
+    }
+    try {
+      const status = await bridge.vectorStatus({ userId: currentUserId() })
+      applyBackendVectorStatus(status)
+      return status
+    }
+    catch (error) {
+      semanticIndexReady.value = false
+      semanticIndexStatus.value = 'fallback'
+      semanticIndexError.value = errorMessageFrom(error) ?? String(error)
+      semanticIndexProgress.value = `刷新后端向量状态失败: ${semanticIndexError.value}`
+      throw error
+    }
   }
 
   async function pollBackendVectorProgress<T extends LumiMemoryBackendVectorStatus>(
@@ -1147,7 +1180,7 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
       void bridge?.vectorStatus?.({ userId: currentUserId() })
         .then(status => applyBackendVectorStatus(status))
         .catch((error) => {
-          semanticIndexProgress.value = `${label}: 閻樿埖鈧礁鍩涢弬鏉裤亼鐠? ${errorMessageFrom(error) ?? String(error)}`
+          semanticIndexProgress.value = `${label}: 刷新进度失败: ${errorMessageFrom(error) ?? String(error)}`
         })
     }, 1000)
 
@@ -1236,11 +1269,13 @@ export const useLumiMemoryStore = defineStore('lumi-memory', () => {
     semanticDownloadPercent,
     semanticIndexedCount,
     semanticSearchPoolSize,
+    semanticBackendStatus,
 
     initialize,
     initializePersistence,
     reloadForActiveUser,
     prewarmSemanticIndex,
+    refreshSemanticIndexStatus,
     setPersistenceBridge,
     resetToMigratedSnapshot,
     search,

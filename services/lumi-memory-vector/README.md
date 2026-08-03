@@ -2,9 +2,10 @@
 
 This is AIRI's local semantic memory embedding worker for Lumi.
 
-It intentionally does not own Lumi's memory database. Electron keeps memories and
-vectors in SQLite, while this Python worker only keeps the embedding model warm
-and converts text into normalized vectors.
+It intentionally does not own Lumi's memory database. Electron and Lumi Server
+keep memories, vectors, provenance, lifecycle, and ACL metadata in SQLite. This
+Python worker keeps the embedding model warm and maintains a disposable USearch
+HNSW projection containing only numeric ANN keys and normalized vectors.
 
 Default model:
 
@@ -26,6 +27,18 @@ $env:LUMI_MEMORY_VECTOR_PYTHON="D:\anaconda3\envs\airi\python.exe"
 
 The worker is started by the Electron main process on first vector use and stays
 alive until AIRI exits.
+
+USearch 2.26.0 maintains the disposable persistent HNSW index. Rebuilds use a
+temporary index and atomic replacement; incremental upserts and removals are
+persisted with a model/dimension/revision manifest. Missing, stale, or corrupt
+indexes are rebuilt from SQLite. Every search candidate is resolved back through
+SQLite before it can enter Lumi's cognitive context.
+
+Run the worker regression tests with:
+
+```powershell
+python -m unittest services/lumi-memory-vector/test_server.py
+```
 
 ## Windows packaged runtime
 

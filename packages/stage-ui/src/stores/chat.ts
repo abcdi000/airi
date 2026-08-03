@@ -480,18 +480,20 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       && Boolean(interaction.actorId)
       && !options.hiddenUserMessage
     if (sharedRuntimeEligible && interaction) {
+      const runtimeUserText = options.agentUserText?.trim() || sendingMessage
       const mode = lumiAgentRuntimeSettingsStore.mode
       if (mode === 'maisaka') {
         sending.value = true
         const startedAt = performance.now()
         try {
           await prepareLumiRelationshipAssessment(
-            sendingMessage,
+            runtimeUserText,
             chatSession.getSessionMessages(sessionId),
             interaction,
           )
           const turnResult = await desktopLumiAgentHost.ingest({
-            text: sendingMessage,
+            text: runtimeUserText,
+            visibleText: sendingMessage,
             sessionId,
             interaction,
             runtimeConfig: lumiAgentRuntimeSettingsStore.runtimeConfig(),
@@ -541,7 +543,8 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       }
       if (mode === 'shadow') {
         void desktopLumiAgentHost.ingest({
-          text: sendingMessage,
+          text: runtimeUserText,
+          visibleText: sendingMessage,
           sessionId,
           interaction,
           runtimeConfig: lumiAgentRuntimeSettingsStore.runtimeConfig(),

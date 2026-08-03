@@ -538,6 +538,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
 
     const ordered: Array<Record<string, unknown>> = []
     const displayTextSegments: string[] = []
+    const agentTextSegments: string[] = []
     const attachments: Array<{ type: 'image', data: string, mimeType: string }> = []
     for (const segment of perception.segments) {
       if (segment.type === 'text') {
@@ -545,6 +546,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
           continue
         ordered.push({ type: 'text', text: segment.text, metadata: segment.metadata ?? {} })
         displayTextSegments.push(segment.text)
+        agentTextSegments.push(`[用户文字]\n${segment.text}`)
         continue
       }
 
@@ -584,6 +586,8 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
           perception: result.results[0],
           metadata: segment.metadata ?? {},
         })
+        const visualText = result.contextText?.trim() || JSON.stringify(result.results[0])
+        agentTextSegments.push(`[Lumi 视觉感知]\n${visualText}`)
         continue
       }
 
@@ -609,6 +613,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
         )
       }
       displayTextSegments.push(transcript.trim())
+      agentTextSegments.push(`[Lumi 听觉感知]\n${transcript.trim()}`)
       ordered.push({
         type: 'auditory_perception',
         transcript: transcript.trim(),
@@ -622,6 +627,11 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
     return {
       attachments,
       displayText: displayTextSegments.join('\n').trim(),
+      agentUserText: [
+        '[Lumi 当前轮统一感知]',
+        ...agentTextSegments,
+        '[/Lumi 当前轮统一感知]',
+      ].join('\n'),
       providerContext: [
         '[Lumi trusted ordered perception]',
         JSON.stringify(ordered),
@@ -1354,6 +1364,7 @@ export const useContextBridgeStore = defineStore('mods:api:context-bridge', () =
                 chatProvider,
                 attachments: externalPerception?.attachments,
                 providerUserContext: externalPerception?.providerContext,
+                agentUserText: externalPerception?.agentUserText,
                 sendAttachmentsToProvider: externalPerception ? false : undefined,
                 input: {
                   type: 'input:text',

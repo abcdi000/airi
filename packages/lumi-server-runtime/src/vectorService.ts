@@ -2,15 +2,24 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 
 import type { LumiMemoryFragment, LumiMemorySearchRequest } from '@proj-airi/lumi-runtime'
 
-import type { LumiMemoryVectorStatus, LumiServerDatabase } from './database'
+import type {
+  LumiMemoryAnnChangeBatch,
+  LumiMemoryAnnHead,
+  LumiMemoryAnnRecord,
+  LumiMemoryVectorStatus,
+  LumiServerDatabase,
+} from './database'
 
 import process from 'node:process'
 
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
+
+import { errorMessageFrom } from '@moeru/std'
+import { LumiQueryEmbeddingCache } from '@proj-airi/lumi-runtime'
 
 export const DEFAULT_LUMI_MEMORY_EMBEDDING_MODEL = 'BAAI/bge-small-zh-v1.5'
 
@@ -22,6 +31,11 @@ export interface LumiVectorWorkerStatus {
   progress?: string
   lastError?: string
   downloadPercent?: number
+  annReady?: boolean
+  annCount?: number
+  annDimensions?: number
+  annSequence?: number
+  annReason?: string
 }
 
 export interface LumiVectorWorkerOptions {
@@ -30,6 +44,7 @@ export interface LumiVectorWorkerOptions {
   /** Arguments placed before the worker script, for example `conda run ... python`. */
   pythonArguments?: string[]
   modelCacheRoot: string
+  annIndexRoot: string
   bundledModelCacheRoot?: string
   model?: string
   device?: 'auto' | 'cpu' | 'cuda' | 'mps'
@@ -101,6 +116,76 @@ export class LumiVectorWorker {
     return result.vectors
   }
 
+  async openAnnIndex(dimensions: number): Promise<AnnIndexStatus> {
+    return this.updateAnnStatus(parseAnnIndexStatus(await this.request('ann_open', this.annParams(dimensions))))
+  }
+
+  async rebuildAnnIndex(
+    head: LumiMemoryAnnHead,
+    readPage: (afterMemoryId: string, limit: number) => LumiMemoryAnnRecord[],
+  ): Promise<AnnIndexStatus> {
+    if (head.dimensions <= 0)
+      throw new Error('Cannot rebuild an ANN index without vector dimensions')
+    const params = this.annParams(head.dimensions)
+    await this.request('ann_rebuild_begin', params)
+    try {
+      let afterMemoryId = ''
+      let added = 0
+      while (true) {
+        const batch = readPage(afterMemoryId, 512)
+        if (batch.length === 0)
+          break
+        await this.request('ann_rebuild_add', {
+          ...params,
+          keys: batch.map(record => record.annKey),
+          vectors: batch.map(record => record.vector),
+        })
+        added += batch.length
+        afterMemoryId = batch.at(-1)!.memoryId
+        if (batch.length < 512)
+          break
+      }
+      if (added !== head.count)
+        throw new Error('Authoritative vectors changed during ANN rebuild')
+      return this.updateAnnStatus(parseAnnIndexStatus(await this.request('ann_rebuild_commit', {
+        ...params,
+        sequence: head.sequence,
+      })))
+    }
+    catch (error) {
+      await this.request('ann_rebuild_abort', params).catch(() => undefined)
+      throw error
+    }
+  }
+
+  async applyAnnChanges(dimensions: number, changes: LumiMemoryAnnChangeBatch): Promise<AnnIndexStatus> {
+    return this.updateAnnStatus(parseAnnIndexStatus(await this.request('ann_apply', {
+      ...this.annParams(dimensions),
+      keys: changes.upserts.map(record => record.annKey),
+      vectors: changes.upserts.map(record => record.vector),
+      removeKeys: changes.removeKeys,
+      sequence: changes.sequence,
+    })))
+  }
+
+  async searchAnnIndex(dimensions: number, vector: number[], count: number): Promise<AnnSearchResult> {
+    const result = parseAnnSearchResult(await this.request('ann_search', {
+      ...this.annParams(dimensions),
+      vector,
+      count,
+    }))
+    this.updateAnnStatus(result)
+    return result
+  }
+
+  noteAnnFailure(error: unknown): void {
+    this.state = {
+      ...this.state,
+      annReady: false,
+      annReason: errorMessageFrom(error) ?? 'Unknown ANN failure',
+    }
+  }
+
   async stop(): Promise<void> {
     this.stopping = true
     const child = this.child
@@ -124,6 +209,30 @@ export class LumiVectorWorker {
       })
     })
     this.state.running = false
+  }
+
+  private annParams(dimensions: number) {
+    if (!Number.isInteger(dimensions) || dimensions <= 0)
+      throw new Error('ANN dimensions must be a positive integer')
+    mkdirSync(this.options.annIndexRoot, { recursive: true })
+    const modelDigest = createHash('sha256').update(this.state.model).digest('hex').slice(0, 16)
+    return {
+      path: join(this.options.annIndexRoot, `${modelDigest}-${dimensions}.usearch`),
+      model: this.state.model,
+      dimensions,
+    }
+  }
+
+  private updateAnnStatus(status: AnnIndexStatus): AnnIndexStatus {
+    this.state = {
+      ...this.state,
+      annReady: status.ready,
+      annCount: status.count,
+      annDimensions: status.dimensions,
+      annSequence: status.sequence,
+      annReason: status.reason,
+    }
+    return status
   }
 
   private async request(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -265,6 +374,9 @@ export class LumiVectorWorker {
 
 /** Runs semantic memory indexing and search against server-authorized projections. */
 export class LumiServerVectorService {
+  private readonly queryEmbeddings = new LumiQueryEmbeddingCache()
+  private annSynchronization?: Promise<boolean>
+
   constructor(
     private readonly database: LumiServerDatabase,
     private readonly worker: LumiVectorWorker,
@@ -291,57 +403,165 @@ export class LumiServerVectorService {
     return await this.worker.embed(texts)
   }
 
-  async backfill(limit = 2_000): Promise<LumiMemoryVectorStatus & LumiVectorWorkerStatus> {
+  async backfill(limit = 100_000): Promise<LumiMemoryVectorStatus & LumiVectorWorkerStatus> {
     const model = this.worker.status().model
-    const memories = this.database.listMemoryVectorCandidates(model, limit)
-    const existing = new Map(this.database.memoryVectors(memories.map(memory => memory.id), model).map(vector => [vector.memoryId, vector]))
-    const missing = memories.filter(memory => existing.get(memory.id)?.contentDigest !== memoryVectorDigest(memory))
-    for (let index = 0; index < missing.length; index += 32) {
-      const batch = missing.slice(index, index + 32)
-      const vectors = await this.worker.embed(batch.map(memoryVectorText))
-      for (let offset = 0; offset < batch.length; offset += 1) {
-        const memory = batch[offset]
-        const vector = vectors[offset]
-        if (!memory || !vector)
-          throw new Error('Vector worker returned an incomplete batch')
-        this.database.upsertMemoryVector({
-          memoryId: memory.id,
-          model,
-          dimensions: vector.length,
-          vector,
-          contentDigest: memoryVectorDigest(memory),
-          device: this.worker.status().device,
-          updatedAt: Date.now(),
-        })
+    if (!Number.isInteger(limit) || limit < 1)
+      throw new Error('Vector backfill limit must be a positive integer')
+    let scanned = 0
+    let offset = 0
+    while (scanned < limit) {
+      const page = this.database.listMemoryVectorCandidates(model, Math.min(2_000, limit - scanned), offset)
+      if (page.length === 0)
+        break
+      const existing = new Map(this.database.memoryVectors(page.map(memory => memory.id), model).map(vector => [vector.memoryId, vector]))
+      const missing = page.filter(memory => existing.get(memory.id)?.contentDigest !== memoryVectorDigest(memory))
+      for (let index = 0; index < missing.length; index += 32) {
+        const batch = missing.slice(index, index + 32)
+        const vectors = await this.worker.embed(batch.map(memoryVectorText))
+        for (let batchOffset = 0; batchOffset < batch.length; batchOffset += 1) {
+          const memory = batch[batchOffset]
+          const vector = vectors[batchOffset]
+          if (!memory || !vector)
+            throw new Error('Vector worker returned an incomplete batch')
+          this.database.upsertMemoryVector({
+            memoryId: memory.id,
+            model,
+            dimensions: vector.length,
+            vector,
+            contentDigest: memoryVectorDigest(memory),
+            device: this.worker.status().device,
+            updatedAt: Date.now(),
+          })
+        }
       }
+      scanned += page.length
+      offset += page.length
+      if (page.length < 2_000)
+        break
     }
+    await this.synchronizeAnn(true)
     return this.status()
   }
 
   async search(request: LumiMemorySearchRequest, limit = 80): Promise<LumiMemoryFragment[]> {
-    const candidates = this.database.listAccessibleMemories(request, Math.min(500, Math.max(limit * 5, limit)))
-    if (candidates.length === 0)
+    const head = this.database.memoryAnnHead(this.worker.status().model)
+    if (head.count === 0 || head.dimensions === 0)
       return []
-    const [queryVector] = await this.worker.embed([request.query])
-    if (!queryVector)
-      return candidates.slice(0, limit)
-    const vectors = this.database.memoryVectors(candidates.map(memory => memory.id), this.worker.status().model)
-    const byId = new Map(vectors.map(vector => [vector.memoryId, vector]))
-    return candidates
-      .map(memory => ({
-        memory,
-        score: byId.get(memory.id)?.contentDigest === memoryVectorDigest(memory)
-          ? cosineSimilarity(queryVector, byId.get(memory.id)!.vector)
-          : -1,
-      }))
-      .sort((left, right) => right.score - left.score || right.memory.importance - left.memory.importance)
-      .slice(0, limit)
-      .map(item => item.memory)
+    try {
+      const ready = await withTimeout(this.synchronizeAnn(false), 4_000, 'ANN synchronization')
+      if (!ready)
+        return []
+      const queryVector = await withTimeout(this.queryEmbeddings.resolve(
+        this.worker.status().model,
+        request.query,
+        async () => {
+          const [vector] = await this.worker.embed([request.query])
+          if (!vector)
+            throw new Error('Vector worker returned no query embedding')
+          return vector
+        },
+      ), 4_000, 'query embedding')
+      const matches = await withTimeout(this.worker.searchAnnIndex(
+        head.dimensions,
+        queryVector,
+        Math.min(2_000, Math.max(1_024, limit * 32)),
+      ), 4_000, 'ANN search')
+      const authorized = this.database.authorizedMemoriesForAnn(request, this.worker.status().model, matches.keys)
+      const byKey = new Map(authorized.map(item => [item.annKey, item]))
+      return matches.keys
+        .map((annKey, index) => ({ item: byKey.get(annKey), score: matches.scores[index] ?? -1 }))
+        .flatMap(entry => entry.item && entry.item.contentDigest === memoryVectorDigest(entry.item.memory)
+          ? [{ item: entry.item, score: entry.score }]
+          : [])
+        .sort((left, right) => right.score - left.score)
+        .slice(0, limit)
+        .map(entry => entry.item.memory)
+    }
+    catch (error) {
+      this.worker.noteAnnFailure(error)
+      return []
+    }
   }
 
   async stop() {
+    this.queryEmbeddings.clear()
     await this.worker.stop()
   }
+
+  private async synchronizeAnn(allowRebuild: boolean): Promise<boolean> {
+    this.annSynchronization ??= this.synchronizeAnnInternal(allowRebuild).finally(() => {
+      this.annSynchronization = undefined
+    })
+    return await this.annSynchronization
+  }
+
+  private async synchronizeAnnInternal(allowRebuild: boolean): Promise<boolean> {
+    const model = this.worker.status().model
+    let head = this.database.memoryAnnHead(model)
+    const rebuild = () => {
+      const rebuildHead = this.database.memoryAnnHead(model)
+      return this.worker.rebuildAnnIndex(
+        rebuildHead,
+        (afterMemoryId, limit) => this.database.memoryAnnRecords(model, afterMemoryId, limit),
+      )
+    }
+    if (head.count === 0 || head.dimensions === 0)
+      return false
+    let status = await this.worker.openAnnIndex(head.dimensions)
+    if (!status.ready) {
+      if (!allowRebuild)
+        return false
+      status = await rebuild()
+      head = this.database.memoryAnnHead(model)
+    }
+    if (status.sequence > head.sequence || status.dimensions !== head.dimensions) {
+      if (!allowRebuild)
+        return false
+      status = await rebuild()
+      head = this.database.memoryAnnHead(model)
+    }
+
+    let processedChanges = 0
+    while (true) {
+      head = this.database.memoryAnnHead(model)
+      if (status.sequence >= head.sequence)
+        break
+      const changes = this.database.memoryAnnChanges(model, status.sequence)
+      if (changes.sequence === status.sequence || (processedChanges >= 2_000 && changes.hasMore)) {
+        if (!allowRebuild)
+          return false
+        status = await rebuild()
+        head = this.database.memoryAnnHead(model)
+        break
+      }
+      status = await this.worker.applyAnnChanges(head.dimensions, changes)
+      processedChanges += changes.upserts.length + changes.removeKeys.length
+    }
+
+    head = this.database.memoryAnnHead(model)
+    if (status.count !== head.count) {
+      if (!allowRebuild)
+        return false
+      status = await rebuild()
+      head = this.database.memoryAnnHead(model)
+    }
+    return status.ready && status.sequence === head.sequence && status.count === head.count
+  }
+}
+
+interface AnnIndexStatus {
+  ready: boolean
+  needsRebuild: boolean
+  model: string
+  dimensions: number
+  sequence: number
+  count: number
+  reason?: string
+}
+
+interface AnnSearchResult extends AnnIndexStatus {
+  keys: number[]
+  scores: number[]
 }
 
 export function memoryVectorText(memory: LumiMemoryFragment): string {
@@ -378,20 +598,59 @@ function finiteVector(value: unknown): number[] {
   return value
 }
 
-function cosineSimilarity(left: number[], right: number[]) {
-  if (left.length !== right.length)
-    return -1
-  let dot = 0
-  let leftNorm = 0
-  let rightNorm = 0
-  for (let index = 0; index < left.length; index += 1) {
-    dot += left[index]! * right[index]!
-    leftNorm += left[index]! ** 2
-    rightNorm += right[index]! ** 2
-  }
-  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm) || 1)
-}
-
 function finiteNumber(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function parseAnnIndexStatus(value: unknown): AnnIndexStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Vector worker returned an invalid ANN status')
+  const record = value as Record<string, unknown>
+  return {
+    ready: record.ready === true,
+    needsRebuild: record.needsRebuild === true,
+    model: typeof record.model === 'string' ? record.model : '',
+    dimensions: finiteInteger(record.dimensions, 'ANN dimensions'),
+    sequence: finiteInteger(record.sequence, 'ANN sequence'),
+    count: finiteInteger(record.count, 'ANN count'),
+    reason: typeof record.reason === 'string' ? record.reason : undefined,
+  }
+}
+
+function parseAnnSearchResult(value: unknown): AnnSearchResult {
+  const status = parseAnnIndexStatus(value)
+  const record = value as Record<string, unknown>
+  if (!Array.isArray(record.keys) || !Array.isArray(record.scores) || record.keys.length !== record.scores.length)
+    throw new Error('Vector worker returned invalid ANN matches')
+  return {
+    ...status,
+    keys: record.keys.map(value => finiteInteger(value, 'ANN key')),
+    scores: record.scores.map((value) => {
+      if (typeof value !== 'number' || !Number.isFinite(value))
+        throw new Error('Vector worker returned a non-finite ANN score')
+      return value
+    }),
+  }
+}
+
+function finiteInteger(value: unknown, field: string) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
+    throw new Error(`${field} must be a non-negative safe integer`)
+  return value
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
+  }
+  finally {
+    if (timer)
+      clearTimeout(timer)
+  }
 }

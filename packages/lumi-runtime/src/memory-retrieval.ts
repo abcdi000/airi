@@ -23,6 +23,89 @@ interface VectorMatch {
   score: number
 }
 
+/** Configuration for the bounded semantic-query embedding cache. */
+export interface LumiQueryEmbeddingCacheOptions {
+  /** Maximum number of model/query pairs retained in LRU order. @default 128 */
+  maxEntries?: number
+  /** Time before a resolved or in-flight query entry expires. @default 900000 */
+  ttlMs?: number
+  /** Monotonic-enough clock used to evaluate TTLs. @default Date.now */
+  now?: () => number
+}
+
+interface LumiQueryEmbeddingCacheEntry {
+  expiresAt: number
+  promise: Promise<readonly number[]>
+}
+
+/**
+ * Deduplicates and bounds embeddings for repeated semantic-memory queries.
+ *
+ * Use when:
+ * - Desktop and server memory search share a long-lived embedding worker
+ * - Low-information continuations reuse the same contextual recall query
+ *
+ * Expects:
+ * - The loader returns one non-empty finite vector for the requested model
+ * - Model IDs change whenever embedding compatibility changes
+ *
+ * Returns:
+ * - Defensive vector copies so callers cannot mutate cached embeddings
+ */
+export class LumiQueryEmbeddingCache {
+  private readonly entries = new Map<string, LumiQueryEmbeddingCacheEntry>()
+  private readonly maxEntries: number
+  private readonly ttlMs: number
+  private readonly now: () => number
+
+  constructor(options: LumiQueryEmbeddingCacheOptions = {}) {
+    this.maxEntries = positiveInteger(options.maxEntries, 128, 'maxEntries')
+    this.ttlMs = positiveInteger(options.ttlMs, 15 * 60 * 1000, 'ttlMs')
+    this.now = options.now ?? Date.now
+  }
+
+  async resolve(model: string, query: string, loader: () => Promise<number[]>): Promise<number[]> {
+    const key = queryEmbeddingCacheKey(model, query)
+    const now = this.now()
+    const cached = this.entries.get(key)
+    if (cached && cached.expiresAt > now) {
+      this.entries.delete(key)
+      this.entries.set(key, cached)
+      return [...await cached.promise]
+    }
+    if (cached)
+      this.entries.delete(key)
+
+    const entry: LumiQueryEmbeddingCacheEntry = {
+      expiresAt: now + this.ttlMs,
+      promise: loader().then(validateQueryEmbedding),
+    }
+    this.entries.set(key, entry)
+    this.prune()
+    try {
+      return [...await entry.promise]
+    }
+    catch (error) {
+      if (this.entries.get(key) === entry)
+        this.entries.delete(key)
+      throw error
+    }
+  }
+
+  clear(): void {
+    this.entries.clear()
+  }
+
+  private prune(): void {
+    while (this.entries.size > this.maxEntries) {
+      const oldestKey = this.entries.keys().next().value
+      if (oldestKey === undefined)
+        return
+      this.entries.delete(oldestKey)
+    }
+  }
+}
+
 /** Bounded FTS5 query plus short terms that need a LIKE fallback. */
 export interface LumiMemoryLexicalQuery {
   /** Escaped FTS5 expression suitable for a trigram index. */
@@ -644,6 +727,27 @@ function memoryRecencyScore(memory: LumiMemoryFragment, now: Date): number {
   if (ageDays <= 90)
     return 0.25
   return 0.1
+}
+
+function queryEmbeddingCacheKey(model: string, query: string): string {
+  const normalizedModel = model.trim()
+  const normalizedQuery = query.normalize('NFKC').replace(/\s+/g, ' ').trim()
+  if (!normalizedModel || !normalizedQuery)
+    throw new Error('Query embedding cache requires a model and non-empty query')
+  return `${normalizedModel}\u001F${normalizedQuery}`
+}
+
+function validateQueryEmbedding(vector: number[]): readonly number[] {
+  if (!Array.isArray(vector) || vector.length === 0 || !vector.every(value => Number.isFinite(value)))
+    throw new Error('Query embedding loader returned an invalid vector')
+  return [...vector]
+}
+
+function positiveInteger(value: number | undefined, fallback: number, field: string): number {
+  const resolved = value ?? fallback
+  if (!Number.isInteger(resolved) || resolved <= 0)
+    throw new Error(`${field} must be a positive integer`)
+  return resolved
 }
 
 function memoryValidityScore(memory: LumiMemoryFragment, now: Date): number {

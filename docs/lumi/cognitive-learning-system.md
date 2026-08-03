@@ -146,7 +146,7 @@ verified user message
 
 没有可靠结果时注入零条。`lumi_memory_search` 仍是主动深搜工具，用于精确历史追溯、更广时间范围和自动召回不足的情况。深搜和浅召回共享宿主 ACL，不允许 Planner 绕过身份边界。
 
-桌面当前使用 FTS/词法候选、常驻 Python embedding Worker 和语义候选；服务器可以复用同一 Worker 模型。SQLite 是正文、ACL、证据和生命周期权威。向量后端只应保存 memory ID 和 embedding，并在失败时降级到结构化/词法检索。当前持久向量检索仍使用有限候选上的 JSON 余弦扫描，尚未达到本项目要求的可扩展 ANN；完成替换前不能宣称第 801 条以后始终可召回。
+桌面和服务器都使用 FTS/词法候选、常驻 Python embedding Worker 与 USearch 2.26.0 持久 HNSW 索引。SQLite 是记忆正文、embedding、ACL、证据、生命周期和索引变更序列的权威；USearch 只保存碰撞安全的数值键与向量。后台回填按页扫描全部可访问记忆，不再截断到最近 800/5000 条；交互检索不会触发大规模回填。ANN 返回的候选必须回到 SQLite 重新校验身份、作用域、状态、有效期、supersession 和内容摘要，失败或超时则降级到结构化/词法检索。
 
 ## 统一上下文与 Planner / Replyer
 
@@ -182,7 +182,7 @@ Replyer 通过 `projectLumiReplyerCognitiveContext` 只看到 Planner 的结构�
 
 桌面迁移位于 `cognitiveMigration.ts`，服务器迁移位于 `database.ts`。旧画像、current state 和记忆使用 `copy -> verify -> activate`：复制成 `legacy_import`，核对数量和身份后才激活迁移标记；中断后可以继续，不破坏旧数据。
 
-认知表、长期记忆和向量记录进入完整备份。导入会验证身份、证据引用、父血缘和记录数量。ANN 索引不是正文权威；未来持久 ANN 损坏或缺失时必须从 SQLite embedding 记录重建。
+认知表、长期记忆和 SQLite 向量记录进入完整备份。导入会验证身份、证据引用、父血缘和记录数量，并为旧向量补齐确定性的 ANN key。`.usearch` 文件不进入备份，因为它不是正文权威；恢复、缺失、模型变化或索引损坏时会从 SQLite embedding 记录原子重建。
 
 用户删除按 actor 执行原子事务，删除该 actor 的证据、工作记忆、假设、反馈、画像投影、长期记忆、关联向量及旧 person state，同时保留身份绑定和消息时间线。外键会阻止删除被其他人物合法认知引用的证据，避免静默破坏跨人物来源；其他人物的数据不受影响。
 
@@ -193,6 +193,20 @@ Replyer 通过 `projectLumiReplyerCognitiveContext` 只看到 Planner 的结构�
 Prompt 日志默认关闭。关闭时审计只保存计数、状态和原因，不保存查询正文；开启后才允许在本地 Prompt 检查器中记录完整查询和认知投影。画像投影保留 belief/evidence IDs，反馈保留 target IDs，便于从 UI 或备份数据追溯变化来源。
 
 ## 调试与测试
+
+### 桌面端语义索引管理
+
+桌面端在“设置 -> 记忆与认知 -> 长期记忆”的“语义记忆索引”区域显示当前宿主返回的权威状态：
+
+- `已索引 / 总数 / 缺失` 表示 SQLite 中 embedding 与当前记忆签名的匹配情况；
+- `全局 HNSW` 表示宿主 USearch 持久索引是否已经追上 SQLite 修订序列；其条目数覆盖宿主中的全部向量，而“已索引 / 总数”按当前身份的可访问范围统计，因此多用户环境下两者不要求相等；
+- `维度 / 修订` 用于确认 embedding 维度和最后应用的数据库变更序列；
+- `Embedding 模型`、`Worker` 和设备用于定位模型未加载、CPU/CUDA 选择或 Worker 退出；
+- `服务状态` 为“词法回退”时，聊天仍可使用 FTS/词法记忆，但不会伪装成语义索引已就绪。
+
+刷新图标只重新读取状态，不生成 embedding。“补全并重建”会分页扫描当前身份可访问的全部非拒绝记忆，为缺失或已变化的记录生成 embedding，然后增量同步或原子重建 USearch。该操作在后台运行；聊天期间的交互式检索不会自行触发全量回填。
+
+正常完成时应同时满足：缺失为 `0`、全局 HNSW 显示“已同步”、Worker 为“运行中”且服务状态为“可用”。单用户数据集里 HNSW 条目数通常等于已索引数量；多用户或共享记忆环境中，全局 HNSW 条目数可以更大。若索引文件缺失、损坏、模型/维度或 USearch 版本不兼容，点击“补全并重建”即可从 SQLite 权威向量恢复，不需要删除长期记忆数据库。
 
 核心验证命令：
 
@@ -205,6 +219,7 @@ pnpm -F @proj-airi/lumi-runtime typecheck
 pnpm -F @proj-airi/lumi-server-runtime typecheck
 pnpm -F @proj-airi/stage-ui typecheck
 pnpm -F @proj-airi/stage-tamagotchi typecheck
+D:\anaconda3\python.exe -m unittest services/lumi-memory-vector/test_server.py
 ```
 
 重点回归场景包括：多用户和群聊隔离、低信息承接、assistant 指代继承、话题切换、假设 TTL/纠正/晋升、画像来源、supersession、反馈路由、备份恢复、用户删除、并发身份和 AstrBot 统一链路。

@@ -712,6 +712,7 @@ describe('context bridge contract', () => {
     const submittedText = chatOrchestratorMock.ingest.mock.calls[0]?.[0] as string
     const submittedOptions = chatOrchestratorMock.ingest.mock.calls[0]?.[1]
     const providerContext = submittedOptions?.providerUserContext as string
+    const agentUserText = submittedOptions?.agentUserText as string
     expect(submittedText).toBe('先看图片\n再听语音\n语音里说：一起玩吧。')
     expect(providerContext.indexOf('"type":"text","text":"先看图片"')).toBeLessThan(
       providerContext.indexOf('"type":"visual_perception"'),
@@ -722,6 +723,12 @@ describe('context bridge contract', () => {
     expect(providerContext.indexOf('"type":"text","text":"再听语音"')).toBeLessThan(
       providerContext.indexOf('"type":"auditory_perception"'),
     )
+    expect(agentUserText).toContain('[Lumi 当前轮统一感知]')
+    expect(agentUserText).toContain('[Lumi 视觉感知]')
+    expect(agentUserText).toContain('[Lumi 听觉感知]')
+    expect(agentUserText).not.toContain('undefined')
+    expect(agentUserText.indexOf('[用户文字]')).toBeLessThan(agentUserText.indexOf('[Lumi 视觉感知]'))
+    expect(agentUserText.indexOf('[Lumi 视觉感知]')).toBeLessThan(agentUserText.indexOf('[Lumi 听觉感知]'))
     expect(chatOrchestratorMock.ingest).toHaveBeenCalledWith(
       submittedText,
       expect.objectContaining({
@@ -732,10 +739,82 @@ describe('context bridge contract', () => {
         }],
         interaction: expect.objectContaining({ actorId: 'doggy' }),
         providerUserContext: providerContext,
+        agentUserText,
         sendAttachmentsToProvider: false,
       }),
       'lumi-direct:doggy',
     )
+
+    await store.dispose()
+  })
+
+  /**
+   * @example
+   * A pure QQ image remains meaningful to the shared Agent Runtime even when
+   * the user-visible text is empty.
+   */
+  it('projects a pure external image into non-empty Agent Runtime text', async () => {
+    // ROOT CAUSE:
+    //
+    // External vision completed successfully, but only providerUserContext
+    // received its result. The shared Agent Runtime consumed displayText,
+    // which is empty for an image-only message, so every cognitive stage saw
+    // an empty user turn.
+    //
+    // We fixed this by carrying a separate semantic agentUserText projection.
+    activeProviderRef.value = 'mock-provider'
+    activeModelRef.value = 'mock-model'
+    getProviderInstanceMock.mockResolvedValue({})
+    resolveExternalIdentityMock.mockReturnValue({ id: 'doggy', displayName: 'Doggy' })
+    ensureSessionForActorMock.mockResolvedValue('lumi-direct:doggy')
+    getInteractionContextForActorMock.mockReturnValue({
+      actorId: 'doggy',
+      actorDisplayName: 'Doggy',
+      conversationId: 'lumi-direct:doggy',
+    })
+    analyzeAttachmentsForChatMock.mockResolvedValue({
+      results: ['vision-result'],
+      errors: [],
+      contextText: '[Current-turn image context]\nImage 1: description=two people sharing ice cream',
+    })
+    const store = useContextBridgeStore()
+    await store.initialize()
+
+    await emitServerEvent('input:text', {
+      type: 'input:text',
+      source: 'plugin-module-host',
+      metadata: createMetadata('astrbot', 'local-gateway'),
+      data: {
+        text: '',
+        actor: {
+          provider: 'astrbot',
+          providerInstanceId: 'qq-main',
+          externalUserId: '1770249418',
+        },
+        perception: {
+          eventId: 'astrbot:image-only',
+          platform: 'aiocqhttp',
+          conversationId: 'qq:private:1770249418',
+          senderId: '1770249418',
+          senderName: 'Doggy',
+          isPrivate: true,
+          isGroup: false,
+          segments: [{
+            type: 'image',
+            dataBase64: 'iVBORw0KGgo=',
+            mimeType: 'image/png',
+            sizeBytes: 8,
+          }],
+        },
+      },
+    })
+
+    expect(chatOrchestratorMock.ingest).toHaveBeenCalledTimes(1)
+    expect(chatOrchestratorMock.ingest.mock.calls[0]?.[0]).toBe('')
+    expect(chatOrchestratorMock.ingest.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      agentUserText: expect.stringContaining('Image 1: description=two people sharing ice cream'),
+      sendAttachmentsToProvider: false,
+    }))
 
     await store.dispose()
   })
